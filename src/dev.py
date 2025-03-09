@@ -32,12 +32,16 @@ async def handle_dev_message(message: str) -> str:
         files_content[file_path] = file.decoded_content.decode("utf-8")
 
     g = Github(PAT)
-    repo = g.get_repo(FORKED_REPO_NAME)
     branch_name = generate_branch_name()
 
     try:
-        sb = repo.get_branch("main")
-        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=sb.commit.sha)
+        # REPO_NAMEのmainブランチの最新コミットSHAを利用して、FORKED_REPO_NAMEにブランチ作成
+        base_repo = g.get_repo(REPO_NAME)
+        base_main = base_repo.get_branch("main")
+        commit_sha = base_main.commit.sha
+
+        repo = g.get_repo(FORKED_REPO_NAME)
+        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=commit_sha)
     except Exception as e:
         return f"ブランチの作成に失敗しました: {str(e)}"
 
