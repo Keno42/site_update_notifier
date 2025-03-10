@@ -12,13 +12,15 @@ jobs:
   lint-and-suggest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - name: Set up python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -28,18 +30,7 @@ jobs:
           pip install black flake8 mypy
           pip install -r requirements.txt
 
-      - name: Run black formatter (generate diff)
-        id: black-format
-        run: |
-          black --check --diff . > black_diff.txt || true
-          if [ -s black_diff.txt ]; then
-            echo "has_diff=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_diff=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Apply black suggestions to PR
-        if: steps.black-format.outputs.has_diff == 'true'
         uses: reviewdog/action-suggester@v1
         with:
           tool_name: black
