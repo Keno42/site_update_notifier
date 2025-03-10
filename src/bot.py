@@ -47,7 +47,9 @@ if CACHE_FILE:
 
 
 def extract_titles(html: str):
-    pattern = r'<h3 class="title01">\s*<a href="([^"]+)">([^<]+)</a>\s*</h3>'
+    pattern = (
+        r'<h3 class="title01">\s*<a href="([^"]+)">([^<]+)</a>\s*</h3>'
+    )
     return re.findall(pattern, html)
 
 
@@ -127,7 +129,17 @@ async def on_message(message):
             pass
         await message.reply(reply_text)
         return
-    if client.user in message.mentions:
+
+    # BotへのメンションまたはBotのロールが呼ばれた場合に反応
+    bot_mentioned = client.user in message.mentions
+    role_mentioned = False
+    if message.guild:
+        bot_member = message.guild.get_member(client.user.id)
+        if bot_member:
+            bot_roles = {role.id for role in bot_member.roles}
+            role_mentions = {role.id for role in message.role_mentions}
+            role_mentioned = bool(bot_roles & role_mentions)
+    if bot_mentioned or role_mentioned:
         prompt = (
             message.content.replace(f"<@{client.user.id}>", "")
             .replace(f"<@!{client.user.id}>", "")
@@ -200,7 +212,9 @@ async def check_website():
                         if channel:
                             formatted_list = []
                             for url, title in added_entries:
-                                formatted_list.append(f"タイトル: {title}\nURL: {url}")
+                                formatted_list.append(
+                                    f"タイトル: {title}\nURL: {url}"
+                                )
                             titles_text = "\n\n".join(formatted_list)
                             message_to_send = SITE_UPDATE_MESSAGE.format(
                                 titles_text=titles_text
