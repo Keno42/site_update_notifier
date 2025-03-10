@@ -6,6 +6,7 @@ from config import config
 from .github_utils import get_file_from_repo, get_all_file_paths, create_pull_request
 from github.GithubException import GithubException
 
+
 PAT = getattr(config, "PAT", "")
 CHATGPT_TOKEN = config.CHATGPT_TOKEN
 REPO_NAME = getattr(config, "REPO_NAME", "")
@@ -36,7 +37,8 @@ async def handle_dev_message(message: str) -> str:
     branch_name = generate_branch_name()
 
     try:
-        # REPO_NAMEのmainブランチの最新コミットSHAを利用して、FORKED_REPO_NAMEにブランチ作成
+        # REPO_NAMEのmainブランチの最新コミットSHAを利用して、FORKED_REPO_NAMEに
+        # ブランチ作成
         base_repo = g.get_repo(REPO_NAME)
         base_main = base_repo.get_branch("main")
         commit_sha = base_main.commit.sha
@@ -53,7 +55,7 @@ async def handle_dev_message(message: str) -> str:
         ]
     )
 
-    prompt = f"""
+    prompt = f"""\
 あなたは優秀なソフトウェア開発者です。以下のファイル群を指示に従って修正してください。
 
 ## ファイル群：
@@ -61,6 +63,9 @@ async def handle_dev_message(message: str) -> str:
 
 ## 指示：
 {message}
+
+※ 指示がない限り、余計な部分のリファクタを行わず,
+   lint実行を考慮し各行は88文字以内にしてください。
 
 以下のルールを守って、JSONで結果を構造的に返してください：
 
@@ -85,8 +90,7 @@ async def handle_dev_message(message: str) -> str:
         }}
     }}
 }}
-```
-"""
+```"""
 
     try:
         response = client.chat.completions.create(
@@ -115,14 +119,14 @@ async def handle_dev_message(message: str) -> str:
     for file_name, change in changes.items():
         if not isinstance(change, dict):
             return (
-                f"ファイル『{file_name}』の変更内容が正しくありません（型が異常です）。"
+                f"ファイル「{file_name}」の変更内容が正しくありません（型が異常です）。"
             )
 
         new_code = change.get("updated_code")
         commit_message = change.get("commit_message")
 
         if not new_code or not commit_message:
-            return f"ファイル『{file_name}』の変更に必須フィールドが不足しています。"
+            return f"ファイル「{file_name}」の変更に必須フィールドが不足しています。"
 
         existing_file = get_file_from_repo(file_name, branch=branch_name)
 
@@ -143,9 +147,9 @@ async def handle_dev_message(message: str) -> str:
                     branch=branch_name,
                 )
         except GithubException as e:
-            return f"ファイル『{file_name}』のGitHub操作に失敗しました: {e.data.get('message', str(e))}"
+            return f"ファイル「{file_name}」のGitHub操作に失敗しました: {e.data.get('message', str(e))}"
         except Exception as e:
-            return f"ファイル『{file_name}』の予期せぬエラー: {str(e)}"
+            return f"ファイル「{file_name}」の予期せぬエラー: {str(e)}"
 
     # PRの作成
     pr_creation_result = create_pull_request(
@@ -153,12 +157,6 @@ async def handle_dev_message(message: str) -> str:
     )
 
     return (
-        f"ブランチ『{branch_name}』に変更をpushしました。\n"
+        f"ブランチ「{branch_name}」に変更をpushしました。\n"
         f"プルリクエスト: {pr_creation_result}"
     )
-
-
-def handle_dev_message_sync(message: str) -> str:
-    import asyncio
-
-    return asyncio.run(handle_dev_message(message))
