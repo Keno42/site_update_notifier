@@ -9,6 +9,7 @@ from datetime import datetime
 from config.config import CACHE_FILE
 from config import config
 from .dev import handle_dev_message
+from github import Github
 
 TOKEN = config.TOKEN
 CHANNEL_ID = getattr(config, "CHANNEL_ID", 0)
@@ -106,14 +107,36 @@ async def on_ready():
             "CHECK_URLまたはCACHE_FILEまたはCHANNEL_IDが設定されていないため、サイトチェックをスキップします。"
         )
 
-
-conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
+# システムプロンプトにリファクタリング制限の注意事項を追加
+conversation_history = [{
+    "role": "system",
+    "content": SYSTEM_PROMPT + "\n指示がない限り、関連しない箇所のリファクタリングはしないこと、極力コメントをつけないこと、lintingルールに抵触してmergeできなくなることを避けること"
+}]
 
 
 @client.event
 async def on_message(message):
     if message.author == client.user:
         return
+
+    # ブランチ削除コマンドの検出
+    branch_deletion_pattern = r"ブランチ削除して:\s*(\S+)"
+    if client.user in message.mentions and re.search(branch_deletion_pattern, message.content):
+        match = re.search(branch_deletion_pattern, message.content)
+        branch_name = match.group(1)
+        if not (PAT and getattr(config, "FORKED_REPO_NAME", "")):
+            await message.reply("環境変数が正しく設定されていません。")
+            return
+        try:
+            g = Github(PAT)
+            forked_repo = g.get_repo(getattr(config, "FORKED_REPO_NAME", ""))
+            ref = forked_repo.get_git_ref(f"heads/{branch_name}")
+            ref.delete()
+            await message.reply(f"ブランチ『{branch_name}』を削除しました。")
+        except Exception as e:
+            await message.reply(f"ブランチ削除に失敗しました: {e}")
+        return
+
     if PAT and "Dev mode" in message.content and client.user in message.mentions:
         dev_command = message.content.replace("Dev mode", "").strip()
         typing_task = asyncio.create_task(typing_loop(message.channel))
@@ -125,6 +148,7 @@ async def on_message(message):
             pass
         await message.reply(reply_text)
         return
+
     if client.user in message.mentions:
         prompt = (
             message.content.replace(f"<@{client.user.id}>", "")
@@ -142,7 +166,7 @@ async def on_message(message):
             conversation_history.append({"role": "user", "content": prompt})
         else:
             conversation_history.clear()
-            conversation_history.append({"role": "system", "content": SYSTEM_PROMPT})
+            conversation_history.append({"role": "system", "content": SYSTEM_PROMPT + "\n指示がない限り、関連しない箇所のリファクタリングはしないこと、極力コメントをつけないこと、lintingルールに抵触してmergeできなくなることを避けること"})
             conversation_history.append({"role": "user", "content": prompt})
         typing_task = asyncio.create_task(typing_loop(message.channel))
         reply_text = await call_chatgpt_with_history(conversation_history)
