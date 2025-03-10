@@ -74,7 +74,7 @@ async def call_chatgpt_with_history(messages):
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {CHATGPT_TOKEN}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
     payload = {"model": GPT_MODEL, "messages": messages}
     async with aiohttp.ClientSession() as session:
@@ -133,9 +133,6 @@ async def on_message(message):
             .replace(f"<@!{client.user.id}>", "")
             .strip()
         )
-        if not prompt:
-            await message.reply("何か質問してにゃ。")
-            return
         if prompt.lower() == "check issue":
             try:
                 g = Github(PAT)
@@ -144,8 +141,7 @@ async def on_message(message):
                 issues_list = []
                 for issue in issues:
                     issues_list.append(
-                        f"Issue#{issue.number}: {issue.title} - URL: "
-                        f"{issue.html_url}"
+                        f"Issue#{issue.number}: {issue.title} - URL: {issue.html_url}"
                     )
                 reply_text = (
                     "\n".join(issues_list)
@@ -156,6 +152,9 @@ async def on_message(message):
             except Exception as e:
                 logging.error(f"Issue取得中にエラー発生: {e}")
                 await message.reply("Issueの取得に失敗しました。")
+            return
+        if not prompt:
+            await message.reply("何か質問してにゃ。")
             return
         if message.reference:
             if message.author.bot:
@@ -200,7 +199,9 @@ async def check_website():
                         if channel:
                             formatted_list = []
                             for url, title in added_entries:
-                                formatted_list.append(f"タイトル: {title}\nURL: {url}")
+                                formatted_list.append(
+                                    f"タイトル: {title}\nURL: {url}"
+                                )
                             titles_text = "\n\n".join(formatted_list)
                             message_to_send = SITE_UPDATE_MESSAGE.format(
                                 titles_text=titles_text
