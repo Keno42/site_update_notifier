@@ -119,7 +119,10 @@ async def handle_special_mention(message):
             await message.reply("何か質問してにゃ。")
             return
         # 独立した会話履歴を用いて処理
-        local_history = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+        local_history = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
         reply_text = await call_chatgpt_with_history(local_history)
         await message.reply(reply_text)
     finally:
