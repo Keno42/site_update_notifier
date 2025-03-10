@@ -3,7 +3,8 @@ import uuid
 from github import Github
 from openai import OpenAI
 from config import config
-from .github_utils import get_file_from_repo, get_all_file_paths, create_pull_request
+from .github_utils import get_file_from_repo, get_all_file_paths,
+    create_pull_request
 from github.GithubException import GithubException
 
 PAT = getattr(config, "PAT", "")
@@ -48,12 +49,10 @@ async def handle_dev_message(message: str) -> str:
             continue
         files_content[file_path] = file.decoded_content.decode("utf-8")
 
-    file_descriptions = "\n".join(
-        [
-            f"### {path}\n```python\n{content}\n```"
-            for path, content in files_content.items()
-        ]
-    )
+    file_descriptions = "\n".join([
+        f"### {path}\n```python\n{content}\n```"
+        for path, content in files_content.items()
+    ])
 
     system_message = (
         "あなたは優秀なソフトウェア開発者です。与えられたファイル群を指示に従って"
@@ -66,23 +65,24 @@ async def handle_dev_message(message: str) -> str:
         "- 新規作成が必要なファイルがあれば、それも`changes`に追加してください。\n\n"
         "```json\n"
         "{\n"
-        '    "pr_title": "プルリクエストの明確で簡潔な日本語タイトル",\n'
-        '    "pr_body": "プルリクエストの変更点や意図を簡潔に日本語で説明",\n'
-        '    "changes": {\n'
-        '        "ファイル名1": {\n'
-        '            "commit_message": "1行のコミットメッセージ",\n'
-        '            "updated_code": "修正後または追加するコード全体"\n'
+        "    \"pr_title\": \"プルリクエストの明確で簡潔な日本語タイトル\",\n"
+        "    \"pr_body\": \"プルリクエストの変更点や意図を簡潔に日本語で説明\",\n"
+        "    \"changes\": {\n"
+        "        \"ファイル名1\": {\n"
+        "            \"commit_message\": \"1行のコミットメッセージ\",\n"
+        "            \"updated_code\": \"修正後または追加するコード全体\"\n"
         "        },\n"
-        '        "ファイル名2": {\n'
-        '            "commit_message": "1行のコミットメッセージ",\n'
-        '            "updated_code": "修正後または追加するコード全体"\n'
+        "        \"ファイル名2\": {\n"
+        "            \"commit_message\": \"1行のコミットメッセージ\",\n"
+        "            \"updated_code\": \"修正後または追加するコード全体\"\n"
         "        }\n"
         "    }\n"
         "}\n"
         "```\n"
     )
     user_message = (
-        "## ファイル群：\n" f"{file_descriptions}\n\n" "## 指示：\n" f"{message}\n"
+        "## ファイル群：\n" f"{file_descriptions}\n\n"
+        "## 指示：\n" f"{message}\n"
     )
 
     try:
@@ -117,31 +117,37 @@ async def handle_dev_message(message: str) -> str:
             return (
                 f"ファイル『{file_name}』の変更内容が正しくありません（型が異常です）。"
             )
-
-        new_code = change.get("updated_code")
         commit_message = change.get("commit_message")
-
-        if not new_code or not commit_message:
+        new_code = change.get("updated_code")
+        if not commit_message:
             return f"ファイル『{file_name}』の変更に必須フィールドが不足しています。"
 
         existing_file = get_file_from_repo(file_name, branch=branch_name)
 
         try:
-            if existing_file:
-                forked_repo.update_file(
-                    existing_file.path,
-                    commit_message,
-                    new_code,
-                    existing_file.sha,
-                    branch=branch_name,
-                )
+            if new_code == "":
+                if existing_file:
+                    forked_repo.delete_file(
+                        existing_file.path,
+                        commit_message,
+                        existing_file.sha,
+                        branch=branch_name,
+                    )
+                else:
+                    pass
             else:
-                forked_repo.create_file(
-                    file_name,
-                    commit_message,
-                    new_code,
-                    branch=branch_name,
-                )
+                if existing_file:
+                    forked_repo.update_file(
+                        existing_file.path,
+                        commit_message,
+                        new_code,
+                        existing_file.sha,
+                        branch=branch_name,
+                    )
+                else:
+                    forked_repo.create_file(
+                        file_name, commit_message, new_code, branch=branch_name
+                    )
         except GithubException as e:
             return (
                 f"ファイル『{file_name}』のGitHub操作に失敗しました: "
@@ -150,7 +156,6 @@ async def handle_dev_message(message: str) -> str:
         except Exception as e:
             return f"ファイル『{file_name}』の予期せぬエラー: {str(e)}"
 
-    # PRの作成
     pr_creation_result = create_pull_request(
         branch_name=branch_name, pr_title=pr_title, pr_body=pr_body
     )
@@ -163,5 +168,4 @@ async def handle_dev_message(message: str) -> str:
 
 def handle_dev_message_sync(message: str) -> str:
     import asyncio
-
     return asyncio.run(handle_dev_message(message))
