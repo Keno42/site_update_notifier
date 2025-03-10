@@ -110,10 +110,36 @@ async def on_ready():
 conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
+async def handle_special_mention(message):
+    # <@773544450470314024> を受けた場合の処理を別タスクで実行
+    typing_task = asyncio.create_task(typing_loop(message.channel))
+    try:
+        prompt = message.content.replace("<@773544450470314024>", "").strip()
+        if not prompt:
+            await message.reply("何か質問してにゃ。")
+            return
+        # 独立した会話履歴を用いて処理
+        local_history = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+        reply_text = await call_chatgpt_with_history(local_history)
+        await message.reply(reply_text)
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+
+
 @client.event
 async def on_message(message):
     if message.author == client.user:
         return
+
+    # 特定のメンション <@773544450470314024> で開始する処理を別タスクで実行
+    if "<@773544450470314024>" in message.content:
+        asyncio.create_task(handle_special_mention(message))
+        return
+
     if PAT and "Dev mode" in message.content and client.user in message.mentions:
         dev_command = message.content.replace("Dev mode", "").strip()
         typing_task = asyncio.create_task(typing_loop(message.channel))
@@ -125,6 +151,7 @@ async def on_message(message):
             pass
         await message.reply(reply_text)
         return
+
     if client.user in message.mentions:
         prompt = (
             message.content.replace(f"<@{client.user.id}>", "")
@@ -154,6 +181,7 @@ async def on_message(message):
         conversation_history.append({"role": "assistant", "content": reply_text})
         await message.reply(reply_text)
         return
+
     if GREETINGS and HEALTH_CHECK_GREETING in message.content.lower():
         await message.channel.send(random.choice(GREETINGS))
 
