@@ -5,6 +5,7 @@ from openai import OpenAI
 from config import config
 from .github_utils import get_file_from_repo, get_all_file_paths, create_pull_request
 from github.GithubException import GithubException
+import logging
 
 PAT = getattr(config, "PAT", "")
 CHATGPT_TOKEN = config.CHATGPT_TOKEN
@@ -22,11 +23,14 @@ client = OpenAI(api_key=CHATGPT_TOKEN)
 
 
 async def handle_dev_message(message: str) -> str:
+    logging.info("handle_dev_messageが呼び出されました。")
     if not (PAT and CHATGPT_TOKEN and REPO_NAME and FORKED_REPO_NAME):
+        logging.warning("必要な環境変数が設定されていません。")
         return "環境変数が設定されていません。"
 
     g = Github(PAT)
     branch_name = generate_branch_name()
+    logging.info(f"GitHubブランチ『{branch_name}』を作成しています。")
 
     try:
         # REPO_NAMEのmainブランチの最新コミットSHAを利用して、
@@ -37,6 +41,7 @@ async def handle_dev_message(message: str) -> str:
 
         forked_repo = g.get_repo(FORKED_REPO_NAME)
         forked_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=commit_sha)
+        logging.info(f"GitHubブランチ『{branch_name}』の作成に成功しました。")
     except Exception as e:
         return f"ブランチの作成に失敗しました: {str(e)}"
 
@@ -85,6 +90,7 @@ async def handle_dev_message(message: str) -> str:
         "## ファイル群：\n" f"{file_descriptions}\n\n" "## 指示：\n" f"{message}\n"
     )
 
+    logging.info("GPTに修正案をリクエストしています。")
     try:
         response = client.chat.completions.create(
             model=GPT_MODEL,
@@ -94,6 +100,7 @@ async def handle_dev_message(message: str) -> str:
             ],
             response_format={"type": "json_object"},
         )
+        logging.info("GPTから修正案を受け取りました。")
         if response.choices[0].message.content is None:
             return "構造解析に失敗しました。"
 
@@ -126,6 +133,7 @@ async def handle_dev_message(message: str) -> str:
 
         existing_file = get_file_from_repo(file_name, branch=branch_name)
 
+        logging.info(f"ファイル『{file_name}』のコミット処理を開始します。")
         try:
             if existing_file:
                 forked_repo.update_file(
@@ -142,19 +150,25 @@ async def handle_dev_message(message: str) -> str:
                     new_code,
                     branch=branch_name,
                 )
+            logging.info(f"ファイル『{file_name}』をコミットしました。")
         except GithubException as e:
+            logging.error(f"ファイル『{file_name}』のコミットに失敗しました: {str(e)}")
             return (
                 f"ファイル『{file_name}』のGitHub操作に失敗しました: "
                 f"{e.data.get('message', str(e))}"
             )
         except Exception as e:
+            logging.error(f"ファイル『{file_name}』のコミットに失敗しました: {str(e)}")
             return f"ファイル『{file_name}』の予期せぬエラー: {str(e)}"
 
+    logging.info("GitHubにプルリクエストを作成しています。")
     # PRの作成
     pr_creation_result = create_pull_request(
         branch_name=branch_name, pr_title=pr_title, pr_body=pr_body
     )
+    logging.info("プルリクエストの作成に成功しました。")
 
+    logging.info(f"処理が完了しました。ブランチ名: {branch_name}")
     return (
         f"ブランチ『{branch_name}』に変更をpushしました。\n"
         f"プルリクエスト: {pr_creation_result}"
