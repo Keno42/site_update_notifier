@@ -45,7 +45,7 @@ jobs:
         if: steps.black_format.outputs.is_formatted == 'true'
         uses: reviewdog/action-suggester@v1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.REVIEWDOG_GITHUB_API_TOKEN }}
           tool_name: black
           level: warning
 
