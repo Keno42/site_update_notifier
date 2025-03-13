@@ -48,7 +48,8 @@ if CACHE_FILE:
 
 def extract_titles(html: str):
     pattern = (
-        r'<h3 class="title01">\s*<a href="([^"]+)">([^<]+)</a>\s*</h3>'
+        r'<h3 class="title01">
+        \s*<a href="([^"]+)">([^<]+)</a>\s*</h3>'
     )
     return re.findall(pattern, html)
 
@@ -118,6 +119,8 @@ conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
 async def on_message(message):
     if message.author == client.user:
         return
+    
+    # Dev mode用のチェック
     if PAT and "Dev mode" in message.content and client.user in message.mentions:
         dev_command = message.content.replace("Dev mode", "").strip()
         typing_task = asyncio.create_task(typing_loop(message.channel))
@@ -128,6 +131,12 @@ async def on_message(message):
         except asyncio.CancelledError:
             pass
         await message.reply(reply_text)
+        return
+
+    # Issue mode用のチェック
+    if "Issue mode" in message.content:
+        echo_text = message.content.replace("Issue mode", "").strip()
+        await message.reply(echo_text)
         return
 
     # BotへのメンションまたはBotのロールが呼ばれた場合に反応
