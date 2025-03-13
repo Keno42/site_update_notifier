@@ -53,6 +53,15 @@ def extract_titles(html: str):
     return re.findall(pattern, html)
 
 
+def update_cache(new_content: str):
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        logging.info("キャッシュファイルを更新しました。")
+    except Exception as e:
+        logging.error(f"キャッシュファイルの更新に失敗しました: {e}")
+
+
 async def fetch_site_content(session, url: str):
     try:
         async with session.get(url) as response:
@@ -61,15 +70,6 @@ async def fetch_site_content(session, url: str):
     except aiohttp.ClientError as e:
         logging.error(f"サイト取得エラー: {e}")
         raise
-
-
-def update_cache(new_content: str):
-    try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        logging.info("キャッシュファイルを更新しました。")
-    except Exception as e:
-        logging.error(f"キャッシュファイルの更新に失敗しました: {e}")
 
 
 async def call_chatgpt_with_history(messages):
@@ -106,10 +106,8 @@ async def on_ready():
         client.loop.create_task(check_website())
     else:
         logging.info(
-            "CHECK_URLまたはCACHE_FILEまたはCHANNEL_IDが設定されていないため、"
-            "サイトチェックをスキップします。"
+            "CHECK_URLまたはCACHE_FILEまたはCHANNEL_IDが設定されていないため、サイトチェックをスキップします。"
         )
-
 
 conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -134,8 +132,18 @@ async def on_message(message):
 
     # Issue mode用のチェック
     if "Issue mode" in message.content:
-        echo_text = message.content.replace("Issue mode", "").strip()
-        await message.reply(echo_text)
+        issue_content = message.content.replace("Issue mode", "").strip()
+        if not PAT:
+            await message.reply("PATが設定されていません。Issueを作成できません。")
+            return
+        try:
+            from .issue_handler import create_issue
+
+            issue_result = await asyncio.to_thread(create_issue, issue_content)
+            await message.reply(issue_result)
+        except Exception as e:
+            logging.error(f"Issue作成中にエラーが発生しました: {e}")
+            await message.reply("Issueの作成に失敗しました。")
         return
 
     # BotへのメンションまたはBotのロールが呼ばれた場合に反応
@@ -164,8 +172,7 @@ async def on_message(message):
                 issues_list = []
                 for issue in issues:
                     issues_list.append(
-                        f"Issue#{issue.number}: {issue.title} - URL: "
-                        f"{issue.html_url}"
+                        f"Issue#{issue.number}: {issue.title} - URL: {issue.html_url}"
                     )
                 reply_text = (
                     "\n".join(issues_list)
@@ -228,9 +235,7 @@ async def check_website():
                                 titles_text=titles_text
                             )
                             await channel.send(message_to_send)
-                            logging.info(
-                                "更新を検知し、以下の内容で通知を送信しました:"
-                            )
+                            logging.info("更新を検知し、以下の内容で通知を送信しました:")
                             logging.info(titles_text)
                         else:
                             logging.error("指定したチャンネルが見つかりません。")
