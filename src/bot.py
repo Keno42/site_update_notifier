@@ -47,9 +47,7 @@ if CACHE_FILE:
 
 
 def extract_titles(html: str):
-    pattern = (
-        r'<h3 class="title01">\s*<a href="([^"]+)">([^<]+)</a>\s*</h3>'
-    )
+    pattern = r'<h3 class="title01">\s*<a href="([^"]+)">([^<]+)</a>\s*</h3>'
     return re.findall(pattern, html)
 
 
@@ -109,6 +107,7 @@ async def on_ready():
             "CHECK_URLまたはCACHE_FILEまたはCHANNEL_IDが設定されていないため、サイトチェックをスキップします。"
         )
 
+
 conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
@@ -116,7 +115,7 @@ conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
 async def on_message(message):
     if message.author == client.user:
         return
-    
+
     # Dev mode用のチェック
     if PAT and "Dev mode" in message.content and client.user in message.mentions:
         dev_command = message.content.replace("Dev mode", "").strip()
@@ -227,15 +226,15 @@ async def check_website():
                         if channel:
                             formatted_list = []
                             for url, title in added_entries:
-                                formatted_list.append(
-                                    f"タイトル: {title}\nURL: {url}"
-                                )
+                                formatted_list.append(f"タイトル: {title}\nURL: {url}")
                             titles_text = "\n\n".join(formatted_list)
                             message_to_send = SITE_UPDATE_MESSAGE.format(
                                 titles_text=titles_text
                             )
                             await channel.send(message_to_send)
-                            logging.info("更新を検知し、以下の内容で通知を送信しました:")
+                            logging.info(
+                                "更新を検知し、以下の内容で通知を送信しました:"
+                            )
                             logging.info(titles_text)
                         else:
                             logging.error("指定したチャンネルが見つかりません。")
