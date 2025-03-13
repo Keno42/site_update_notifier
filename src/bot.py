@@ -138,6 +138,7 @@ async def on_message(message):
             return
         try:
             from .issue_handler import create_issue
+
             issue_result = await asyncio.to_thread(create_issue, issue_content)
             await message.reply(issue_result)
         except Exception as e:
