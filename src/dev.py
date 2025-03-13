@@ -167,8 +167,8 @@ async def handle_dev_message(message: str) -> str:
                 f"ファイル『{file_name}』のコミットに失敗しました: {str(e)}"
             )
             return (
-                f"ファイル『{file_name}』のGitHub操作に失敗しました: 
-                {e.data.get('message', str(e))}"
+                f"ファイル『{file_name}』のGitHub操作に失敗しました: "
+                 f"{e.data.get('message', str(e))}"
             )
         except Exception as e:
             logging.error(
