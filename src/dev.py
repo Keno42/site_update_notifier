@@ -3,8 +3,7 @@ import uuid
 from github import Github
 from openai import OpenAI
 from config import config
-from .github_utils import get_file_from_repo,
-    get_all_file_paths, create_pull_request
+from .github_utils import get_file_from_repo, get_all_file_paths, create_pull_request
 from github.GithubException import GithubException
 import logging
 
