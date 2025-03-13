@@ -3,7 +3,8 @@ import uuid
 from github import Github
 from openai import OpenAI
 from config import config
-from .github_utils import get_file_from_repo, get_all_file_paths, create_pull_request
+from .github_utils import get_file_from_repo,
+    get_all_file_paths, create_pull_request
 from github.GithubException import GithubException
 import logging
 
@@ -30,7 +31,9 @@ async def handle_dev_message(message: str) -> str:
 
     g = Github(PAT)
     branch_name = generate_branch_name()
-    logging.info(f"GitHubブランチ『{branch_name}』を作成しています。")
+    logging.info(
+        f"GitHubブランチ『{branch_name}』を作成しています。"
+    )
 
     try:
         # REPO_NAMEのmainブランチの最新コミットSHAを利用して、
@@ -41,7 +44,9 @@ async def handle_dev_message(message: str) -> str:
 
         forked_repo = g.get_repo(FORKED_REPO_NAME)
         forked_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=commit_sha)
-        logging.info(f"GitHubブランチ『{branch_name}』の作成に成功しました。")
+        logging.info(
+            f"GitHubブランチ『{branch_name}』の作成に成功しました。"
+        )
     except Exception as e:
         return f"ブランチの作成に失敗しました: {str(e)}"
 
@@ -53,19 +58,16 @@ async def handle_dev_message(message: str) -> str:
             continue
         files_content[file_path] = file.decoded_content.decode("utf-8")
 
-    file_descriptions = "\n".join(
-        [
-            f"### {path}\n```python\n{content}\n```"
-            for path, content in files_content.items()
-        ]
-    )
+    file_descriptions = "\n".join([
+        f"### {path}\n```python\n{content}\n```"
+        for path, content in files_content.items()
+    ])
 
     system_message = (
         "あなたは優秀なソフトウェア開発者です。与えられたファイル群を指示に従って"
         "修正してください。\n\n"
         "以下のルールを守って、JSONで結果を構造的に返してください：\n"
-        "- lintを考慮して１行88文字を超えないように適宜改行してください。\n"
-        "- JSON以外のテキストは含まないでください。\n"
+        "- JSON以外のテキストは含めないでください。\n"
         "- 変更または追加が必要なファイルのみを `changes` に含めてください。\n"
         "- 変更不要なファイルは含めないでください。\n"
         "- 新規作成が必要なファイルがあれば、それも`changes`に追加してください。\n\n"
@@ -87,7 +89,8 @@ async def handle_dev_message(message: str) -> str:
         "```\n"
     )
     user_message = (
-        "## ファイル群：\n" f"{file_descriptions}\n\n" "## 指示：\n" f"{message}\n"
+        "## ファイル群：\n" f"{file_descriptions}\n\n"
+        "## 指示：\n" f"{message}\n"
     )
 
     logging.info("GPTに修正案をリクエストしています。")
@@ -114,7 +117,9 @@ async def handle_dev_message(message: str) -> str:
     changes = result.get("changes", {})
 
     if not isinstance(changes, dict):
-        return "GPTが提示した修正の形式が正しくありません（changesの型異常）。"
+        return (
+            "GPTが提示した修正の形式が正しくありません（changesの型異常）。"
+        )
 
     if not changes:
         return "GPTが提示した修正はありません。"
@@ -129,11 +134,15 @@ async def handle_dev_message(message: str) -> str:
         commit_message = change.get("commit_message")
 
         if not new_code or not commit_message:
-            return f"ファイル『{file_name}』の変更に必須フィールドが不足しています。"
+            return (
+                f"ファイル『{file_name}』の変更に必須フィールドが不足しています。"
+            )
 
         existing_file = get_file_from_repo(file_name, branch=branch_name)
 
-        logging.info(f"ファイル『{file_name}』のコミット処理を開始します。")
+        logging.info(
+            f"ファイル『{file_name}』のコミット処理を開始します。"
+        )
         try:
             if existing_file:
                 forked_repo.update_file(
@@ -150,16 +159,24 @@ async def handle_dev_message(message: str) -> str:
                     new_code,
                     branch=branch_name,
                 )
-            logging.info(f"ファイル『{file_name}』をコミットしました。")
+            logging.info(
+                f"ファイル『{file_name}』をコミットしました。"
+            )
         except GithubException as e:
-            logging.error(f"ファイル『{file_name}』のコミットに失敗しました: {str(e)}")
+            logging.error(
+                f"ファイル『{file_name}』のコミットに失敗しました: {str(e)}"
+            )
             return (
-                f"ファイル『{file_name}』のGitHub操作に失敗しました: "
-                f"{e.data.get('message', str(e))}"
+                f"ファイル『{file_name}』のGitHub操作に失敗しました: 
+                {e.data.get('message', str(e))}"
             )
         except Exception as e:
-            logging.error(f"ファイル『{file_name}』のコミットに失敗しました: {str(e)}")
-            return f"ファイル『{file_name}』の予期せぬエラー: {str(e)}"
+            logging.error(
+                f"ファイル『{file_name}』のコミットに失敗しました: {str(e)}"
+            )
+            return (
+                f"ファイル『{file_name}』の予期せぬエラー: {str(e)}"
+            )
 
     logging.info("GitHubにプルリクエストを作成しています。")
     # PRの作成
@@ -168,7 +185,9 @@ async def handle_dev_message(message: str) -> str:
     )
     logging.info("プルリクエストの作成に成功しました。")
 
-    logging.info(f"処理が完了しました。ブランチ名: {branch_name}")
+    logging.info(
+        f"処理が完了しました。ブランチ名: {branch_name}"
+    )
     return (
         f"ブランチ『{branch_name}』に変更をpushしました。\n"
         f"プルリクエスト: {pr_creation_result}"
