@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
@@ -33,12 +33,20 @@ jobs:
       - name: Check syntax errors
         run: python -m compileall .
 
-      - name: Apply black suggestions to PR
+      # Run Black formatter (auto-formatting in runner environment)
+      - name: Run Black formatter
+        uses: rickstaa/action-black@v1
+        id: black_format
+        with:
+          black_args: "."
+
+      # Suggest formatting fixes on PR if formatting was required
+      - name: Suggest Black formatting fixes on PR
+        if: steps.black_format.outputs.is_formatted == 'true'
         uses: reviewdog/action-suggester@v1
         with:
           tool_name: black
-          fail_level: error
-          filter_mode: diff_context
+          level: warning
 
       - name: Run flake8 linter
         id: flake8-lint
@@ -49,3 +57,4 @@ jobs:
         id: mypy-check
         run: |
           mypy . --ignore-missing-imports --pretty || true
+
