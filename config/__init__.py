@@ -17,4 +17,6 @@ __all__ = [
     "REPO_NAME",
     "FORKED_REPO_NAME",
     "BOT_FILE_PATH",
+    "XAPP_TOKEN",
+    "XOXB_TOKEN",
 ]
