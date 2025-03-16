@@ -172,7 +172,14 @@ async def on_message(message):
             .replace(f"<@!{client.user.id}>", "")
             .strip()
         )
-        if not prompt:
+
+        # Check for attached audio in the Discord message (similar to Slack logic)
+        audio_files = []
+        for attachment in message.attachments:
+            if attachment.content_type and attachment.content_type.startswith("audio/"):
+                audio_files.append(attachment)
+
+        if not prompt and not audio_files:
             await message.reply("何か質問してにゃ。")
             return
         if prompt.lower() == "check issue":
@@ -206,7 +213,37 @@ async def on_message(message):
             conversation_history.append({"role": "system", "content": SYSTEM_PROMPT})
             conversation_history.append({"role": "user", "content": prompt})
         typing_task = asyncio.create_task(typing_loop(message.channel))
-        reply_text = await call_chatgpt_with_history(conversation_history)
+
+        if audio_files:
+            transcriptions = []
+            for audio_file in audio_files:
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".m4a", delete=False
+                    ) as tmp_file:
+                        await attachment.save(tmp_file)
+                        tmp_file_path = tmp_file.name
+
+                    def chunk_callback(chunk_path):
+                        text = asyncio.run(transcribe_audio(chunk_path, context=prompt))
+                        transcriptions.append(text)
+
+                    split_audio_with_overlap(
+                        tmp_file_path,
+                        output_dir="audio_chunks",
+                        chunk_callback=chunk_callback,
+                    )
+
+                except Exception as e:
+                    logging.error(f"Failed to process audio file: {e}")
+                    await message.reply(f"音声ファイルの処理に失敗しました: {str(e)}")
+
+            # If any audio files were found, reply with the final transcription
+            if transcriptions:
+                final_result = "\n".join(transcriptions)
+                reply_text = f"書き起こしが完了しました:\n{final_result}"
+        else:
+            reply_text = await call_chatgpt_with_history(conversation_history)
         typing_task.cancel()
         try:
             await typing_task
