@@ -10,6 +10,7 @@ from datetime import datetime
 from config.config import CACHE_FILE
 from config import config
 from .dev import handle_dev_message_sync
+from .dev import transcribe_audio
 from github import Github
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -270,6 +271,9 @@ if bot_token:
     def handle_message_events(body: dict[str, Any], logger: logging.Logger) -> None:
         logging.info("メッセージ受信")
         event = body.get("event", {})
+        message_text = event.get("text", "")
+        channel_id = event.get("channel", "")
+        ts = event.get("ts", "")
         files = event.get("files", [])
         for file_info in files:
             if file_info.get("mimetype", "").startswith("audio/"):
@@ -283,8 +287,39 @@ if bot_token:
                     ) as tmp_file:
                         tmp_file.write(response.content)
                         tmp_file_path = tmp_file.name
-                    split_audio_with_overlap(tmp_file_path, output_dir="audio_chunks")
-                    logger.info(f"Audio file processed and split: {tmp_file_path}")
+
+                        transcriptions = []
+
+                        def chunk_callback(chunk_path):
+                            # Here we do a synchronous call or wrap the async call
+                            # with asyncio.run
+                            # so that we can gather each chunk's text
+                            # Provide a context if desired
+                            text = asyncio.run(
+                                transcribe_audio(
+                                    chunk_path,
+                                    context=message_text,
+                                )
+                            )
+                            transcriptions.append(text)
+
+                        split_audio_with_overlap(
+                            tmp_file_path,
+                            output_dir="audio_chunks",
+                            chunk_callback=chunk_callback,
+                        )
+
+                        final_result = "\n".join(transcriptions)
+                        logger.info(f"Audio file processed and split: {tmp_file_path}")
+                        logger.info(f"Final transcription:\n{final_result}")
+
+                        # Post a Slack reply in the thread where the audio was posted
+                        slack_app.client.chat_postMessage(
+                            channel=channel_id,
+                            text=f"書き起こしが完了しました:\n{final_result}",
+                            thread_ts=ts,
+                        )
+
                 except Exception as e:
                     logger.error(f"Failed to process audio file: {e}")
         if not files:

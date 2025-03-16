@@ -178,3 +178,25 @@ def handle_dev_message_sync(message: str) -> str:
     import asyncio
 
     return asyncio.run(handle_dev_message(message))
+
+
+async def transcribe_audio(audio_file_path: str, context: str) -> str:
+    """
+    Transcribes an audio file using OpenAI's Whisper endpoint,
+        returning the transcribed text.
+
+    :param client: An instance of your OpenAI client.
+    :param audio_file_path: The full path to the local audio file (e.g. .m4a, .wav).
+    :param context: Prompt text or context to help guide the transcription.
+    :return: The transcribed text from Whisper.
+    :raises Exception: If the API call fails or no text is returned.
+    """
+    try:
+        with open(audio_file_path, "rb") as audio_file:
+            response = client.audio.transcriptions.create(
+                file=audio_file, model="whisper-1", language="ja", prompt=context
+            )
+        # Whisper returns a JSON with at least a "text" field
+        return response.text
+    except Exception as e:
+        return f"<書き起こしに失敗しました: {str(e)}>"

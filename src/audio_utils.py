@@ -31,8 +31,9 @@ def get_audio_duration_seconds(input_file: str) -> float:
 def split_audio_with_overlap(
     input_file: str,
     output_dir: str = "chunks",
-    chunk_length_ms: int = 20 * 60_000 + 10_000,  # 20 min + 10 sec
-    overlap_ms: int = 10_000,  # 10 sec
+    chunk_length_ms: int = 12 * 60_000 + 2_000,  # 12 min + 10 sec
+    overlap_ms: int = 2_000,  # 2 sec
+    chunk_callback=None,
 ) -> None:
     """
     Splits the input audio file into chunks of `chunk_length_ms` duration,
@@ -105,6 +106,9 @@ def split_audio_with_overlap(
             f"Exported {output_path} (start={start_s:.2f}s "
             f"duration={chunk_duration_s:.2f}s)"
         )
+
+        if chunk_callback:
+            chunk_callback(output_path)
 
         # Move to the next chunk start
         start_s += step_s
