@@ -221,7 +221,7 @@ async def on_message(message):
                     with tempfile.NamedTemporaryFile(
                         suffix=".m4a", delete=False
                     ) as tmp_file:
-                        await attachment.save(tmp_file)
+                        await audio_file.save(tmp_file)
                         tmp_file_path = tmp_file.name
 
                     def chunk_callback(chunk_path):
