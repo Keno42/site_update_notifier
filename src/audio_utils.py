@@ -33,8 +33,7 @@ def split_audio_with_overlap(
     output_dir: str = "chunks",
     chunk_length_ms: int = 12 * 60_000 + 2_000,  # 12 min + 10 sec
     overlap_ms: int = 2_000,  # 2 sec
-    chunk_callback=None,
-) -> None:
+) -> list:
     """
     Splits the input audio file into chunks of `chunk_length_ms` duration,
     with each chunk overlapping the last `overlap_ms` of the previous one.
@@ -45,6 +44,8 @@ def split_audio_with_overlap(
     :param chunk_length_ms: Length of each chunk in milliseconds.
     :param overlap_ms: Overlap duration in milliseconds.
     """
+
+    chunk_paths = []
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -107,9 +108,9 @@ def split_audio_with_overlap(
             f"duration={chunk_duration_s:.2f}s)"
         )
 
-        if chunk_callback:
-            chunk_callback(output_path)
+        chunk_paths.append(output_path)
 
         # Move to the next chunk start
         start_s += step_s
         chunk_index += 1
+    return chunk_paths

@@ -221,18 +221,18 @@ async def on_message(message):
                     with tempfile.NamedTemporaryFile(
                         suffix=".m4a", delete=False
                     ) as tmp_file:
-                        await audio_file.save(tmp_file)
                         tmp_file_path = tmp_file.name
+                        await audio_file.save(tmp_file_path)
 
-                    def chunk_callback(chunk_path):
-                        text = asyncio.run(transcribe_audio(chunk_path, context=prompt))
-                        transcriptions.append(text)
-
-                    split_audio_with_overlap(
+                    chunk_paths = split_audio_with_overlap(
                         tmp_file_path,
                         output_dir="audio_chunks",
-                        chunk_callback=chunk_callback,
                     )
+
+                    transcriptions = []
+                    for cp in chunk_paths:
+                        text = await transcribe_audio(cp, context=prompt)
+                        transcriptions.append(text)
 
                 except Exception as e:
                     logging.error(f"Failed to process audio file: {e}")
@@ -325,26 +325,18 @@ if bot_token:
                         tmp_file.write(response.content)
                         tmp_file_path = tmp_file.name
 
-                        transcriptions = []
-
-                        def chunk_callback(chunk_path):
-                            # Here we do a synchronous call or wrap the async call
-                            # with asyncio.run
-                            # so that we can gather each chunk's text
-                            # Provide a context if desired
-                            text = asyncio.run(
-                                transcribe_audio(
-                                    chunk_path,
-                                    context=message_text,
-                                )
-                            )
-                            transcriptions.append(text)
-
-                        split_audio_with_overlap(
+                        chunk_paths = split_audio_with_overlap(
                             tmp_file_path,
                             output_dir="audio_chunks",
-                            chunk_callback=chunk_callback,
                         )
+
+                        transcriptions = []
+                        for cp in chunk_paths:
+                            # Now we can simply do an async call
+                            text = asyncio.run(
+                                transcribe_audio(cp, context=message_text)
+                            )
+                            transcriptions.append(text)
 
                         final_result = "\n".join(transcriptions)
                         logger.info(f"Audio file processed and split: {tmp_file_path}")
