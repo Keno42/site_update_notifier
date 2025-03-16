@@ -1,3 +1,4 @@
+from typing import Any
 import discord
 import asyncio
 import aiohttp
@@ -10,6 +11,11 @@ from config.config import CACHE_FILE
 from config import config
 from .dev import handle_dev_message_sync
 from github import Github
+from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
+import requests
+import tempfile
+from .audio_utils import split_audio_with_overlap
 
 TOKEN = config.TOKEN
 CHANNEL_ID = getattr(config, "CHANNEL_ID", 0)
@@ -31,9 +37,14 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 
+# Discord setup
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+# Slack setup
+bot_token = getattr(config, "XOXB_TOKEN", "")
+app_token = getattr(config, "XAPP_TOKEN", "")
 
 previous_content = None
 if CACHE_FILE:
@@ -251,4 +262,50 @@ async def check_website():
                 await asyncio.sleep(ERROR_INTERVAL)
 
 
-client.run(TOKEN)
+if bot_token:
+    slack_app = App(token=bot_token)
+    logging.info("Slack 初期化")
+
+    @slack_app.event("message")
+    def handle_message_events(body: dict[str, Any], logger: logging.Logger) -> None:
+        logging.info("メッセージ受信")
+        event = body.get("event", {})
+        files = event.get("files", [])
+        for file_info in files:
+            if file_info.get("mimetype", "").startswith("audio/"):
+                audio_url = file_info.get("url_private_download")
+                headers = {"Authorization": f"Bearer {bot_token}"}
+                try:
+                    response = requests.get(audio_url, headers=headers)
+                    response.raise_for_status()
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".m4a", delete=False
+                    ) as tmp_file:
+                        tmp_file.write(response.content)
+                        tmp_file_path = tmp_file.name
+                    split_audio_with_overlap(tmp_file_path, output_dir="audio_chunks")
+                    logger.info(f"Audio file processed and split: {tmp_file_path}")
+                except Exception as e:
+                    logger.error(f"Failed to process audio file: {e}")
+        if not files:
+            logger.info("No files attached in the Slack message.")
+
+
+async def start_slack():
+    handler = SocketModeHandler(slack_app, app_token)
+    logging.info("Slack ログイン")
+    await asyncio.to_thread(handler.start)
+
+
+async def main():
+    discord_task = asyncio.create_task(client.start(config.TOKEN))
+    if bot_token:
+        slack_task = asyncio.create_task(start_slack())
+        await asyncio.gather(discord_task, slack_task)
+    else:
+        await discord_task
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())

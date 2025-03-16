@@ -2,3 +2,4 @@ aiohttp==3.11.12
 discord.py==2.4.0
 openai==1.65.4
 PyGithub==2.6.1
+slack_bolt
