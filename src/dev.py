@@ -1,11 +1,13 @@
 import json
 import uuid
+import time
+import logging
+import asyncio
 from github import Github
 from openai import OpenAI
 from config import config
 from .github_utils import get_file_from_repo, get_all_file_paths, create_pull_request
 from github.GithubException import GithubException
-import logging
 
 PAT = getattr(config, "PAT", "")
 CHATGPT_TOKEN = config.CHATGPT_TOKEN
@@ -13,13 +15,13 @@ REPO_NAME = getattr(config, "REPO_NAME", "")
 FORKED_REPO_NAME = getattr(config, "FORKED_REPO_NAME", "")
 GPT_MODEL = config.GPT_MODEL
 
+# タイムアウト設定を追加
+client = OpenAI(api_key=CHATGPT_TOKEN, timeout=180.0)  # 3分タイムアウト
+
 
 def generate_branch_name(prefix="auto-fix-"):
     unique_id = uuid.uuid4().hex[:8]  # UUIDから8文字取得
     return f"{prefix}{unique_id}"
-
-
-client = OpenAI(api_key=CHATGPT_TOKEN)
 
 
 async def handle_dev_message(message: str) -> str:
@@ -175,8 +177,6 @@ async def handle_dev_message(message: str) -> str:
 
 
 def handle_dev_message_sync(message: str) -> str:
-    import asyncio
-
     return asyncio.run(handle_dev_message(message))
 
 
@@ -192,14 +192,26 @@ async def transcribe_audio(audio_file_path: str, context: str) -> str:
     :raises Exception: If the API call fails or no text is returned.
     """
     try:
+        logging.info(f"OpenAI文字起こし処理開始: {audio_file_path}")
+        start_time = time.time()
+
         with open(audio_file_path, "rb") as audio_file:
+            # Whisper APIを呼び出し（クライアント初期化時にタイムアウトは設定済み）
             response = client.audio.transcriptions.create(
                 file=audio_file,
                 model="gpt-4o-transcribe",
                 language="ja",
                 prompt=context,
             )
+
+        elapsed_time = time.time() - start_time
+        logging.info(f"文字起こし完了: 処理時間 {elapsed_time:.2f}秒")
+
         # Whisper returns a JSON with at least a "text" field
         return response.text
+    except asyncio.TimeoutError:
+        logging.error(f"文字起こし処理がタイムアウトしました: {audio_file_path}")
+        return "<書き起こしがタイムアウトしました>"
     except Exception as e:
+        logging.error(f"文字起こし処理でエラーが発生: {str(e)}")
         return f"<書き起こしに失敗しました: {str(e)}>"

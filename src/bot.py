@@ -317,37 +317,58 @@ if bot_token:
                 audio_url = file_info.get("url_private_download")
                 headers = {"Authorization": f"Bearer {bot_token}"}
                 try:
-                    response = requests.get(audio_url, headers=headers)
+                    logger.info(f"音声ファイルのダウンロードを開始: {audio_url}")
+                    # タイムアウト設定を追加 (60秒)
+                    response = requests.get(
+                        audio_url, headers=headers, timeout=60, stream=True
+                    )
                     response.raise_for_status()
+
+                    # 一時ファイルを作成
                     with tempfile.NamedTemporaryFile(
                         suffix=".m4a", delete=False
                     ) as tmp_file:
-                        tmp_file.write(response.content)
+                        logger.info(f"一時ファイルに保存中: {tmp_file.name}")
+                        # 大きなファイルを効率的に処理するためにチャンクで書き込み
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                tmp_file.write(chunk)
                         tmp_file_path = tmp_file.name
 
-                        chunk_paths = split_audio_with_overlap(
-                            tmp_file_path,
-                            output_dir="audio_chunks",
+                    logger.info(
+                        f"ダウンロード完了、音声分割処理を開始: {tmp_file_path}"
+                    )
+                    # ファイルを分割
+                    chunk_paths = split_audio_with_overlap(
+                        tmp_file_path,
+                        output_dir="audio_chunks",
+                    )
+
+                    logger.info(
+                        f"音声分割完了、{len(chunk_paths)}個のチャンクを処理します"
+                    )
+                    transcriptions = []
+                    for i, cp in enumerate(chunk_paths):
+                        logger.info(
+                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こしを開始: {cp}"
+                        )
+                        # Now we can simply do an async call
+                        text = asyncio.run(transcribe_audio(cp, context=message_text))
+                        transcriptions.append(text)
+                        logger.info(
+                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こし完了"
                         )
 
-                        transcriptions = []
-                        for cp in chunk_paths:
-                            # Now we can simply do an async call
-                            text = asyncio.run(
-                                transcribe_audio(cp, context=message_text)
-                            )
-                            transcriptions.append(text)
+                    final_result = "\n".join(transcriptions)
+                    logger.info(f"Audio file processed and split: {tmp_file_path}")
+                    logger.info(f"Final transcription:\n{final_result}")
 
-                        final_result = "\n".join(transcriptions)
-                        logger.info(f"Audio file processed and split: {tmp_file_path}")
-                        logger.info(f"Final transcription:\n{final_result}")
-
-                        # Post a Slack reply in the thread where the audio was posted
-                        slack_app.client.chat_postMessage(
-                            channel=channel_id,
-                            text=f"書き起こしが完了しました:\n{final_result}",
-                            thread_ts=ts,
-                        )
+                    # Post a Slack reply in the thread where the audio was posted
+                    slack_app.client.chat_postMessage(
+                        channel=channel_id,
+                        text=f"書き起こしが完了しました:\n{final_result}",
+                        thread_ts=ts,
+                    )
 
                 except Exception as e:
                     logger.error(f"Failed to process audio file: {e}")
