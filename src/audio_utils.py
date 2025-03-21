@@ -1,5 +1,12 @@
 import os
 import subprocess
+import logging
+
+# ロガーの設定
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 def get_audio_duration_seconds(input_file: str) -> float:
@@ -17,15 +24,24 @@ def get_audio_duration_seconds(input_file: str) -> float:
         "default=noprint_wrappers=1:nokey=1",
         input_file,
     ]
-    result = subprocess.run(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
-    )
-    if result.returncode == 0:
-        return float(result.stdout.strip())
-    else:
-        raise ValueError(
-            f"Error retrieving duration for {input_file}:\n{result.stderr}"
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=30,
         )
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+        else:
+            raise ValueError(
+                f"Error retrieving duration for {input_file}:\n{result.stderr}"
+            )
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"ffprobe timed out when processing {input_file}")
+    except Exception as e:
+        raise ValueError(f"Unexpected error processing {input_file}: {str(e)}")
 
 
 def split_audio_with_overlap(
@@ -47,70 +63,104 @@ def split_audio_with_overlap(
 
     chunk_paths = []
 
+    # 入力ファイルの存在確認
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"Input file not found: {input_file}")
+
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    # Calculate total duration
-    total_duration_s = get_audio_duration_seconds(input_file)
-    if total_duration_s <= 0:
-        raise ValueError("Input file has zero or negative duration, cannot split.")
+    try:
+        # Calculate total duration
+        logger.info(f"Getting duration for {input_file}")
+        total_duration_s = get_audio_duration_seconds(input_file)
+        if total_duration_s <= 0:
+            raise ValueError("Input file has zero or negative duration, cannot split.")
 
-    # Convert ms to seconds
-    chunk_length_s = chunk_length_ms / 1000.0
-    overlap_s = overlap_ms / 1000.0
-    step_s = chunk_length_s - overlap_s
+        logger.info(f"Total duration: {total_duration_s:.2f} seconds")
 
-    # Start splitting
-    start_s = 0.0
-    chunk_index = 1
+        # Convert ms to seconds
+        chunk_length_s = chunk_length_ms / 1000.0
+        overlap_s = overlap_ms / 1000.0
+        step_s = chunk_length_s - overlap_s
 
-    while start_s < total_duration_s:
-        # Calculate this chunk's actual duration in seconds
-        # (if near the end of the file, we may have a shorter final chunk)
-        chunk_duration_s = chunk_length_s
-        if (start_s + chunk_duration_s) > total_duration_s:
-            chunk_duration_s = total_duration_s - start_s
+        # Start splitting
+        start_s = 0.0
+        chunk_index = 1
 
-        if chunk_duration_s <= 0:
-            break
+        while start_s < total_duration_s:
+            # Calculate this chunk's actual duration in seconds
+            # (if near the end of the file, we may have a shorter final chunk)
+            chunk_duration_s = min(chunk_length_s, total_duration_s - start_s)
 
-        # Create the output path
-        chunk_name = f"chunk_{chunk_index:03d}.m4a"
-        output_path = os.path.join(output_dir, chunk_name)
+            if chunk_duration_s <= 0:
+                break
 
-        # Build and run ffmpeg command
-        # -ss: start time
-        # -t: duration
-        # -c:a aac: encode with AAC
-        # -b:a 128k: set audio bitrate
-        # -f mp4: force MP4 container, but the output file uses .m4a extension
-        command = [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            str(start_s),
-            "-t",
-            str(chunk_duration_s),
-            "-i",
-            input_file,
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-f",
-            "mp4",
-            output_path,
-        ]
+            # Create the output path
+            chunk_name = f"chunk_{chunk_index:03d}.m4a"
+            output_path = os.path.join(output_dir, chunk_name)
 
-        subprocess.run(command, check=True)
-        print(
-            f"Exported {output_path} (start={start_s:.2f}s "
-            f"duration={chunk_duration_s:.2f}s)"
-        )
+            logger.info(
+                f"Splitting chunk {chunk_index} - Start: {start_s:.2f}s, Duration: {chunk_duration_s:.2f}s"
+            )
 
-        chunk_paths.append(output_path)
+            try:
+                # 大きなファイルの効率的な処理のためのffmpegコマンド最適化
+                command = [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",  # エラーのみをログに出力
+                    "-ss",
+                    str(start_s),  # 開始時間
+                    "-i",
+                    input_file,  # 入力ファイル
+                    "-t",
+                    str(chunk_duration_s),  # 長さ
+                    "-c:a",
+                    "aac",  # AACエンコーダー
+                    "-b:a",
+                    "128k",  # オーディオビットレート
+                    "-threads",
+                    "4",  # 使用するスレッド数を制限
+                    "-max_muxing_queue_size",
+                    "1024",  # キューサイズを増やす
+                    "-f",
+                    "mp4",  # MP4コンテナを強制
+                    output_path,
+                ]
 
-        # Move to the next chunk start
-        start_s += step_s
-        chunk_index += 1
+                # サブプロセスの実行とタイムアウト設定
+                subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    timeout=600,  # より長いタイムアウト (10分)
+                )
+
+                logger.info(
+                    f"Exported {output_path} (start={start_s:.2f}s "
+                    f"duration={chunk_duration_s:.2f}s)"
+                )
+
+                chunk_paths.append(output_path)
+
+                # Move to the next chunk start
+                start_s += step_s
+                chunk_index += 1
+
+            except subprocess.TimeoutExpired:
+                logger.error(f"FFmpeg timed out processing chunk {chunk_index}")
+                error_msg = f"FFmpeg timed out when processing chunk {chunk_index}"
+                raise TimeoutError(error_msg)
+            except subprocess.CalledProcessError as e:
+                error_msg = e.stderr.decode() if e.stderr else "Unknown error"
+                logger.error(f"FFmpeg error for chunk {chunk_index}: {error_msg}")
+                raise RuntimeError(f"FFmpeg error for chunk {chunk_index}: {error_msg}")
+
+    except Exception as e:
+        logger.error(f"Error during audio splitting: {str(e)}")
+        raise
+
+    logger.info(f"Successfully split {input_file} into {len(chunk_paths)} chunks")
     return chunk_paths
