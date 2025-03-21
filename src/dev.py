@@ -200,7 +200,6 @@ async def transcribe_audio(audio_file_path: str, context: str) -> str:
             response = client.audio.transcriptions.create(
                 file=audio_file,
                 model="gpt-4o-transcribe",
-                language="ja",
                 prompt=context,
             )
 
