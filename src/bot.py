@@ -230,10 +230,35 @@ async def on_message(message):
                     )
 
                     transcriptions = []
-                    for cp in chunk_paths:
-                        text = await transcribe_audio(cp, context=prompt)
+                    previous_transcription = ""  # 前のチャンクの文字起こし内容
+
+                    for i, cp in enumerate(chunk_paths):
+                        logging.info(
+                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こしを開始: {cp}"
+                        )
+
+                        # 前のチャンクの文字起こし内容をプロンプトに追加
+                        current_context = prompt
+                        if previous_transcription:
+                            prompt_prefix = f"{prompt}\n\n"
+                            current_context = prompt_prefix + previous_transcription
+                            logging.info("前のチャンクの内容をプロンプトに追加しました")
+
+                        # 文字起こし実行
+                        text = asyncio.run(
+                            transcribe_audio(cp, context=current_context)
+                        )
                         transcriptions.append(text)
 
+                        # 次のチャンク用に現在の文字起こし内容を保存
+                        previous_transcription = text
+
+                        logging.info(
+                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こし完了"
+                        )
+
+                    final_result = "\n".join(transcriptions)
+                    reply_text = f"書き起こしが完了しました:\n{final_result}"
                 except Exception as e:
                     logging.error(f"Failed to process audio file: {e}")
                     await message.reply(f"音声ファイルの処理に失敗しました: {str(e)}")
@@ -348,14 +373,30 @@ if bot_token:
                         f"音声分割完了、{len(chunk_paths)}個のチャンクを処理します"
                     )
                     transcriptions = []
+                    previous_transcription = ""  # 前のチャンクの文字起こし内容
+
                     for i, cp in enumerate(chunk_paths):
-                        logger.info(
+                        logging.info(
                             f"チャンク {i+1}/{len(chunk_paths)} の文字起こしを開始: {cp}"
                         )
-                        # Now we can simply do an async call
-                        text = asyncio.run(transcribe_audio(cp, context=message_text))
+
+                        # 前のチャンクの文字起こし内容をプロンプトに追加
+                        current_context = message_text
+                        if previous_transcription:
+                            prompt_prefix = f"{message_text}\n\n"
+                            current_context = prompt_prefix + previous_transcription
+                            logging.info("前のチャンクの内容をプロンプトに追加しました")
+
+                        # 文字起こし実行
+                        text = asyncio.run(
+                            transcribe_audio(cp, context=current_context)
+                        )
                         transcriptions.append(text)
-                        logger.info(
+
+                        # 次のチャンク用に現在の文字起こし内容を保存
+                        previous_transcription = text
+
+                        logging.info(
                             f"チャンク {i+1}/{len(chunk_paths)} の文字起こし完了"
                         )
 
