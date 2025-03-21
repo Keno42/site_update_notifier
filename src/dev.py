@@ -194,7 +194,10 @@ async def transcribe_audio(audio_file_path: str, context: str) -> str:
     try:
         with open(audio_file_path, "rb") as audio_file:
             response = client.audio.transcriptions.create(
-                file=audio_file, model="whisper-1", language="ja", prompt=context
+                file=audio_file,
+                model="gpt-4o-transcribe",
+                language="ja",
+                prompt=context,
             )
         # Whisper returns a JSON with at least a "text" field
         return response.text
