@@ -199,7 +199,7 @@ async def transcribe_audio(audio_file_path: str, context: str) -> str:
             # Whisper APIを呼び出し（クライアント初期化時にタイムアウトは設定済み）
             response = client.audio.transcriptions.create(
                 file=audio_file,
-                model="gpt-4o-transcribe",
+                model="whisper-1",
                 prompt=context,
             )
 
