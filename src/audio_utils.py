@@ -101,7 +101,8 @@ def split_audio_with_overlap(
             output_path = os.path.join(output_dir, chunk_name)
 
             logger.info(
-                f"Splitting chunk {chunk_index} - Start: {start_s:.2f}s, Duration: {chunk_duration_s:.2f}s"
+                f"Splitting chunk {chunk_index} - Start: {start_s:.2f}s, "
+                f"Duration: {chunk_duration_s:.2f}s"
             )
 
             try:
