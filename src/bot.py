@@ -372,6 +372,14 @@ if bot_token:
 
                 except Exception as e:
                     logger.error(f"Failed to process audio file: {e}")
+            else:
+                logger.info("No audio files attached in the Slack message.")
+                slack_app.client.chat_postMessage(
+                    channel=channel_id,
+                    text="添付されている音声ファイルが見つかりませんでした。",
+                    thread_ts=ts,
+                )
+
         if not files:
             logger.info("No files attached in the Slack message.")
 
