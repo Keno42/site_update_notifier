@@ -28,6 +28,7 @@ GREETINGS = getattr(config, "GREETINGS", [])
 CHATGPT_TOKEN = config.CHATGPT_TOKEN
 SYSTEM_PROMPT = config.SYSTEM_PROMPT
 GPT_MODEL = config.GPT_MODEL
+REASONING_EFFORT = config.REASONING_EFFORT
 ERROR_MESSAGE = getattr(config, "ERROR_MESSAGE", "")
 SITE_UPDATE_MESSAGE = getattr(config, "SITE_UPDATE_MESSAGE", "{titles_text}")
 PAT = getattr(config, "PAT", "")
@@ -89,6 +90,8 @@ async def call_chatgpt_with_history(messages):
         "Content-Type": "application/json",
     }
     payload = {"model": GPT_MODEL, "messages": messages}
+    if REASONING_EFFORT:
+        payload["reasoning_effort"] = REASONING_EFFORT
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
