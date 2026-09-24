@@ -17,6 +17,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 import requests
 import tempfile
 from .audio_utils import split_audio_with_overlap
+from . import lesson
 
 TOKEN = config.TOKEN
 CHANNEL_ID = getattr(config, "CHANNEL_ID", 0)
@@ -43,6 +44,7 @@ logging.basicConfig(
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+sync_lesson_commands = lesson.setup(client, config)
 
 # Slack setup
 bot_token = getattr(config, "XOXB_TOKEN", "")
@@ -114,7 +116,12 @@ async def typing_loop(channel):
 
 @client.event
 async def on_ready():
+    global sync_lesson_commands
     logging.info(f"Logged in as {client.user}")
+    if sync_lesson_commands:
+        # on_ready fires again on reconnect; the commands only need syncing once
+        sync, sync_lesson_commands = sync_lesson_commands, None
+        await sync()
     if CHECK_URL and CACHE_FILE and CHANNEL_ID:
         client.loop.create_task(check_website())
     else:
