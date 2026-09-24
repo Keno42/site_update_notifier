@@ -27,12 +27,17 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 
    ```sh
    git submodule update --init
-   pip install -r requirements.txt   # edge-tts が増えた
-   which ffmpeg                       # mp3 化と再圧縮に必要
+   .venv/bin/pip install -r requirements.txt   # bot を動かしている venv に入れる（edge-tts が増えた）
+   which ffmpeg                                 # mp3 化と再圧縮に必要
    ```
 
+   レッスン生成は bot を動かしている Python（`sys.executable`）で実行されるので、
+   edge-tts は必ずその venv に入れる。システムの `pip` は Debian / Raspberry Pi OS では
+   `externally-managed-environment` で拒否される。venv がまだなければ
+   `python3 -m venv .venv` で作り、bot を `.venv/bin/python -m src.bot` で起動する。
+
    `update_and_restart.sh` にも `git submodule update --init` と
-   `pip install -r requirements.txt` を足しておく（pull で submodule の指す
+   `.venv/bin/pip install -r requirements.txt` を足しておく（pull で submodule の指す
    コミットが変わったときに追従するため）。
 
 2. `config/config.py` に追記する（`LESSON_ROOT` と `LESSON_USERS` がなければ `/lesson` は無効）
