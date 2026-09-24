@@ -18,6 +18,10 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 「できた」とみなしてペースが上がっていく。auto モードは learner.json に残るので、
 その後 `/lesson` で振り返って `--failed` を報告すれば、その分ペースは落ちる。
 
+生成中はチャンネルに「生成中…（経過 3:15）音声合成 120/450」のような 1 通を出し、
+15 秒おきに書き換える。初回はすべての文を音声合成するので時間がかかる（キャッシュを
+残せば 2 回目以降は新しい文だけ）。
+
 「迷った」は今のところ言えた扱い。音声がアップロード上限を超えるときは ffmpeg で
 ビットレートを落として送る。
 
@@ -52,7 +56,8 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
    LESSON_PROFILE = "profiles/edge-is-ja.toml"
    LESSON_MINUTES = 30
    LESSON_EXTRA_ARGS = []                # 例: ["--auto"]
-   LESSON_KEEP_CACHE = False             # True で TTS キャッシュを残す（生成が速くなる）
+   LESSON_KEEP_CACHE = False             # True で TTS キャッシュを残す。同じ文が何度も出るので 2 回目以降の生成がずっと速くなる（Raspberry Pi では True 推奨）
+   LESSON_TIMEOUT_MIN = 60               # 生成がこれ以上かかったら止めてエラーにする
    LESSON_UPLOAD_LIMIT_MB = 20
    LESSON_REVIEW_LIMIT = 0               # 振り返りの最大問数。0 なら全部（超える分は新出項目を優先）
    ```
