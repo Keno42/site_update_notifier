@@ -105,15 +105,22 @@ class ReviewTests(unittest.TestCase):
             self.assertFalse(path.exists(), "nothing to review: no file")
             self.assertIsNone(load_pending(path))
 
-    def test_cleanup_keeps_only_the_cache_when_asked(self):
+    def test_cleanup_empties_the_work_dir(self):
         with tempfile.TemporaryDirectory() as td:
             work = Path(td)
             (work / "cache" / "edge").mkdir(parents=True)
             (work / "lesson-001.mp3").write_bytes(b"x")
-            cleanup(work, keep_cache=True)
-            self.assertEqual([p.name for p in work.iterdir()], ["cache"])
-            cleanup(work, keep_cache=False)
+            cleanup(work)
             self.assertEqual(list(work.iterdir()), [])
+
+    def test_cache_is_shared_only_when_kept(self):
+        cfg = LessonConfig(root=Path("/data"), users={1: "a", 2: "b"})
+        self.assertEqual(cfg.cache_dir("a"), Path("/data/a/work/cache"))
+        cfg.keep_cache = True
+        self.assertEqual(cfg.cache_dir("a"), cfg.cache_dir("b"))
+        self.assertEqual(cfg.cache_dir("a"), Path("/data/tts-cache"))
+        args = cfg.generate_args("a")
+        self.assertEqual(args[args.index("--cache") + 1], "/data/tts-cache")
 
 
 class FakeInteraction:
@@ -301,6 +308,24 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(learner["items"][failed]["failures"], 1)
             asyncio.run(lessons.generate_and_post(channel, "yuki"))
             self.assertIn("レッスン 2", channel.sent[-1][0])
+
+    def test_second_learner_reuses_the_shared_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(
+                root=Path(td),
+                users={1: "a", 2: "b"},
+                minutes=3,
+                extra_args=["--provider", "stub", "--date", "2026-09-18"],
+                keep_cache=True,
+            )
+            lessons = Lessons(cfg)
+            channel = FakeChannel()
+            asyncio.run(lessons.generate_and_post(channel, "a"))
+            clips = sorted((Path(td) / "tts-cache").iterdir())
+            self.assertTrue(clips)
+            asyncio.run(lessons.generate_and_post(channel, "b"))
+            self.assertEqual(sorted((Path(td) / "tts-cache").iterdir()), clips)
+            self.assertEqual(list(cfg.work_dir("a").iterdir()), [])
 
     def test_auto_skips_review_and_self_report(self):
         with tempfile.TemporaryDirectory() as td:
