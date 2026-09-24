@@ -15,9 +15,11 @@ from src.lesson import (
     Lessons,
     ReviewSession,
     ReviewView,
+    StatusMessage,
     cleanup,
     load_pending,
     pending_from_plan,
+    run_cli,
     save_pending,
     setup,
 )
@@ -175,6 +177,69 @@ class ViewTests(unittest.TestCase):
         self.assertIsNone(setup(client, SimpleNamespace()))
         config = SimpleNamespace(LESSON_ROOT="/data", LESSON_USERS={1: "yuki"})
         self.assertTrue(callable(setup(client, config)))
+
+
+FAKE_CLI = """
+import sys, time
+for i in range(10, 31, 10):
+    print(f"  synthesized {i}/30 new lines", file=sys.stderr, end="\\r", flush=True)
+    time.sleep(0.05)
+time.sleep(float(sys.argv[1]))
+print("done")
+"""
+
+
+class ProgressTests(unittest.TestCase):
+    def fake_cfg(self, td, timeout_min=1.0):
+        pkg = Path(td) / "audiolesson"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "cli.py").write_text(FAKE_CLI)
+        return LessonConfig(
+            root=Path(td), users={}, lla_dir=Path(td), timeout_min=timeout_min
+        )
+
+    def test_progress_lines_are_streamed(self):
+        with tempfile.TemporaryDirectory() as td:
+            seen = []
+
+            async def on_progress(line):
+                seen.append(line)
+
+            rc, out, err = asyncio.run(run_cli(self.fake_cfg(td), ["0"], on_progress))
+            self.assertEqual((rc, out.strip()), (0, "done"))
+            self.assertIn("synthesized 30/30 new lines", seen)
+            self.assertIn("synthesized 30/30", err)
+
+    def test_timeout_kills_the_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.fake_cfg(td, timeout_min=0.01)
+            rc, _, err = asyncio.run(run_cli(cfg, ["30"]))
+            self.assertEqual(rc, -1)
+            self.assertIn("終わらなかった", err)
+
+    def test_status_message_shows_synthesis_progress(self):
+        edits = []
+
+        class Message:
+            async def edit(self, content):
+                edits.append(content)
+
+        class Channel:
+            async def send(self, content):
+                edits.append(content)
+                return Message()
+
+        async def scenario():
+            status = StatusMessage(Channel(), interval=0)
+            await status.start()
+            await status.update("  synthesized 120/450 new lines")
+            await status.finish(False)
+
+        asyncio.run(scenario())
+        self.assertTrue(edits[0].startswith("生成中…"))
+        self.assertIn("音声合成 120/450", edits[1])
+        self.assertTrue(edits[2].startswith("生成できませんでした"))
 
 
 class FakeChannel(discord.abc.Messageable):

@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -40,6 +42,7 @@ class LessonConfig:
     keep_cache: bool = False
     upload_limit_mb: float = 20
     review_limit: int = 0
+    timeout_min: float = 60
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
 
@@ -66,6 +69,7 @@ class LessonConfig:
                 config, "LESSON_UPLOAD_LIMIT_MB", defaults.upload_limit_mb
             ),
             review_limit=getattr(config, "LESSON_REVIEW_LIMIT", defaults.review_limit),
+            timeout_min=getattr(config, "LESSON_TIMEOUT_MIN", defaults.timeout_min),
         )
 
     def user_dir(self, name: str) -> Path:
@@ -236,7 +240,16 @@ async def fit_upload(audio: Path, limit_bytes: int) -> Path | None:
     return None
 
 
-async def run_cli(cfg: LessonConfig, args: list[str]) -> tuple[int, str, str]:
+SYNTH_RE = re.compile(r"synthesized (\d+)/(\d+)")
+
+
+async def run_cli(
+    cfg: LessonConfig,
+    args: list[str],
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
+) -> tuple[int, str, str]:
+    """CLI を実行する。stderr の進捗行 (「synthesized 120/450 …」) を on_progress に渡し、
+    cfg.timeout_min を超えたら止めて rc=-1 を返す."""
     proc = await asyncio.create_subprocess_exec(
         cfg.python,
         "-m",
@@ -246,12 +259,75 @@ async def run_cli(cfg: LessonConfig, args: list[str]) -> tuple[int, str, str]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    out, err = await proc.communicate()
+    assert proc.stdout is not None and proc.stderr is not None
+    err_chunks: list[bytes] = []
+
+    async def read_stderr(stream: asyncio.StreamReader) -> None:
+        while chunk := await stream.read(4096):
+            err_chunks.append(chunk)
+            lines = re.split(r"[\r\n]+", chunk.decode(errors="replace").strip())
+            if on_progress and lines[-1]:
+                await on_progress(lines[-1])
+
+    try:
+        out, _ = await asyncio.wait_for(
+            asyncio.gather(proc.stdout.read(), read_stderr(proc.stderr)),
+            timeout=cfg.timeout_min * 60,
+        )
+        await proc.wait()
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        err = b"".join(err_chunks).decode(errors="replace")
+        return -1, "", f"{cfg.timeout_min:g} 分で終わらなかったので止めました。\n{err}"
     return (
         proc.returncode or 0,
         out.decode(errors="replace"),
-        err.decode(errors="replace"),
+        b"".join(err_chunks).decode(errors="replace"),
     )
+
+
+class StatusMessage:
+    """生成中の経過をチャンネルの 1 通のメッセージに書き換えて出す (間引いて編集)."""
+
+    def __init__(self, channel: discord.abc.Messageable, interval: float = 15) -> None:
+        self.channel = channel
+        self.interval = interval
+        self.message: discord.Message | None = None
+        self.started = time.monotonic()
+        self.last_edit = 0.0
+        self.detail = ""
+
+    def text(self, head: str = "生成中…") -> str:
+        m, sec = divmod(int(time.monotonic() - self.started), 60)
+        return f"{head}（経過 {m}:{sec:02d}）" + (
+            f" {self.detail}" if self.detail else ""
+        )
+
+    async def start(self) -> None:
+        self.message = await self.channel.send(self.text())
+
+    async def update(self, line: str) -> None:
+        match = SYNTH_RE.search(line)
+        if match:
+            self.detail = f"音声合成 {match[1]}/{match[2]}"
+        if self.message is None or time.monotonic() - self.last_edit < self.interval:
+            return
+        self.last_edit = time.monotonic()
+        try:
+            await self.message.edit(content=self.text())
+        except discord.DiscordException:
+            pass
+
+    async def finish(self, ok: bool) -> None:
+        if self.message is not None:
+            self.detail = ""
+            try:
+                await self.message.edit(
+                    content=self.text("生成完了" if ok else "生成できませんでした")
+                )
+            except discord.DiscordException:
+                pass
 
 
 def _tail(text: str, limit: int = 1500) -> str:
@@ -361,10 +437,13 @@ class Lessons:
         cleanup(work, self.cfg.keep_cache)
         work.mkdir(parents=True, exist_ok=True)
         try:
+            status = StatusMessage(channel)
+            await status.start()
             async with channel.typing():
                 rc, out, err = await run_cli(
-                    self.cfg, self.cfg.generate_args(name, auto)
+                    self.cfg, self.cfg.generate_args(name, auto), status.update
                 )
+            await status.finish(rc == 0)
             if rc != 0:
                 await channel.send(
                     f"生成に失敗しました:\n```\n{_tail(err or out)}\n```"
