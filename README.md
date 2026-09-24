@@ -13,6 +13,11 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
 3. 次のレッスンを生成し、音声と transcript をチャンネルに投稿する
 4. 生成物を消す（残るのは `learner.json` と次回の振り返り用 `pending_review.json` だけ）
 
+`/lesson-auto` は振り返りも自己申告もせず、生成と投稿だけをする（自己申告が面倒な人向け）。
+language-learning-audio の auto モード（`generate --auto`）で動き、報告がなければ
+「できた」とみなしてペースが上がっていく。auto モードは learner.json に残るので、
+その後 `/lesson` で振り返って `--failed` を報告すれば、その分ペースは落ちる。
+
 「迷った」は今のところ言えた扱い。音声がアップロード上限を超えるときは ffmpeg で
 ビットレートを落として送る。
 

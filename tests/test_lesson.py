@@ -58,6 +58,10 @@ class ConfigTests(unittest.TestCase):
             + ["--failed", "a,b"],
         )
         self.assertNotIn("--failed", cfg.report_args("yuki", 6, []))
+        self.assertNotIn("--auto", args)
+        self.assertEqual(cfg.generate_args("yuki", auto=True).count("--auto"), 1)
+        cfg.extra_args = ["--auto"]
+        self.assertEqual(cfg.generate_args("yuki", auto=True).count("--auto"), 1)
         with self.assertRaises(ValueError):
             cfg.user_dir("../x")
 
@@ -173,7 +177,7 @@ class ViewTests(unittest.TestCase):
         self.assertTrue(callable(setup(client, config)))
 
 
-class FakeChannel:
+class FakeChannel(discord.abc.Messageable):
     def __init__(self):
         self.sent = []
 
@@ -232,6 +236,45 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(learner["items"][failed]["failures"], 1)
             asyncio.run(lessons.generate_and_post(channel, "yuki"))
             self.assertIn("レッスン 2", channel.sent[-1][0])
+
+    def test_auto_skips_review_and_self_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(
+                root=Path(td),
+                users={1: "yuki"},
+                minutes=3,
+                extra_args=["--provider", "stub"],
+            )
+            lessons = Lessons(cfg)
+            channel = FakeChannel()
+            cfg.user_dir("yuki").mkdir(parents=True)
+            stale = {"lesson": 9, "questions": QUESTIONS}
+            save_pending(cfg.pending_path("yuki"), stale)
+            replies = []
+
+            class Response:
+                async def send_message(self, content, ephemeral=False, view=None):
+                    replies.append((content, view))
+
+            interaction = SimpleNamespace(
+                user=SimpleNamespace(id=1),
+                channel_id=5,
+                channel=channel,
+                response=Response(),
+            )
+            asyncio.run(lessons.start(interaction, auto=True))
+            self.assertIn("自動モード", replies[0][0])
+            self.assertIsNone(replies[0][1], "no review buttons")
+            text, files = channel.sent[-1]
+            self.assertIn("レッスン 1", text)
+            self.assertNotIn("振り返り", text)
+            learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
+            self.assertEqual(learner["feedback_mode"], "auto")
+            pending = load_pending(cfg.pending_path("yuki"))
+            self.assertTrue(
+                pending is None or pending["lesson"] == 1, "stale review dropped"
+            )
+            self.assertEqual(lessons.busy, set())
 
 
 if __name__ == "__main__":

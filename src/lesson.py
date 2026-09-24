@@ -1,4 +1,5 @@
 """/lesson: 前回レッスンの振り返り → report → 次のレッスン生成 → 投稿.
+/lesson-auto: 振り返りも自己申告もせず生成 → 投稿 (auto モード: できた前提でペースが上がる).
 
 language-learning-audio (submodule: external/language-learning-audio) の CLI を
 subprocess で呼ぶ。永続化するのはユーザーごとの learner.json と、次の振り返りに
@@ -81,7 +82,10 @@ class LessonConfig:
     def work_dir(self, name: str) -> Path:
         return self.user_dir(name) / "work"
 
-    def generate_args(self, name: str) -> list[str]:
+    def generate_args(self, name: str, auto: bool = False) -> list[str]:
+        extra = list(self.extra_args)
+        if auto and "--auto" not in extra:
+            extra.append("--auto")
         return [
             "generate",
             "--curriculum",
@@ -96,7 +100,7 @@ class LessonConfig:
             str(self.learner_path(name)),
             "--out",
             str(self.work_dir(name)),
-            *self.extra_args,
+            *extra,
         ]
 
     def report_args(self, name: str, lesson: int, failed: list[str]) -> list[str]:
@@ -262,7 +266,7 @@ class Lessons:
         self.cfg = cfg
         self.busy: set[str] = set()
 
-    async def start(self, interaction: discord.Interaction) -> None:
+    async def start(self, interaction: discord.Interaction, auto: bool = False) -> None:
         name = self.cfg.users.get(interaction.user.id)
         if name is None:
             await interaction.response.send_message(
@@ -290,6 +294,16 @@ class Lessons:
         try:
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
             pending = load_pending(self.cfg.pending_path(name))
+            if auto:
+                # 振り返らない分は auto モードが「できた」とみなす
+                self.cfg.pending_path(name).unlink(missing_ok=True)
+                await interaction.response.send_message(
+                    "レッスンを生成しています…（自動モード: 振り返りなし）"
+                )
+                await self.guarded(
+                    channel, self.generate_and_post(channel, name, auto=True)
+                )
+                return
             if pending is None:
                 await interaction.response.send_message("レッスンを生成しています…")
                 await self.guarded(channel, self.generate_and_post(channel, name))
@@ -341,14 +355,16 @@ class Lessons:
         return True
 
     async def generate_and_post(
-        self, channel: discord.abc.Messageable, name: str
+        self, channel: discord.abc.Messageable, name: str, auto: bool = False
     ) -> None:
         work = self.cfg.work_dir(name)
         cleanup(work, self.cfg.keep_cache)
         work.mkdir(parents=True, exist_ok=True)
         try:
             async with channel.typing():
-                rc, out, err = await run_cli(self.cfg, self.cfg.generate_args(name))
+                rc, out, err = await run_cli(
+                    self.cfg, self.cfg.generate_args(name, auto)
+                )
             if rc != 0:
                 await channel.send(
                     f"生成に失敗しました:\n```\n{_tail(err or out)}\n```"
@@ -359,9 +375,12 @@ class Lessons:
                 await channel.send("生成結果 (plan.json) が見つかりませんでした。")
                 return
             plan = json.loads(plan_path.read_text("utf-8"))
+            # 自動モードでも振り返りは残す: 次に /lesson を使えばそこで振り返れる
             pending = pending_from_plan(plan, self.cfg.review_limit)
             save_pending(self.cfg.pending_path(name), pending)
-            await self.post(channel, work, plan, bool(pending["questions"]))
+            await self.post(
+                channel, work, plan, bool(pending["questions"]) and not auto
+            )
         finally:
             cleanup(work, self.cfg.keep_cache)
 
@@ -500,7 +519,7 @@ class ReviewView(discord.ui.View):
 
 
 def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] | None:
-    """config に LESSON_ROOT と LESSON_USERS があれば /lesson を登録し、
+    """config に LESSON_ROOT と LESSON_USERS があれば /lesson と /lesson-auto を登録し、
     スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
     cfg = LessonConfig.from_module(config)
     if cfg is None:
@@ -513,12 +532,22 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
     async def lesson(interaction: discord.Interaction) -> None:
         await lessons.start(interaction)
 
-    command = app_commands.Command(
-        name="lesson",
-        description="前回の振り返りをして、次のレッスンを生成します",
-        callback=lesson,
-    )
-    tree.add_command(command, guild=guild)
+    async def lesson_auto(interaction: discord.Interaction) -> None:
+        await lessons.start(interaction, auto=True)
+
+    for command in (
+        app_commands.Command(
+            name="lesson",
+            description="前回の振り返りをして、次のレッスンを生成します",
+            callback=lesson,
+        ),
+        app_commands.Command(
+            name="lesson-auto",
+            description="振り返りなしで次のレッスンを生成します（できた前提でペースが上がる）",
+            callback=lesson_auto,
+        ),
+    ):
+        tree.add_command(command, guild=guild)
 
     async def sync() -> None:
         try:
