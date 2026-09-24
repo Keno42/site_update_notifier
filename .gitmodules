@@ -1,0 +1,4 @@
+[submodule "external/language-learning-audio"]
+	path = external/language-learning-audio
+	url = https://github.com/Keno42/language-learning-audio
+	branch = main
