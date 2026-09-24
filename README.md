@@ -56,7 +56,7 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
    LESSON_PROFILE = "profiles/edge-is-ja.toml"
    LESSON_MINUTES = 30
    LESSON_EXTRA_ARGS = []                # 例: ["--auto"]
-   LESSON_KEEP_CACHE = False             # True で TTS キャッシュを残す。同じ文が何度も出るので 2 回目以降の生成がずっと速くなる（Raspberry Pi では True 推奨）
+   LESSON_KEEP_CACHE = False             # True で TTS キャッシュを <LESSON_ROOT>/tts-cache に残し、全員で共有する。同じ文が何度も出るので 2 回目以降・2 人目以降の生成がずっと速くなる（Raspberry Pi では True 推奨）
    LESSON_TIMEOUT_MIN = 60               # 生成がこれ以上かかったら止めてエラーにする
    LESSON_UPLOAD_LIMIT_MB = 20
    LESSON_REVIEW_LIMIT = 0               # 振り返りの最大問数。0 なら全部（超える分は新出項目を優先）

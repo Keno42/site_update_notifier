@@ -86,6 +86,15 @@ class LessonConfig:
     def work_dir(self, name: str) -> Path:
         return self.user_dir(name) / "work"
 
+    def cache_dir(self, name: str) -> Path:
+        """keep_cache なら全員で共有する TTS キャッシュ、そうでなければ今回だけの作業用.
+
+        キャッシュのファイル名は音声エンジン・声・速さ・言語・文のハッシュなので、
+        学習者をまたいで共有しても混ざらない。"""
+        if self.keep_cache:
+            return self.root / "tts-cache"
+        return self.work_dir(name) / "cache"
+
     def generate_args(self, name: str, auto: bool = False) -> list[str]:
         extra = list(self.extra_args)
         if auto and "--auto" not in extra:
@@ -104,6 +113,8 @@ class LessonConfig:
             str(self.learner_path(name)),
             "--out",
             str(self.work_dir(name)),
+            "--cache",
+            str(self.cache_dir(name)),
             *extra,
         ]
 
@@ -210,13 +221,11 @@ def latest_plan(work: Path) -> Path | None:
     return plans[-1] if plans else None
 
 
-def cleanup(work: Path, keep_cache: bool) -> None:
-    """生成物を消す。keep_cache なら TTS キャッシュ (work/cache) だけ残す."""
+def cleanup(work: Path) -> None:
+    """生成物を消す (共有 TTS キャッシュは work の外にあるので残る)."""
     if not work.exists():
         return
     for p in work.iterdir():
-        if p.name == "cache" and keep_cache:
-            continue
         if p.is_dir():
             shutil.rmtree(p)
         else:
@@ -434,7 +443,7 @@ class Lessons:
         self, channel: discord.abc.Messageable, name: str, auto: bool = False
     ) -> None:
         work = self.cfg.work_dir(name)
-        cleanup(work, self.cfg.keep_cache)
+        cleanup(work)
         work.mkdir(parents=True, exist_ok=True)
         try:
             status = StatusMessage(channel)
@@ -461,7 +470,7 @@ class Lessons:
                 channel, work, plan, bool(pending["questions"]) and not auto
             )
         finally:
-            cleanup(work, self.cfg.keep_cache)
+            cleanup(work)
 
     async def post(
         self,
