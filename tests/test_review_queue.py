@@ -150,6 +150,53 @@ class SelectionTests(unittest.TestCase):
         self.assertLessEqual(asked_on, PROMOTE_AFTER_DAYS)
 
 
+class ReportBookkeepingTests(unittest.TestCase):
+    """PR #32 review: answers wait in the queue, per source lesson, until the audio
+    lesson side (audiolesson report) has them."""
+
+    def queue(self):
+        def at(lesson, item):
+            e = entry(items=[item])
+            e.source_lesson = lesson
+            return e
+
+        return ReviewQueue(
+            {"a": at(3, "a"), "b": at(7, "b"), "c": at(7, "c"), "d": at(7, "d")}
+        )
+
+    def test_answers_are_grouped_by_source_lesson(self):
+        q = self.queue()
+        q.record("a", "failed", D)
+        q.record("b", "ok", D)
+        q.record("c", "failed", D)
+        self.assertEqual(q.reports(), [(3, ["a"]), (7, ["c"])])
+        q.mark_reported(3, ["a"])
+        self.assertEqual(q.reports(), [(7, ["c"])])
+
+    def test_an_ok_only_lesson_still_needs_a_report(self):
+        q = self.queue()
+        q.record("b", "ok", D)
+        self.assertEqual(q.reports(), [(7, [])], "reported without --failed")
+        q.mark_reported(7, [])
+        self.assertEqual(q.reports(), [])
+
+    def test_answers_given_while_a_report_is_in_flight_are_kept(self):
+        q = self.queue()
+        q.record("c", "failed", D)
+        sent = q.reports()[0][1]
+        q.record("d", "failed", D)  # answered during the CLI call
+        q.mark_reported(7, sent)
+        self.assertEqual(q.reports(), [(7, ["d"])])
+
+    def test_pending_reports_survive_a_restart(self):
+        q = self.queue()
+        q.record("a", "failed", D)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "pending_review.json"
+            q.save(path)
+            self.assertEqual(ReviewQueue.load(path, D).reports(), [(3, ["a"])])
+
+
 class PlanTests(unittest.TestCase):
     def test_new_items_join_due_tomorrow_and_nothing_is_replaced(self):
         q = ReviewQueue()

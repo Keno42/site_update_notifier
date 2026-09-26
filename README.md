@@ -17,7 +17,11 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
 ### 振り返りキュー
 
 音声レッスンの間隔反復（`learner.json`）とは別に、「いつ Discord で自己申告を求めるか」を
-問いごとに `pending_review.json` で管理する（`src/review_queue.py`）。
+`pending_review.json` で管理する（`src/review_queue.py`）。
+
+- 単位は**問い**。«Ég vil fara heim.» のように複数の項目を一度に言う問いは 1 件で、その結果は
+  含まれる項目すべてに当てはめる（どちらで詰まったかは分けられないため）。同じ項目が別の問いに
+  入ることもある
 
 - 問いは一度入ったら消えない。上限で出せなかった問い、スキップ・時間切れで答えなかった問いは
   未回答（unseen）のまま次回に回る。答えた問いは、その問いの状態と次の期限だけが変わる
@@ -29,6 +33,10 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
   （同じ結果が続くたびに伸びる。`INTERVALS` で変えられる）
 - 「言えなかった」は `report --failed` で音声レッスン側にも伝わる（段階が下がり、翌日に復習、
   次のレッスンで 1 秒長く待つ）。「迷った」は報告せず、Discord での確認を早めるだけ
+- 報告は出題元のレッスンごとに `report --lesson <出題元>` で送る。最新のレッスンが「報告済み」に
+  なる（手動モードのペースに効く）のは、そのレッスンの問いに答えたときだけ
+- 報告が失敗しても答えは失われない。届いていない報告はキューに残り、次の `/lesson` の最初に
+  送り直す（届いた報告は二度送らない）
 - 旧形式の `pending_review.json`（`{"lesson", "questions"}`）は最初に読んだときに変換する。
   変換した問いはすべて未回答・当日期限で、元のファイルは `pending_review.json.v1.bak` に残る
 

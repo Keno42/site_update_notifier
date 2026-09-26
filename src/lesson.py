@@ -124,7 +124,8 @@ class LessonConfig:
     def report_args(
         self, name: str, failed: list[str], lesson: int | None = None
     ) -> list[str]:
-        """lesson を省くと最新のレッスンへの報告になる (振り返りは複数のレッスンにまたがる)."""
+        """lesson を省くと最新のレッスンへの報告になる. 振り返りでは出題元のレッスンを
+        必ず渡す (flush_reports)."""
         args = ["report", "--learner", str(self.learner_path(name))]
         if lesson is not None:
             args += ["--lesson", str(lesson)]
@@ -387,17 +388,19 @@ class Lessons:
                 await interaction.response.send_message(
                     f"レッスンを生成しています…{note}"
                 )
-                await self.guarded(
-                    channel, self.generate_and_post(channel, name, auto=auto)
-                )
+
+                async def report_then_generate() -> None:
+                    # 前回届かなかった報告があれば、生成の前に送る
+                    if await self.flush_reports(channel, name, queue, path):
+                        await self.generate_and_post(channel, name, auto=auto)
+
+                await self.guarded(channel, report_then_generate())
                 return
             session = ReviewSession(queue, keys, path, today)
 
             async def finish(generate: bool) -> None:
                 async def run() -> None:
-                    if session.results and not await self.report(
-                        channel, name, session
-                    ):
+                    if not await self.flush_reports(channel, name, queue, path):
                         return
                     if generate:
                         await self.generate_and_post(channel, name)
@@ -414,12 +417,15 @@ class Lessons:
             await interaction.response.send_message(session.render(), view=view)
             handed_to_view = True
             view.message = await interaction.original_response()
+            # 前回届かなかった報告があれば、振り返りの間に送り直す (同じ queue を使うので、
+            # その間に答えた分と食い違わない)
+            await self.guarded(channel, self.flush_reports(channel, name, queue, path))
         finally:
             if not handed_to_view:
                 self.busy.discard(name)
 
     @staticmethod
-    async def guarded(channel: discord.abc.Messageable, work: Awaitable[None]) -> None:
+    async def guarded(channel: discord.abc.Messageable, work: Awaitable[Any]) -> None:
         """想定外の例外もチャンネルに知らせる (ボタンのコールバックでは握りつぶされるため)."""
         try:
             await work
@@ -427,15 +433,30 @@ class Lessons:
             logging.exception("/lesson の処理中にエラーが発生しました")
             await channel.send(f"エラーが発生しました: {e}")
 
-    async def report(
-        self, channel: discord.abc.Messageable, name: str, session: ReviewSession
+    async def flush_reports(
+        self,
+        channel: discord.abc.Messageable,
+        name: str,
+        queue: ReviewQueue,
+        path: Path,
     ) -> bool:
-        rc, out, err = await run_cli(
-            self.cfg, self.cfg.report_args(name, session.failed_ids())
-        )
-        if rc != 0:
-            await channel.send(f"report に失敗しました:\n```\n{_tail(err or out)}\n```")
-            return False
+        """キューに残っている報告を、出題元のレッスンごとに audiolesson report で送る.
+
+        届いた分だけキューから消すので、失敗した分は次の /lesson で送り直す (一度届いた
+        報告は二度送らない). 最新のレッスンが「報告済み」になるのは、そのレッスンの問いに
+        答えたときだけ. すべて届けば True."""
+        for lesson, failed in queue.reports():
+            rc, out, err = await run_cli(
+                self.cfg, self.cfg.report_args(name, failed, lesson=lesson)
+            )
+            if rc != 0:
+                await channel.send(
+                    f"レッスン{lesson}の結果を report できませんでした"
+                    f"（次の /lesson で送り直します）:\n```\n{_tail(err or out)}\n```"
+                )
+                return False
+            queue.mark_reported(lesson, failed)
+            queue.save(path)
         return True
 
     async def generate_and_post(

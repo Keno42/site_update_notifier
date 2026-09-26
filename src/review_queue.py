@@ -1,8 +1,15 @@
 """Discord 振り返りのキュー (issue #31).
 
 音声レッスン側の間隔反復 (learner.json) とは別に、「いつ Discord で自己申告を
-求めるか」を問いごとに管理する。問いは一度入ったら消さず、答えるまで unseen のまま
-残る。1 回の振り返りは上限まで、優先度の高いものから出す。
+求めるか」を管理する。問いは一度入ったら消さず、答えるまで unseen のまま残る。
+1 回の振り返りは上限まで、優先度の高いものから出す。
+
+単位は項目ではなく問い: «Ég vil fara heim.» のように複数の項目を一度に言う問いは
+1 件で、その結果は含まれる項目すべてに当てはめる (どちらで詰まったかは分けられない).
+同じ項目が別の問いにも入ることがある.
+
+答えた結果のうち音声レッスン側 (audiolesson report) にまだ届いていないものは
+``pending_reports`` に出題元のレッスンごとに残し、報告できたら消す.
 """
 
 from __future__ import annotations
@@ -67,6 +74,9 @@ def key_for(items: list[str]) -> str:
 @dataclass
 class ReviewQueue:
     entries: dict[str, Entry] = field(default_factory=dict)
+    # 出題元レッスン → まだ report していない「言えなかった」項目. キーがあること自体が
+    # 「このレッスンの問いに答えたが、まだ報告していない」を表す (言えただけなら空リスト)
+    pending_reports: dict[int, list[str]] = field(default_factory=dict)
 
     # ---- 選ぶ ---------------------------------------------------------
 
@@ -98,6 +108,23 @@ class ReviewQueue:
         e.reviews += 1
         e.last_reviewed = today.isoformat()
         e.due = (today + timedelta(days=next_interval(result, e.streak))).isoformat()
+        failed = self.pending_reports.setdefault(e.source_lesson, [])
+        if result == "failed":
+            failed += [i for i in e.items if i not in failed]
+
+    # ---- 音声レッスン側への報告 -------------------------------------------
+
+    def reports(self) -> list[tuple[int, list[str]]]:
+        """まだ届いていない報告: (出題元レッスン, 言えなかった項目) をレッスン順に."""
+        return [(n, list(ids)) for n, ids in sorted(self.pending_reports.items())]
+
+    def mark_reported(self, lesson: int, sent: list[str]) -> None:
+        """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す."""
+        left = [i for i in self.pending_reports.get(lesson, []) if i not in sent]
+        if left:
+            self.pending_reports[lesson] = left
+        else:
+            self.pending_reports.pop(lesson, None)
 
     def add_from_plan(self, plan: dict, today: date) -> int:
         """生成したレッスンの問いを足す. 既存の問いは置き換えも削除もしない.
@@ -146,7 +173,10 @@ class ReviewQueue:
             path.replace(broken)
             return cls()
         if raw.get("format") == FORMAT:
-            return cls({k: Entry(**v) for k, v in raw.get("items", {}).items()})
+            return cls(
+                {k: Entry(**v) for k, v in raw.get("items", {}).items()},
+                {int(n): ids for n, ids in raw.get("pending_reports", {}).items()},
+            )
         queue = cls.from_legacy(raw, today)
         shutil.copyfile(path, path.with_name(path.name + ".v1.bak"))
         queue.save(path)
@@ -173,6 +203,7 @@ class ReviewQueue:
         data = {
             "format": FORMAT,
             "items": {k: asdict(e) for k, e in self.entries.items()},
+            "pending_reports": {str(n): v for n, v in self.pending_reports.items()},
         }
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")

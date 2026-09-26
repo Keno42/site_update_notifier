@@ -7,6 +7,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import discord
 
@@ -21,6 +22,7 @@ from src.lesson import (
     run_cli,
     setup,
 )
+from src.review_queue import Entry
 from src.review_queue import ReviewQueue
 
 D = date(2026, 9, 26)
@@ -215,6 +217,48 @@ class ViewTests(unittest.TestCase):
         self.assertTrue(callable(setup(client, config)))
 
 
+class ReportTests(unittest.TestCase):
+    """PR #32 review: a session's answers are reported per source lesson."""
+
+    def test_old_lessons_are_reported_as_themselves_not_as_the_latest(self):
+        calls = []
+
+        async def fake_cli(cfg, args, on_progress=None):
+            calls.append(args)
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(root=Path(td), users={1: "yuki"})
+            path = cfg.pending_path("yuki")
+            path.parent.mkdir(parents=True)
+            queue = ReviewQueue(
+                {
+                    "a": Entry(["a"], "p", "A.", 3, due=D.isoformat()),
+                    "b": Entry(["b"], "p", "B.", 7, due=D.isoformat()),
+                    # lesson 10 is the latest; its question is not asked this time
+                    "c": Entry(["c"], "p", "C.", 10, new=True, due="2026-10-30"),
+                }
+            )
+            session = ReviewSession(queue, ["a", "b"], path, D)
+            session.rate("failed")
+            session.rate("ok")
+            with mock.patch("src.lesson.run_cli", fake_cli):
+                ok = asyncio.run(
+                    Lessons(cfg).flush_reports(FakeChannel(), "yuki", queue, path)
+                )
+            self.assertTrue(ok)
+            learner = str(cfg.learner_path("yuki"))
+            self.assertEqual(
+                calls,
+                [
+                    ["report", "--learner", learner, "--lesson", "3", "--failed", "a"],
+                    ["report", "--learner", learner, "--lesson", "7"],
+                ],
+                "lesson 10 is not marked reported: none of its questions was answered",
+            )
+            self.assertEqual(ReviewQueue.load(path, D).reports(), [])
+
+
 FAKE_CLI = """
 import sys, time
 for i in range(10, 31, 10):
@@ -378,6 +422,55 @@ class EndToEndTests(unittest.TestCase):
             self.assertGreater(
                 len(queue.entries), len(queued), "lesson 2 questions added"
             )
+
+    def test_a_failed_report_is_sent_again_exactly_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td, review_limit=2)
+            day = {"today": D}
+            lessons = Lessons(cfg, today=lambda: day["today"])
+            channel = FakeChannel()
+            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            day["today"] = D + timedelta(days=1)
+            reports = {"left_to_fail": 1}
+
+            async def flaky_cli(cfg_, args, on_progress=None):
+                if args[0] == "report" and reports["left_to_fail"]:
+                    reports["left_to_fail"] -= 1
+                    return 1, "", "disk full"
+                return await run_cli(cfg_, args, on_progress)
+
+            async def lesson_command(*taps):
+                replies = []
+                await lessons.start(self.interaction(channel, replies))
+                view = replies[0][1]
+                buttons = {b.label: b for b in view.children}
+                for label in taps:
+                    await buttons[label].callback(FakeInteraction(1))
+
+            def failures():
+                learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
+                queue = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
+                failed = next(e for e in queue.entries.values() if e.state == "failed")
+                return [learner["items"][i]["failures"] for i in failed.items], queue
+
+            with mock.patch("src.lesson.run_cli", flaky_cli):
+                asyncio.run(lesson_command("言えなかった", "振り返らずに生成"))
+            self.assertIn("report できませんでした", channel.sent[-1][0])
+            counts, queue = failures()
+            self.assertEqual(set(counts), {0}, "not in learner.json yet")
+            self.assertEqual([n for n, _ in queue.reports()], [1], "kept for a retry")
+            self.assertNotIn("レッスン 2", " ".join(t or "" for t, _ in channel.sent))
+
+            with mock.patch("src.lesson.run_cli", flaky_cli):
+                asyncio.run(lesson_command("振り返らずに生成"))  # the next /lesson
+            counts, queue = failures()
+            self.assertEqual(set(counts), {1}, "delivered on the next /lesson")
+            self.assertEqual(queue.reports(), [])
+            self.assertIn("レッスン 2", channel.sent[-1][0])
+
+            with mock.patch("src.lesson.run_cli", flaky_cli):
+                asyncio.run(lesson_command("振り返らずに生成"))
+            self.assertEqual(set(failures()[0]), {1}, "and never sent twice")
 
     def test_second_learner_reuses_the_shared_cache(self):
         with tempfile.TemporaryDirectory() as td:
