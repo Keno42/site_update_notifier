@@ -2,8 +2,8 @@
 /lesson-auto: 振り返りも自己申告もせず生成 → 投稿 (auto モード: できた前提でペースが上がる).
 
 language-learning-audio (submodule: external/language-learning-audio) の CLI を
-subprocess で呼ぶ。永続化するのはユーザーごとの learner.json と、次の振り返りに
-使う pending_review.json だけで、生成物は投稿後に消す。
+subprocess で呼ぶ。永続化するのはユーザーごとの learner.json と、Discord 振り返りの
+キュー pending_review.json (src/review_queue.py) だけで、生成物は投稿後に消す。
 """
 
 from __future__ import annotations
@@ -16,11 +16,14 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import discord
 from discord import app_commands
+
+from .review_queue import Entry, ReviewQueue
 
 LLA_DIR = (
     Path(__file__).resolve().parent.parent / "external" / "language-learning-audio"
@@ -41,7 +44,7 @@ class LessonConfig:
     extra_args: list[str] = field(default_factory=list)
     keep_cache: bool = False
     upload_limit_mb: float = 20
-    review_limit: int = 0
+    review_limit: int = 20  # 1 回の振り返りの最大問数. 0 なら期限の来ている問いすべて
     timeout_min: float = 60
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
@@ -118,9 +121,13 @@ class LessonConfig:
             *extra,
         ]
 
-    def report_args(self, name: str, lesson: int, failed: list[str]) -> list[str]:
+    def report_args(
+        self, name: str, failed: list[str], lesson: int | None = None
+    ) -> list[str]:
+        """lesson を省くと最新のレッスンへの報告になる (振り返りは複数のレッスンにまたがる)."""
         args = ["report", "--learner", str(self.learner_path(name))]
-        args += ["--lesson", str(lesson)]
+        if lesson is not None:
+            args += ["--lesson", str(lesson)]
         if failed:
             args += ["--failed", ",".join(failed)]
         return args
@@ -129,62 +136,38 @@ class LessonConfig:
 # ---------------------------------------------------------------- review data
 
 
-def pending_from_plan(plan: dict, limit: int = 0) -> dict:
-    """plan.json の review から次回の振り返りを作る。limit > 0 なら新出項目を含む問いを優先."""
-    questions = [q for q in plan.get("review", []) if q.get("items")]
-    if limit > 0 and len(questions) > limit:
-        new = {i["id"] for i in plan.get("new_items", [])}
-        order = sorted(
-            range(len(questions)),
-            key=lambda n: (not new & set(questions[n]["items"]), n),
-        )
-        questions = [questions[n] for n in sorted(order[:limit])]
-    return {"lesson": plan["lesson_number"], "questions": questions}
-
-
-def save_pending(path: Path, pending: dict) -> None:
-    if pending["questions"]:
-        path.write_text(json.dumps(pending, ensure_ascii=False, indent=1), "utf-8")
-    else:
-        path.unlink(missing_ok=True)
-
-
-def load_pending(path: Path) -> dict | None:
-    if not path.exists():
-        return None
-    try:
-        pending = json.loads(path.read_text("utf-8"))
-    except (OSError, ValueError) as e:
-        logging.error(f"振り返りデータを読めませんでした: {path}: {e}")
-        return None
-    return pending if pending.get("questions") else None
-
-
 @dataclass
 class ReviewSession:
-    lesson: int
-    questions: list[dict]
+    """今回の振り返り: キューから選んだ問いを 1 問ずつ. 答えるたびにキューへ書き込むので、
+    途中でスキップ・時間切れになっても答えた分は残り、残りは未回答のまま次回へ回る."""
+
+    queue: ReviewQueue
+    keys: list[str]
+    path: Path
+    today: date
     results: list[str] = field(default_factory=list)
 
     @property
     def done(self) -> bool:
-        return len(self.results) >= len(self.questions)
+        return len(self.results) >= len(self.keys)
 
-    @property
-    def current(self) -> dict:
-        return self.questions[len(self.results)]
+    def entry(self, n: int) -> Entry:
+        return self.queue.entries[self.keys[n]]
 
     def rate(self, result: str) -> None:
         if result not in RESULTS:
             raise ValueError(result)
-        if not self.done:
-            self.results.append(result)
+        if self.done:
+            return
+        self.queue.record(self.keys[len(self.results)], result, self.today)
+        self.queue.save(self.path)
+        self.results.append(result)
 
     def _ids(self, result: str) -> list[str]:
         ids: list[str] = []
-        for q, r in zip(self.questions, self.results):
+        for n, r in enumerate(self.results):
             if r == result:
-                ids += [i for i in q["items"] if i not in ids]
+                ids += [i for i in self.entry(n).items if i not in ids]
         return ids
 
     def failed_ids(self) -> list[str]:
@@ -194,23 +177,37 @@ class ReviewSession:
         return self._ids("shaky")
 
     def render(self) -> str:
-        q = self.current
+        e = self.entry(len(self.results))
         return (
-            f"**振り返り {len(self.results) + 1}/{len(self.questions)}**"
-            f"（レッスン{self.lesson}）\n{q['prompt']}\n答え: ||{q['answer']}||"
+            f"**振り返り {len(self.results) + 1}/{len(self.keys)}**"
+            f"（レッスン{e.source_lesson}）\n{e.prompt}\n答え: ||{e.answer}||"
         )
 
     def summary(self) -> str:
-        answers = {i: q["answer"] for q in self.questions for i in q["items"]}
-        lines = [f"**振り返り完了**（レッスン{self.lesson}、{len(self.results)}問）"]
+        lines = [f"**振り返り**: {len(self.results)}/{len(self.keys)}問に回答"]
         for result in ("failed", "shaky"):
-            ids = self._ids(result)
-            if ids:
-                shown = "、".join(dict.fromkeys(answers[i] for i in ids))
-                lines.append(f"{RESULTS[result]}: {shown}")
+            answers = [
+                self.entry(n).answer for n, r in enumerate(self.results) if r == result
+            ]
+            if answers:
+                lines.append(f"{RESULTS[result]}: {'、'.join(dict.fromkeys(answers))}")
         if self.shaky_ids():
-            lines.append("（迷った項目は今のところ言えた扱いです）")
+            lines.append(
+                "（迷った項目は言えなかった扱いにはせず、早めにもう一度確認します）"
+            )
+        left = len(self.keys) - len(self.results)
+        if left:
+            lines.append(f"未回答の {left} 問は次回に回します。")
         return "\n".join(lines)
+
+
+def review_note(queue: ReviewQueue, day: date, limit: int) -> str:
+    """投稿に添える振り返りの見通し. ``day`` は次に振り返る日."""
+    pending = queue.due_count(day)
+    if not pending:
+        return ""
+    asked = min(pending, limit) if limit > 0 else pending
+    return f"Discord 振り返り: 次回 {asked}問（確認待ち {pending}件）"
 
 
 # ---------------------------------------------------------------- files
@@ -347,8 +344,11 @@ def _tail(text: str, limit: int = 1500) -> str:
 
 
 class Lessons:
-    def __init__(self, cfg: LessonConfig) -> None:
+    def __init__(
+        self, cfg: LessonConfig, today: Callable[[], date] = date.today
+    ) -> None:
         self.cfg = cfg
+        self.today = today
         self.busy: set[str] = set()
 
     async def start(self, interaction: discord.Interaction, auto: bool = False) -> None:
@@ -378,28 +378,29 @@ class Lessons:
         handed_to_view = False
         try:
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
-            pending = load_pending(self.cfg.pending_path(name))
-            if auto:
-                # 振り返らない分は auto モードが「できた」とみなす
-                self.cfg.pending_path(name).unlink(missing_ok=True)
+            today = self.today()
+            path = self.cfg.pending_path(name)
+            queue = ReviewQueue.load(path, today)
+            keys = [] if auto else queue.select(today, self.cfg.review_limit)
+            if not keys:
+                note = "（自動モード: 振り返りなし）" if auto else ""
                 await interaction.response.send_message(
-                    "レッスンを生成しています…（自動モード: 振り返りなし）"
+                    f"レッスンを生成しています…{note}"
                 )
                 await self.guarded(
-                    channel, self.generate_and_post(channel, name, auto=True)
+                    channel, self.generate_and_post(channel, name, auto=auto)
                 )
                 return
-            if pending is None:
-                await interaction.response.send_message("レッスンを生成しています…")
-                await self.guarded(channel, self.generate_and_post(channel, name))
-                return
-            session = ReviewSession(pending["lesson"], pending["questions"])
+            session = ReviewSession(queue, keys, path, today)
 
-            async def finish(reviewed: bool) -> None:
+            async def finish(generate: bool) -> None:
                 async def run() -> None:
-                    if reviewed and not await self.report(channel, name, session):
+                    if session.results and not await self.report(
+                        channel, name, session
+                    ):
                         return
-                    await self.generate_and_post(channel, name)
+                    if generate:
+                        await self.generate_and_post(channel, name)
 
                 try:
                     await self.guarded(channel, run())
@@ -407,7 +408,7 @@ class Lessons:
                     self.busy.discard(name)
 
             async def expire() -> None:
-                self.busy.discard(name)
+                await finish(False)  # 答えた分だけ報告し、生成はしない
 
             view = ReviewView(session, interaction.user.id, finish, expire)
             await interaction.response.send_message(session.render(), view=view)
@@ -429,14 +430,12 @@ class Lessons:
     async def report(
         self, channel: discord.abc.Messageable, name: str, session: ReviewSession
     ) -> bool:
-        failed = session.failed_ids()
         rc, out, err = await run_cli(
-            self.cfg, self.cfg.report_args(name, session.lesson, failed)
+            self.cfg, self.cfg.report_args(name, session.failed_ids())
         )
         if rc != 0:
             await channel.send(f"report に失敗しました:\n```\n{_tail(err or out)}\n```")
             return False
-        self.cfg.pending_path(name).unlink(missing_ok=True)
         return True
 
     async def generate_and_post(
@@ -463,12 +462,15 @@ class Lessons:
                 await channel.send("生成結果 (plan.json) が見つかりませんでした。")
                 return
             plan = json.loads(plan_path.read_text("utf-8"))
-            # 自動モードでも振り返りは残す: 次に /lesson を使えばそこで振り返れる
-            pending = pending_from_plan(plan, self.cfg.review_limit)
-            save_pending(self.cfg.pending_path(name), pending)
-            await self.post(
-                channel, work, plan, bool(pending["questions"]) and not auto
-            )
+            # 自動モードでも問いはキューに足す: 次に /lesson を使えばそこで振り返れる
+            today = self.today()
+            path = self.cfg.pending_path(name)
+            queue = ReviewQueue.load(path, today)
+            queue.add_from_plan(plan, today)
+            queue.save(path)
+            tomorrow = today + timedelta(days=1)
+            note = "" if auto else review_note(queue, tomorrow, self.cfg.review_limit)
+            await self.post(channel, work, plan, note)
         finally:
             cleanup(work)
 
@@ -477,7 +479,7 @@ class Lessons:
         channel: discord.abc.Messageable,
         work: Path,
         plan: dict,
-        has_review: bool,
+        review: str = "",
     ) -> None:
         n = plan["lesson_number"]
         stem = work / f"lesson-{n:03d}"
@@ -510,13 +512,7 @@ class Lessons:
         minutes = plan.get("summary", {}).get("duration_s", 0) / 60
         text = (
             f"**レッスン {n}**（約{minutes:.0f}分）\n新出: {new or 'なし'}\n"
-            f"復習: {reviewed}項目"
-            + (
-                "\n次回 /lesson の最初に、今回の振り返りをします。"
-                if has_review
-                else ""
-            )
-            + audio_note
+            f"復習: {reviewed}項目" + (f"\n{review}" if review else "") + audio_note
         )
         try:
             await channel.send(text, files=files)
@@ -532,7 +528,7 @@ class ReviewView(discord.ui.View):
         self,
         session: ReviewSession,
         owner_id: int,
-        finish: Callable[[bool], Awaitable[None]],
+        finish: Callable[[bool], Awaitable[None]],  # 引数: 続けて生成するか
         expire: Callable[[], Awaitable[None]],
     ) -> None:
         super().__init__(timeout=1800)
@@ -588,18 +584,21 @@ class ReviewView(discord.ui.View):
         if self.is_finished():
             return
         self.stop()
+        left = len(self.session.keys) - len(self.session.results)
         await interaction.response.edit_message(
-            content="振り返りをスキップしました。次のレッスンを生成しています…",
+            content=f"振り返りをスキップしました（未回答の {left} 問は次回に回します）。"
+            "次のレッスンを生成しています…",
             view=None,
         )
-        await self.finish(False)
+        await self.finish(True)
 
     async def on_timeout(self) -> None:
         await self.expire()
         if self.message is not None:
             try:
                 await self.message.edit(
-                    content="時間切れです。/lesson で振り返りを最初からやり直せます。",
+                    content="時間切れです。答えた分は記録しました。"
+                    "未回答の問いは次の /lesson で出します。",
                     view=None,
                 )
             except discord.DiscordException:

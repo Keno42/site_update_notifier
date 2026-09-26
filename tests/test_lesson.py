@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,12 +18,12 @@ from src.lesson import (
     ReviewView,
     StatusMessage,
     cleanup,
-    load_pending,
-    pending_from_plan,
     run_cli,
-    save_pending,
     setup,
 )
+from src.review_queue import ReviewQueue
+
+D = date(2026, 9, 26)
 
 QUESTIONS = [
     {"items": ["takk"], "prompt": "お礼を言って", "answer": "Takk."},
@@ -33,6 +34,19 @@ QUESTIONS = [
     },
     {"items": ["bless"], "prompt": "さようなら", "answer": "Bless."},
 ]
+
+
+def legacy_file(path, lesson=4):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"lesson": lesson, "questions": QUESTIONS}), "utf-8")
+
+
+def session_on(td):
+    """3 問 (QUESTIONS) が今日期限のキューと、その全問の振り返り."""
+    path = Path(td) / "pending_review.json"
+    legacy_file(path)
+    queue = ReviewQueue.load(path, D)
+    return ReviewSession(queue, queue.select(D), path, D)
 
 
 class ConfigTests(unittest.TestCase):
@@ -55,11 +69,12 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(args[args.index("--minutes") + 1], "15")
         self.assertNotIn("--user", args, "no settings.json: settings come from config")
         self.assertEqual(
-            cfg.report_args("yuki", 6, ["a", "b"]),
-            ["report", "--learner", "/data/yuki/learner.json", "--lesson", "6"]
-            + ["--failed", "a,b"],
+            cfg.report_args("yuki", ["a", "b"]),
+            ["report", "--learner", "/data/yuki/learner.json", "--failed", "a,b"],
         )
-        self.assertNotIn("--failed", cfg.report_args("yuki", 6, []))
+        self.assertEqual(cfg.report_args("yuki", [], lesson=6)[-2:], ["--lesson", "6"])
+        self.assertNotIn("--failed", cfg.report_args("yuki", []))
+        self.assertEqual(cfg.review_limit, 20, "a session is bounded by default")
         self.assertNotIn("--auto", args)
         self.assertEqual(cfg.generate_args("yuki", auto=True).count("--auto"), 1)
         cfg.extra_args = ["--auto"]
@@ -69,41 +84,35 @@ class ConfigTests(unittest.TestCase):
 
 
 class ReviewTests(unittest.TestCase):
-    def test_session_collects_failed_and_shaky(self):
-        s = ReviewSession(5, QUESTIONS)
-        self.assertIn("||Takk.||", s.render(), "the answer is a spoiler")
-        s.rate("failed")
-        s.rate("shaky")
-        self.assertFalse(s.done)
-        s.rate("ok")
-        self.assertTrue(s.done)
-        s.rate("failed")  # a late tap changes nothing
-        self.assertEqual(s.failed_ids(), ["takk"])
-        self.assertEqual(s.shaky_ids(), ["eg_vil", "fara_heim"])
-        summary = s.summary()
-        self.assertIn("言えなかった: Takk.", summary)
-        self.assertIn("迷った: Ég vil fara heim.", summary)
-
-    def test_limit_prefers_questions_with_new_items_and_keeps_order(self):
-        plan = {
-            "lesson_number": 3,
-            "new_items": [{"id": "bless"}, {"id": "fara_heim"}],
-            "review": QUESTIONS,
-        }
-        self.assertEqual(pending_from_plan(plan)["questions"], QUESTIONS)
-        limited = pending_from_plan(plan, limit=2)["questions"]
-        self.assertEqual(
-            [q["answer"] for q in limited], ["Ég vil fara heim.", "Bless."]
-        )
-
-    def test_pending_round_trip(self):
+    def test_session_saves_each_answer_to_the_queue(self):
         with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "pending_review.json"
-            save_pending(path, {"lesson": 2, "questions": QUESTIONS})
-            self.assertEqual(load_pending(path)["lesson"], 2)
-            save_pending(path, {"lesson": 3, "questions": []})
-            self.assertFalse(path.exists(), "nothing to review: no file")
-            self.assertIsNone(load_pending(path))
+            s = session_on(td)
+            self.assertIn("||Takk.||", s.render(), "the answer is a spoiler")
+            s.rate("failed")
+            on_disk = ReviewQueue.load(s.path, D).entries
+            self.assertEqual(on_disk["takk"].state, "failed", "saved right away")
+            self.assertEqual(on_disk["bless"].state, "unseen")
+            s.rate("shaky")
+            self.assertFalse(s.done)
+            s.rate("ok")
+            self.assertTrue(s.done)
+            s.rate("failed")  # a late tap changes nothing
+            self.assertEqual(ReviewQueue.load(s.path, D).entries["bless"].state, "ok")
+            self.assertEqual(s.failed_ids(), ["takk"])
+            self.assertEqual(s.shaky_ids(), ["eg_vil", "fara_heim"])
+            summary = s.summary()
+            self.assertIn("言えなかった: Takk.", summary)
+            self.assertIn("迷った: Ég vil fara heim.", summary)
+
+    def test_unanswered_questions_stay_in_the_queue(self):
+        with tempfile.TemporaryDirectory() as td:
+            s = session_on(td)
+            s.rate("ok")
+            self.assertIn("未回答の 2 問は次回", s.summary())
+            states = {
+                k: e.state for k, e in ReviewQueue.load(s.path, D).entries.items()
+            }
+            self.assertEqual(sorted(states.values()), ["ok", "unseen", "unseen"])
 
     def test_cleanup_empties_the_work_dir(self):
         with tempfile.TemporaryDirectory() as td:
@@ -141,19 +150,20 @@ class FakeInteraction:
 
 
 class ViewTests(unittest.TestCase):
-    def run_view(self, taps):
-        """taps: [(user_id, button label)] → (finish calls, interactions)."""
+    def run_view(self, taps, timeout=False):
+        """taps: [(user_id, button label)] → (finish calls, interactions, session)."""
 
-        async def scenario():
+        async def scenario(td):
             finished = []
 
-            async def finish(reviewed):
-                finished.append(reviewed)
+            async def finish(generate):
+                finished.append(generate)
 
             async def expire():
                 finished.append("expired")
 
-            view = ReviewView(ReviewSession(4, QUESTIONS), 1, finish, expire)
+            session = session_on(td)
+            view = ReviewView(session, 1, finish, expire)
             buttons = {b.label: b for b in view.children}
             done = []
             for user_id, label in taps:
@@ -161,23 +171,42 @@ class ViewTests(unittest.TestCase):
                 if await view.interaction_check(it):
                     await buttons[label].callback(it)
                 done.append(it)
-            return finished, done
+            if timeout:
+                await view.on_timeout()
+            session.saved = sorted(  # what is on disk, read before the temp dir goes
+                e.state for e in ReviewQueue.load(session.path, D).entries.values()
+            )
+            return finished, done, session
 
-        return asyncio.run(scenario())
+        with tempfile.TemporaryDirectory() as td:
+            return asyncio.run(scenario(td))
 
     def test_rating_every_question_finishes_once(self):
         taps = [(1, "言えなかった"), (1, "言えた"), (1, "迷った"), (1, "言えた")]
-        finished, its = self.run_view(taps)
+        finished, its, _ = self.run_view(taps)
         self.assertEqual(finished, [True])
         self.assertIn("||Ég vil fara heim.||", its[0].edits[0][0], "next question")
-        self.assertIn("振り返り完了", its[2].edits[0][0])
+        self.assertIn("3/3問に回答", its[2].edits[0][0])
         self.assertIsNone(its[2].edits[0][1], "buttons removed at the end")
         self.assertEqual(its[3].edits, [], "a tap after the end is ignored")
 
-    def test_only_the_owner_can_answer_and_skip_generates_without_report(self):
-        finished, its = self.run_view([(2, "言えた"), (1, "振り返らずに生成")])
+    def test_only_the_owner_can_answer(self):
+        finished, its, session = self.run_view([(2, "言えた")])
         self.assertEqual(its[0].messages, [("本人だけが回答できます。", True)])
-        self.assertEqual(finished, [False])
+        self.assertEqual((finished, session.results), ([], []))
+
+    def test_skip_keeps_the_unanswered_and_still_generates(self):
+        finished, its, session = self.run_view(
+            [(1, "言えなかった"), (1, "振り返らずに生成")]
+        )
+        self.assertEqual(finished, [True])
+        self.assertIn("未回答の 2 問は次回", its[1].edits[0][0])
+        self.assertEqual(session.saved, ["failed", "unseen", "unseen"])
+
+    def test_timeout_keeps_the_answers_and_the_rest(self):
+        finished, _, session = self.run_view([(1, "迷った")], timeout=True)
+        self.assertEqual(finished, ["expired"])
+        self.assertEqual(session.saved, ["shaky", "unseen", "unseen"])
 
     def test_setup_registers_only_when_configured(self):
         client = discord.Client(intents=discord.Intents.default())
@@ -275,39 +304,80 @@ class FakeChannel(discord.abc.Messageable):
 class EndToEndTests(unittest.TestCase):
     """実際の CLI (stub 音声) で 生成 → 投稿 → 振り返り → report → 次の生成."""
 
-    def test_two_lessons(self):
+    def config(self, td, **kw):
+        return LessonConfig(
+            root=Path(td),
+            users={1: "yuki"},
+            minutes=3,
+            extra_args=["--provider", "stub"],
+            **kw,
+        )
+
+    @staticmethod
+    def interaction(channel, replies):
+        class Response:
+            async def send_message(self, content, ephemeral=False, view=None):
+                replies.append((content, view))
+
+        async def original_response():
+            return None
+
+        return SimpleNamespace(
+            user=SimpleNamespace(id=1),
+            channel_id=5,
+            channel=channel,
+            response=Response(),
+            original_response=original_response,
+        )
+
+    def test_review_report_and_next_lesson_through_discord(self):
         with tempfile.TemporaryDirectory() as td:
-            cfg = LessonConfig(
-                root=Path(td),
-                users={1: "yuki"},
-                minutes=3,
-                extra_args=["--provider", "stub"],
-            )
-            lessons = Lessons(cfg)
+            cfg = self.config(td, review_limit=2)
+            day = {"today": D}
+            lessons = Lessons(cfg, today=lambda: day["today"])
             channel = FakeChannel()
             asyncio.run(lessons.generate_and_post(channel, "yuki"))
             text, files = channel.sent[-1]
             self.assertIn("レッスン 1", text)
             self.assertIn("lesson-001.wav", files)
             self.assertIn("lesson-001.transcript.md", files)
+            self.assertIn("Discord 振り返り: 次回 2問（確認待ち", text)
             user = Path(td) / "yuki"
-            kept = sorted(p.name for p in user.iterdir())
-            self.assertEqual(kept[:1], ["learner.json"])
+            self.assertEqual(
+                sorted(p.name for p in user.iterdir())[:1], ["learner.json"]
+            )
             self.assertEqual(list((user / "work").iterdir()), [], "outputs removed")
-            pending = load_pending(cfg.pending_path("yuki"))
-            if pending is None:
-                self.skipTest("submodule predates plan.json `review`")
-            session = ReviewSession(pending["lesson"], pending["questions"])
-            session.rate("failed")
-            while not session.done:
-                session.rate("ok")
-            self.assertTrue(asyncio.run(lessons.report(channel, "yuki", session)))
-            self.assertIsNone(load_pending(cfg.pending_path("yuki")))
-            learner = json.loads((user / "learner.json").read_text("utf-8"))
-            failed = session.failed_ids()[0]
-            self.assertEqual(learner["items"][failed]["failures"], 1)
-            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            queued = ReviewQueue.load(cfg.pending_path("yuki"), D).entries
+            self.assertGreater(len(queued), 2, "more questions than one session holds")
+
+            day["today"] = D + timedelta(days=1)
+            replies = []
+
+            async def review():
+                await lessons.start(self.interaction(channel, replies))
+                view = replies[0][1]
+                self.assertIsNotNone(view, "a review starts")
+                self.assertIn("振り返り 1/2", replies[0][0], "bounded by the limit")
+                buttons = {b.label: b for b in view.children}
+                await buttons["言えなかった"].callback(FakeInteraction(1))
+                await buttons["振り返らずに生成"].callback(FakeInteraction(1))
+
+            asyncio.run(review())
             self.assertIn("レッスン 2", channel.sent[-1][0])
+            self.assertEqual(lessons.busy, set())
+            queue = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
+            failed = [e for e in queue.entries.values() if e.state == "failed"]
+            self.assertEqual(len(failed), 1)
+            learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
+            for item_id in failed[0].items:
+                self.assertEqual(learner["items"][item_id]["failures"], 1, "reported")
+            unseen_before = {k for k, e in queued.items()} - {
+                k for k, e in queue.entries.items() if e.state != "unseen"
+            }
+            self.assertTrue(unseen_before <= set(queue.entries), "nothing dropped")
+            self.assertGreater(
+                len(queue.entries), len(queued), "lesson 2 questions added"
+            )
 
     def test_second_learner_reuses_the_shared_cache(self):
         with tempfile.TemporaryDirectory() as td:
@@ -338,8 +408,7 @@ class EndToEndTests(unittest.TestCase):
             lessons = Lessons(cfg)
             channel = FakeChannel()
             cfg.user_dir("yuki").mkdir(parents=True)
-            stale = {"lesson": 9, "questions": QUESTIONS}
-            save_pending(cfg.pending_path("yuki"), stale)
+            legacy_file(cfg.pending_path("yuki"), lesson=9)
             replies = []
 
             class Response:
@@ -360,9 +429,16 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn("振り返り", text)
             learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
             self.assertEqual(learner["feedback_mode"], "auto")
-            pending = load_pending(cfg.pending_path("yuki"))
+            queue = ReviewQueue.load(cfg.pending_path("yuki"), date.today())
+            self.assertTrue({"takk", "bless"} <= set(queue.entries), "queue kept")
             self.assertTrue(
-                pending is None or pending["lesson"] == 1, "stale review dropped"
+                any(e.source_lesson == 1 for e in queue.entries.values()),
+                "the new lesson's questions are queued for a later /lesson",
+            )
+            self.assertTrue(
+                cfg.pending_path("yuki")
+                .with_name("pending_review.json.v1.bak")
+                .exists()
             )
             self.assertEqual(lessons.busy, set())
 
