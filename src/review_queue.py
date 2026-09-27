@@ -9,7 +9,8 @@
 同じ項目が別の問いにも入ることがある.
 
 答えた結果のうち音声レッスン側 (audiolesson report) にまだ届いていないものは
-``pending_reports`` に出題元のレッスンごとに残し、報告できたら消す.
+``pending_reports`` に出題元のレッスンごとに、結果 (言えた / 迷った / 言えなかった) 別に
+残し、報告できたら消す. 音声レッスン側はどれも別々に扱う (issue #119).
 """
 
 from __future__ import annotations
@@ -24,6 +25,12 @@ from pathlib import Path
 
 FORMAT = "lesson-review-queue/2"
 STATES = ("unseen", "ok", "shaky", "failed")
+Report = dict[str, list[str]]  # 結果 ("failed" / "shaky" / "ok") → 項目
+
+
+def empty_report() -> Report:
+    return {"failed": [], "shaky": [], "ok": []}
+
 
 # 結果ごとの次の確認までの日数。同じ結果が続くたびに次の値へ進む (最後の値で頭打ち)
 INTERVALS: dict[str, tuple[int, ...]] = {
@@ -31,7 +38,7 @@ INTERVALS: dict[str, tuple[int, ...]] = {
     "shaky": (1, 3, 7),
     "ok": (1, 3, 7, 14, 30),
 }
-# これだけ期限を過ぎた問いは新出項目と同じ優先度に上げる (新出が毎回あっても埋もれない)
+# これだけ期限を過ぎた問いは「言えなかった」と同じ優先度に上げる (新出が毎回あっても埋もれない)
 PROMOTE_AFTER_DAYS = 7
 
 
@@ -55,13 +62,18 @@ class Entry:
     due: str = ""
 
     def tier(self, today: date) -> int:
-        """小さいほど先に出す. 期限前は 5."""
+        """小さいほど先に出す. 期限前は 5.
+
+        まだ答えていない新出の問いが最優先 (issue #119): 答えがなければ音声レッスン側は
+        成功とみなすので、確かめずに済ませてしまわないよう、前回の新出を必ず先に聞く."""
         due = date.fromisoformat(self.due)
         if due > today:
             return 5
-        if self.state == "failed":
+        if self.new and self.state == "unseen":
             return 0
-        tier = {"shaky": 2, "ok": 4}.get(self.state, 1 if self.new else 3)
+        if self.state == "failed":
+            return 1
+        tier = {"shaky": 2, "ok": 4}.get(self.state, 3)
         if tier > 1 and (today - due).days >= PROMOTE_AFTER_DAYS:
             tier = 1  # 長く待たされている
         return tier
@@ -74,24 +86,58 @@ def key_for(items: list[str]) -> str:
 @dataclass
 class ReviewQueue:
     entries: dict[str, Entry] = field(default_factory=dict)
-    # 出題元レッスン → まだ report していない「言えなかった」項目. キーがあること自体が
-    # 「このレッスンの問いに答えたが、まだ報告していない」を表す (言えただけなら空リスト)
-    pending_reports: dict[int, list[str]] = field(default_factory=dict)
+    # 出題元レッスン → まだ report していない結果別の項目. キーがあること自体が
+    # 「このレッスンの問いに答えたが、まだ報告していない」を表す
+    pending_reports: dict[int, Report] = field(default_factory=dict)
 
     # ---- 選ぶ ---------------------------------------------------------
 
+    def latest_lesson(self) -> int:
+        """キューに問いを足した最新のレッスン (直前に生成したレッスン)."""
+        return max((e.source_lesson for e in self.entries.values()), default=0)
+
+    def must_answer(self) -> list[str]:
+        """直前のレッスンの、まだ答えていない新出の問い. 通常の /lesson ではこれに全部
+        答えるまで次のレッスンを生成しない (答えがなければ音声レッスン側は成功とみなすので、
+        新出だけは必ず確かめる)."""
+        latest = self.latest_lesson()
+        return [
+            k
+            for k, e in self.entries.items()
+            if e.new and e.state == "unseen" and e.source_lesson == latest
+        ]
+
+    def drop_stale_new(self) -> list[str]:
+        """直前より前のレッスンの、答えないまま次のレッスンに進んだ新出の問いを外す
+        (/lesson-auto を挟んだときなど). 音声レッスン側では成功とみなされ済みなので報告は
+        要らない. 後の復習でその項目がまた出れば、通常の問いとしてキューに入り直す."""
+        latest = self.latest_lesson()
+        stale = [
+            k
+            for k, e in self.entries.items()
+            if e.new and e.state == "unseen" and e.source_lesson < latest
+        ]
+        for k in stale:
+            del self.entries[k]
+        return stale
+
     def select(self, today: date, limit: int = 0) -> list[str]:
-        """今回の振り返りで出す問いのキー. limit > 0 なら最大 limit 問で、期限の来ている
+        """今回の振り返りで出す問いのキー. 直前のレッスンの未回答の新出 (must_answer) は
+        limit を超えても全部、先頭に. limit > 0 なら残りを最大 limit 問まで、期限の来ている
         問いが足りなければ期限前の問いで埋める. limit = 0 なら期限の来ている問いすべて."""
 
         def order(k: str) -> tuple:
             e = self.entries[k]
-            return (e.tier(today), e.due, e.last_reviewed or "")
+            tier = e.tier(today)
+            # 新出どうしは新しいレッスンから (前回の新出が上限で押し出されない)
+            latest_first = -e.source_lesson if tier == 0 else 0
+            return (tier, latest_first, e.due, e.last_reviewed or "")
 
-        ranked = sorted(self.entries, key=order)
+        required = sorted(self.must_answer(), key=order)
+        rest = [k for k in sorted(self.entries, key=order) if k not in required]
         if limit <= 0:
-            return [k for k in ranked if self.entries[k].tier(today) < 5]
-        return ranked[:limit]
+            return required + [k for k in rest if self.entries[k].tier(today) < 5]
+        return required + rest[: max(0, limit - len(required))]
 
     def due_count(self, today: date) -> int:
         return sum(1 for e in self.entries.values() if e.tier(today) < 5)
@@ -108,20 +154,26 @@ class ReviewQueue:
         e.reviews += 1
         e.last_reviewed = today.isoformat()
         e.due = (today + timedelta(days=next_interval(result, e.streak))).isoformat()
-        failed = self.pending_reports.setdefault(e.source_lesson, [])
-        if result == "failed":
-            failed += [i for i in e.items if i not in failed]
+        ids = self.pending_reports.setdefault(e.source_lesson, empty_report())[result]
+        ids += [i for i in e.items if i not in ids]
 
     # ---- 音声レッスン側への報告 -------------------------------------------
 
-    def reports(self) -> list[tuple[int, list[str]]]:
-        """まだ届いていない報告: (出題元レッスン, 言えなかった項目) をレッスン順に."""
-        return [(n, list(ids)) for n, ids in sorted(self.pending_reports.items())]
+    def reports(self) -> list[tuple[int, Report]]:
+        """まだ届いていない報告: (出題元レッスン, 結果別の項目) をレッスン順に."""
+        return [
+            (n, {k: list(v) for k, v in r.items()})
+            for n, r in sorted(self.pending_reports.items())
+        ]
 
-    def mark_reported(self, lesson: int, sent: list[str]) -> None:
+    def mark_reported(self, lesson: int, sent: Report) -> None:
         """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す."""
-        left = [i for i in self.pending_reports.get(lesson, []) if i not in sent]
-        if left:
+        pending = self.pending_reports.get(lesson, empty_report())
+        left = {
+            k: [i for i in ids if i not in sent.get(k, [])]
+            for k, ids in pending.items()
+        }
+        if any(left.values()):
             self.pending_reports[lesson] = left
         else:
             self.pending_reports.pop(lesson, None)
@@ -129,12 +181,11 @@ class ReviewQueue:
     def add_from_plan(self, plan: dict, today: date) -> int:
         """生成したレッスンの問いを足す. 既存の問いは置き換えも削除もしない.
 
-        新出項目の問いは翌日から. 復習した項目の問いは、その項目がまだ一度も
+        新出項目の問いはすぐ (同じ日の次の /lesson でも) 出す. 復習した項目の問いは、その項目がまだ一度も
         キューに入っていない (Discord で確かめる機会がなかった) ときだけ足す.
         足した数を返す."""
         new_ids = {i["id"] for i in plan.get("new_items", [])}
         queued = {i for e in self.entries.values() for i in e.items}
-        due = (today + timedelta(days=1)).isoformat()
         added = 0
         for q in plan.get("review", []):
             items = list(q.get("items") or [])
@@ -144,6 +195,7 @@ class ReviewQueue:
             is_new = bool(new_ids & set(items))
             if not is_new and set(items) <= queued:
                 continue  # どの項目もすでに確認の予定がある
+            due = (today if is_new else today + timedelta(days=1)).isoformat()
             self.entries[key] = Entry(
                 items=items,
                 prompt=q["prompt"],
@@ -175,7 +227,7 @@ class ReviewQueue:
         if raw.get("format") == FORMAT:
             return cls(
                 {k: Entry(**v) for k, v in raw.get("items", {}).items()},
-                {int(n): ids for n, ids in raw.get("pending_reports", {}).items()},
+                {int(n): _report(r) for n, r in raw.get("pending_reports", {}).items()},
             )
         queue = cls.from_legacy(raw, today)
         shutil.copyfile(path, path.with_name(path.name + ".v1.bak"))
@@ -208,3 +260,13 @@ class ReviewQueue:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
         os.replace(tmp, path)
+
+
+def _report(raw: list[str] | dict[str, list[str]]) -> Report:
+    """保存された報告. 以前の形式 (言えなかった項目のリストだけ) も読む."""
+    report = empty_report()
+    if isinstance(raw, list):
+        report["failed"] = list(raw)
+    else:
+        report.update({k: list(v) for k, v in raw.items() if k in report})
+    return report

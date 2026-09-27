@@ -122,15 +122,26 @@ class LessonConfig:
         ]
 
     def report_args(
-        self, name: str, failed: list[str], lesson: int | None = None
+        self,
+        name: str,
+        failed: list[str],
+        lesson: int | None = None,
+        hesitated: list[str] | None = None,
+        recalled: list[str] | None = None,
     ) -> list[str]:
         """lesson を省くと最新のレッスンへの報告になる. 振り返りでは出題元のレッスンを
-        必ず渡す (flush_reports)."""
+        必ず渡す (flush_reports). 迷った / 言えたも送る: 音声レッスン側は言えなかった・
+        迷った・言えたで次の復習を変える (issue #119)."""
         args = ["report", "--learner", str(self.learner_path(name))]
         if lesson is not None:
             args += ["--lesson", str(lesson)]
-        if failed:
-            args += ["--failed", ",".join(failed)]
+        for flag, ids in (
+            ("--failed", failed),
+            ("--hesitated", hesitated),
+            ("--recalled", recalled),
+        ):
+            if ids:
+                args += [flag, ",".join(ids)]
         return args
 
 
@@ -140,7 +151,7 @@ class LessonConfig:
 @dataclass
 class ReviewSession:
     """今回の振り返り: キューから選んだ問いを 1 問ずつ. 答えるたびにキューへ書き込むので、
-    途中でスキップ・時間切れになっても答えた分は残り、残りは未回答のまま次回へ回る."""
+    途中で時間切れになっても答えた分は残り、残りは未回答のまま次回へ回る."""
 
     queue: ReviewQueue
     keys: list[str]
@@ -211,7 +222,8 @@ def review_note(queue: ReviewQueue, day: date, limit: int) -> str:
     pending = queue.due_count(day)
     if not pending:
         return ""
-    asked = min(pending, limit) if limit > 0 else pending
+    # 直前のレッスンの新出は上限を超えても全部出る (ReviewQueue.select)
+    asked = max(len(queue.must_answer()), min(pending, limit)) if limit > 0 else pending
     return f"Discord 振り返り: 次回 {asked}問（確認待ち {pending}件）"
 
 
@@ -386,6 +398,8 @@ class Lessons:
             today = self.today()
             path = self.cfg.pending_path(name)
             queue = ReviewQueue.load(path, today)
+            if not auto and queue.drop_stale_new():
+                queue.save(path)
             keys = [] if auto else queue.select(today, self.cfg.review_limit)
             if not keys:
                 note = "（自動モード: 振り返りなし）" if auto else ""
@@ -449,17 +463,22 @@ class Lessons:
         届いた分だけキューから消すので、失敗した分は次の /lesson で送り直す (一度届いた
         報告は二度送らない). 最新のレッスンが「報告済み」になるのは、そのレッスンの問いに
         答えたときだけ. すべて届けば True."""
-        for lesson, failed in queue.reports():
-            rc, out, err = await run_cli(
-                self.cfg, self.cfg.report_args(name, failed, lesson=lesson)
+        for lesson, outcome in queue.reports():
+            args = self.cfg.report_args(
+                name,
+                outcome["failed"],
+                lesson=lesson,
+                hesitated=outcome["shaky"],
+                recalled=outcome["ok"],
             )
+            rc, out, err = await run_cli(self.cfg, args)
             if rc != 0:
                 await channel.send(
                     f"レッスン{lesson}の結果を report できませんでした"
                     f"（次の /lesson で送り直します）:\n```\n{_tail(err or out)}\n```"
                 )
                 return False
-            queue.mark_reported(lesson, failed)
+            queue.mark_reported(lesson, outcome)
             queue.save(path)
         return True
 
@@ -547,7 +566,11 @@ class Lessons:
 
 
 class ReviewView(discord.ui.View):
-    """1問ずつ: 「答えを見る」で答えと評価ボタンを出し、評価すると次の問いに差し替え."""
+    """1問ずつ: 「答えを見る」で答えと評価ボタンを出し、評価すると次の問いに差し替え.
+
+    振り返りを飛ばして生成するボタンはない: 直前のレッスンの新出に全部答えるまで次の
+    レッスンは生成しない (答えなければ音声レッスン側は成功とみなすため). 振り返らずに
+    生成したいときは /lesson-auto."""
 
     def __init__(
         self,
@@ -565,7 +588,7 @@ class ReviewView(discord.ui.View):
         self._show(revealed=False)
 
     def _show(self, revealed: bool) -> None:
-        """答えの前は「答えを見る」だけ、答えの後は評価ボタン. どちらにもスキップ."""
+        """答えの前は「答えを見る」だけ、答えの後は評価ボタン."""
         self.clear_items()
         if revealed:
             for result, style in (
@@ -584,11 +607,6 @@ class ReviewView(discord.ui.View):
             )
             reveal.callback = self._reveal  # type: ignore[method-assign]
             self.add_item(reveal)
-        skip: discord.ui.Button = discord.ui.Button(
-            label="振り返らずに生成", style=discord.ButtonStyle.secondary, row=1
-        )
-        skip.callback = self._skip  # type: ignore[method-assign]
-        self.add_item(skip)
 
     async def _reveal(self, interaction: discord.Interaction) -> None:
         if self.is_finished() or self.session.done:
@@ -627,18 +645,6 @@ class ReviewView(discord.ui.View):
             await self.finish(True)
 
         return callback
-
-    async def _skip(self, interaction: discord.Interaction) -> None:
-        if self.is_finished():
-            return
-        self.stop()
-        left = len(self.session.keys) - len(self.session.results)
-        await interaction.response.edit_message(
-            content=f"振り返りをスキップしました（未回答の {left} 問は次回に回します）。"
-            "次のレッスンを生成しています…",
-            view=None,
-        )
-        await self.finish(True)
 
     async def on_timeout(self) -> None:
         await self.expire()

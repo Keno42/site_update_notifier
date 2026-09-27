@@ -92,13 +92,58 @@ class SelectionTests(unittest.TestCase):
         )
         self.assertEqual(
             q.select(D, limit=10),
-            ["failed", "new", "shaky", "old_unseen", "ok", "later"],
+            ["new", "failed", "shaky", "old_unseen", "ok", "later"],
         )
         self.assertEqual(
             q.select(D, limit=0),
-            ["failed", "new", "shaky", "old_unseen", "ok"],
+            ["new", "failed", "shaky", "old_unseen", "ok"],
             "without a limit only what is due",
         )
+
+    def test_the_last_lessons_new_items_come_first(self):
+        """Issue #119: an unanswered item counts as recalled on the audio side, so the last
+        lesson's new items are asked first — before failures, before long-waiting
+        questions, and before an older lesson's still unanswered new items."""
+        waiting = {f"old{i}": entry("ok", due=D - timedelta(days=30)) for i in range(5)}
+        q = ReviewQueue(waiting | {"f": entry("failed")})
+        older = entry(new=True, due=D - timedelta(days=5))
+        older.source_lesson = 6
+        q.entries["older_new"] = older
+        q.add_from_plan(plan(7, ["a", "b"], [["a"], ["b"]]), D)
+        self.assertEqual(
+            q.select(D, limit=3), ["a", "b", "older_new"], "the same day too"
+        )
+        q.record("a", "ok", D)
+        self.assertNotIn("a", q.select(D, limit=3), "once answered, no longer first")
+
+    def test_every_new_item_of_the_last_lesson_is_asked_past_the_limit(self):
+        """#38 review: /lesson generates only after the last lesson's new items are all
+        answered, so a session holds all of them even beyond the limit."""
+        q = ReviewQueue({"f": entry("failed")})
+        q.add_from_plan(plan(7, list("abcde"), [[i] for i in "abcde"]), D)
+        self.assertEqual(sorted(q.must_answer()), list("abcde"))
+        self.assertEqual(
+            sorted(q.select(D, limit=3)), list("abcde"), "all five, no room"
+        )
+        self.assertEqual(q.select(D, limit=6)[-1], "f", "the rest fill what is left")
+        for k in "abcde":
+            q.record(k, "ok", D)
+        self.assertEqual(q.must_answer(), [])
+
+    def test_an_older_lessons_unanswered_new_items_leave_the_queue(self):
+        """#38 review: a new item left unanswered when the next lesson was generated (a
+        /lesson-auto in between) was presumed recalled by the audio lesson; it leaves the
+        queue instead of waiting forever behind newer new items. Answered and non-new
+        questions stay, and the item can come back as an ordinary question later."""
+        q = ReviewQueue()
+        q.add_from_plan(plan(6, ["old", "done"], [["old"], ["done"], ["rev"]]), D)
+        q.record("done", "shaky", D)
+        q.add_from_plan(plan(7, ["new"], [["new"]]), D + timedelta(days=1))
+        self.assertEqual(q.drop_stale_new(), ["old"])
+        self.assertEqual(sorted(q.entries), ["done", "new", "rev"])
+        self.assertEqual(q.drop_stale_new(), [], "the last lesson's are kept")
+        q.add_from_plan(plan(8, [], [["old"]]), D + timedelta(days=2))
+        self.assertFalse(q.entries["old"].new, "back as an ordinary question")
 
     def test_ties_earliest_due_then_oldest_review(self):
         q = ReviewQueue(
@@ -126,6 +171,9 @@ class SelectionTests(unittest.TestCase):
         )
 
     def test_long_waiting_items_are_not_starved_by_new_ones(self):
+        """The last lesson's new items fill a session first (#119); with room left over, an
+        overdue question still reaches the front within PROMOTE_AFTER_DAYS. (A session whose
+        limit the new items alone use up asks only them.)"""
         q = ReviewQueue({"old": entry("ok", due=D)})
         asked_on = None
         for day in range(PROMOTE_AFTER_DAYS + 2):
@@ -138,7 +186,7 @@ class SelectionTests(unittest.TestCase):
                 ),
                 today - timedelta(days=1),
             )
-            for k in q.select(today, limit=3):
+            for k in q.select(today, limit=5):
                 if k == "old":
                     asked_on = day
                 q.record(k, "ok", today)
@@ -164,41 +212,70 @@ class ReportBookkeepingTests(unittest.TestCase):
             {"a": at(3, "a"), "b": at(7, "b"), "c": at(7, "c"), "d": at(7, "d")}
         )
 
-    def test_answers_are_grouped_by_source_lesson(self):
+    def test_answers_are_grouped_by_source_lesson_and_outcome(self):
+        """Issue #119: every outcome is reported, not only failures — the audio lesson
+        schedules recalled, hesitated and not recalled differently."""
         q = self.queue()
         q.record("a", "failed", D)
         q.record("b", "ok", D)
-        q.record("c", "failed", D)
-        self.assertEqual(q.reports(), [(3, ["a"]), (7, ["c"])])
-        q.mark_reported(3, ["a"])
-        self.assertEqual(q.reports(), [(7, ["c"])])
+        q.record("c", "shaky", D)
+        self.assertEqual(
+            q.reports(),
+            [
+                (3, {"failed": ["a"], "shaky": [], "ok": []}),
+                (7, {"failed": [], "shaky": ["c"], "ok": ["b"]}),
+            ],
+        )
+        q.mark_reported(3, q.reports()[0][1])
+        self.assertEqual([n for n, _ in q.reports()], [7])
 
-    def test_an_ok_only_lesson_still_needs_a_report(self):
+    def test_a_reported_lesson_leaves_the_queue(self):
         q = self.queue()
         q.record("b", "ok", D)
-        self.assertEqual(q.reports(), [(7, [])], "reported without --failed")
-        q.mark_reported(7, [])
+        sent = q.reports()[0][1]
+        self.assertEqual(sent, {"failed": [], "shaky": [], "ok": ["b"]})
+        q.mark_reported(7, sent)
         self.assertEqual(q.reports(), [])
 
     def test_answers_given_while_a_report_is_in_flight_are_kept(self):
         q = self.queue()
         q.record("c", "failed", D)
         sent = q.reports()[0][1]
-        q.record("d", "failed", D)  # answered during the CLI call
+        q.record("d", "shaky", D)  # answered during the CLI call
         q.mark_reported(7, sent)
-        self.assertEqual(q.reports(), [(7, ["d"])])
+        self.assertEqual(q.reports(), [(7, {"failed": [], "shaky": ["d"], "ok": []})])
 
     def test_pending_reports_survive_a_restart(self):
         q = self.queue()
         q.record("a", "failed", D)
+        q.record("b", "ok", D)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "pending_review.json"
             q.save(path)
-            self.assertEqual(ReviewQueue.load(path, D).reports(), [(3, ["a"])])
+            self.assertEqual(ReviewQueue.load(path, D).reports(), q.reports())
+
+    def test_pending_failures_saved_by_the_previous_version_load(self):
+        """Before #119 only failures were kept, as a bare list per lesson."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "pending_review.json"
+            raw = {
+                "format": FORMAT,
+                "items": {},
+                "pending_reports": {"3": ["a"], "7": []},
+            }
+            path.write_text(json.dumps(raw), "utf-8")
+            self.assertEqual(
+                ReviewQueue.load(path, D).reports(),
+                [
+                    (3, {"failed": ["a"], "shaky": [], "ok": []}),
+                    (7, {"failed": [], "shaky": [], "ok": []}),
+                ],
+                "an answered-but-unreported lesson is still reported",
+            )
 
 
 class PlanTests(unittest.TestCase):
-    def test_new_items_join_due_tomorrow_and_nothing_is_replaced(self):
+    def test_new_items_are_due_at_once_and_nothing_is_replaced(self):
         q = ReviewQueue()
         q.add_from_plan(plan(1, ["a"], [["a"], ["b"], ["c", "d"]]), D)
         self.assertEqual(
@@ -206,7 +283,8 @@ class PlanTests(unittest.TestCase):
         )
         self.assertTrue(q.entries["a"].new)
         self.assertFalse(q.entries["b"].new)
-        self.assertEqual(q.entries["a"].due, (D + timedelta(days=1)).isoformat())
+        self.assertEqual(q.entries["a"].due, D.isoformat(), "asked at the next /lesson")
+        self.assertEqual(q.entries["b"].due, (D + timedelta(days=1)).isoformat())
         q.record("a", "failed", D + timedelta(days=1))
         added = q.add_from_plan(
             plan(2, [], [["a"], ["b"], ["d"], ["e"]]), D + timedelta(days=1)
