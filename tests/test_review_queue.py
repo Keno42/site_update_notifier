@@ -116,6 +116,35 @@ class SelectionTests(unittest.TestCase):
         q.record("a", "ok", D)
         self.assertNotIn("a", q.select(D, limit=3), "once answered, no longer first")
 
+    def test_every_new_item_of_the_last_lesson_is_asked_past_the_limit(self):
+        """#38 review: /lesson generates only after the last lesson's new items are all
+        answered, so a session holds all of them even beyond the limit."""
+        q = ReviewQueue({"f": entry("failed")})
+        q.add_from_plan(plan(7, list("abcde"), [[i] for i in "abcde"]), D)
+        self.assertEqual(sorted(q.must_answer()), list("abcde"))
+        self.assertEqual(
+            sorted(q.select(D, limit=3)), list("abcde"), "all five, no room"
+        )
+        self.assertEqual(q.select(D, limit=6)[-1], "f", "the rest fill what is left")
+        for k in "abcde":
+            q.record(k, "ok", D)
+        self.assertEqual(q.must_answer(), [])
+
+    def test_an_older_lessons_unanswered_new_items_leave_the_queue(self):
+        """#38 review: a new item left unanswered when the next lesson was generated (a
+        /lesson-auto in between) was presumed recalled by the audio lesson; it leaves the
+        queue instead of waiting forever behind newer new items. Answered and non-new
+        questions stay, and the item can come back as an ordinary question later."""
+        q = ReviewQueue()
+        q.add_from_plan(plan(6, ["old", "done"], [["old"], ["done"], ["rev"]]), D)
+        q.record("done", "shaky", D)
+        q.add_from_plan(plan(7, ["new"], [["new"]]), D + timedelta(days=1))
+        self.assertEqual(q.drop_stale_new(), ["old"])
+        self.assertEqual(sorted(q.entries), ["done", "new", "rev"])
+        self.assertEqual(q.drop_stale_new(), [], "the last lesson's are kept")
+        q.add_from_plan(plan(8, [], [["old"]]), D + timedelta(days=2))
+        self.assertFalse(q.entries["old"].new, "back as an ordinary question")
+
     def test_ties_earliest_due_then_oldest_review(self):
         q = ReviewQueue(
             {

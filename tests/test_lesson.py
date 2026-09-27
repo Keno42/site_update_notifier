@@ -194,15 +194,9 @@ class ViewTests(unittest.TestCase):
         taps = [see, (1, "言えなかった"), see, (1, "言えた"), see, (1, "迷った"), see]
         finished, its, _ = self.run_view(taps)
         self.assertEqual(finished, [True])
-        self.assertEqual(
-            its[0].labels,
-            ["振り返らずに生成", "答えを見る"],
-            "no rating before the answer",
-        )
+        self.assertEqual(its[0].labels, ["答えを見る"], "no rating before the answer")
         self.assertIn("答え: **Takk.**", its[0].edits[0][0])
-        self.assertEqual(
-            its[1].labels, ["振り返らずに生成", "言えた", "言えなかった", "迷った"]
-        )
+        self.assertEqual(its[1].labels, ["言えた", "言えなかった", "迷った"])
         next_q = its[1].edits[0][0]
         self.assertIn("2/3", next_q)
         self.assertNotIn("Ég vil fara heim.", next_q, "the next answer is hidden again")
@@ -216,13 +210,12 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(its[0].messages, [("本人だけが回答できます。", True)])
         self.assertEqual((finished, session.results), ([], []))
 
-    def test_skip_keeps_the_unanswered_and_still_generates(self):
-        finished, its, session = self.run_view(
-            [(1, "答えを見る"), (1, "言えなかった"), (1, "振り返らずに生成")]
-        )
-        self.assertEqual(finished, [True])
-        self.assertIn("未回答の 2 問は次回", its[2].edits[0][0])
-        self.assertEqual(session.saved, ["failed", "unseen", "unseen"])
+    def test_the_review_cannot_be_skipped(self):
+        """#38 review: /lesson generates only once the review is answered (the last lesson's
+        new items above all); /lesson-auto is the way to generate without one."""
+        _, its, _ = self.run_view([(1, "答えを見る")])
+        self.assertTrue(all("振り返らずに生成" not in it.labels for it in its))
+        self.assertEqual(its[0].labels, ["答えを見る"])
 
     def test_timeout_keeps_the_answers_and_the_rest(self):
         finished, _, session = self.run_view(
@@ -366,6 +359,20 @@ class FakeChannel(discord.abc.Messageable):
 
 
 @unittest.skipUnless((LLA_DIR / "audiolesson").exists(), "submodule not checked out")
+async def answer_all(view, first="言えなかった", second="言えた", rest="言えた"):
+    """Answer every question of a review view: ``first`` for the first, ``second`` for the
+    second, ``rest`` for the others. Returns the number of questions answered."""
+    n = 0
+    while not view.is_finished():
+        await {b.label: b for b in view.children}["答えを見る"].callback(
+            FakeInteraction(1)
+        )
+        label = first if n == 0 else second if n == 1 else rest
+        await {b.label: b for b in view.children}[label].callback(FakeInteraction(1))
+        n += 1
+    return n
+
+
 class EndToEndTests(unittest.TestCase):
     """実際の CLI (stub 音声) で 生成 → 投稿 → 振り返り → report → 次の生成."""
 
@@ -406,7 +413,8 @@ class EndToEndTests(unittest.TestCase):
             self.assertIn("レッスン 1", text)
             self.assertIn("lesson-001.wav", files)
             self.assertIn("lesson-001.transcript.md", files)
-            self.assertIn("Discord 振り返り: 次回 2問（確認待ち", text)
+            # every new item is asked next time, past the limit of 2
+            self.assertIn("Discord 振り返り: 次回 3問（確認待ち 3件）", text)
             user = Path(td) / "yuki"
             self.assertEqual(
                 sorted(p.name for p in user.iterdir())[:1], ["learner.json"]
@@ -422,10 +430,14 @@ class EndToEndTests(unittest.TestCase):
                 await lessons.start(self.interaction(channel, replies))
                 view = replies[0][1]
                 self.assertIsNotNone(view, "a review starts")
-                self.assertIn("振り返り 1/2", replies[0][0], "bounded by the limit")
-                for label in ("答えを見る", "言えなかった", "振り返らずに生成"):
-                    buttons = {b.label: b for b in view.children}
-                    await buttons[label].callback(FakeInteraction(1))
+                new = [e for e in queued.values() if e.new]
+                self.assertGreater(len(new), 2)
+                self.assertIn(
+                    f"振り返り 1/{len(new)}",
+                    replies[0][0],
+                    "every new item of the last lesson, past the limit of 2",
+                )
+                self.assertEqual(await answer_all(view, second="迷った"), len(new))
 
             asyncio.run(review())
             self.assertIn("レッスン 2", channel.sent[-1][0])
@@ -460,24 +472,27 @@ class EndToEndTests(unittest.TestCase):
                     return 1, "", "disk full"
                 return await run_cli(cfg_, args, on_progress)
 
-            async def lesson_command(*taps):
+            async def lesson_command(first="言えた"):
                 replies = []
                 await lessons.start(self.interaction(channel, replies))
                 view = replies[0][1]
-                for label in taps:
-                    buttons = {b.label: b for b in view.children}
-                    await buttons[label].callback(FakeInteraction(1))
+                if view is not None:
+                    await answer_all(view, first=first)
+
+            failed_items: list[str] = []
 
             def failures():
                 learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
                 queue = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
-                failed = next(e for e in queue.entries.values() if e.state == "failed")
-                return [learner["items"][i]["failures"] for i in failed.items], queue
+                if not failed_items:  # the question answered 言えなかった, found once
+                    failed = next(
+                        e for e in queue.entries.values() if e.state == "failed"
+                    )
+                    failed_items.extend(failed.items)
+                return [learner["items"][i]["failures"] for i in failed_items], queue
 
             with mock.patch("src.lesson.run_cli", flaky_cli):
-                asyncio.run(
-                    lesson_command("答えを見る", "言えなかった", "振り返らずに生成")
-                )
+                asyncio.run(lesson_command(first="言えなかった"))
             self.assertIn("report できませんでした", channel.sent[-1][0])
             counts, queue = failures()
             self.assertEqual(set(counts), {0}, "not in learner.json yet")
@@ -485,14 +500,14 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn("レッスン 2", " ".join(t or "" for t, _ in channel.sent))
 
             with mock.patch("src.lesson.run_cli", flaky_cli):
-                asyncio.run(lesson_command("振り返らずに生成"))  # the next /lesson
+                asyncio.run(lesson_command())  # the next /lesson
             counts, queue = failures()
             self.assertEqual(set(counts), {1}, "delivered on the next /lesson")
             self.assertEqual(queue.reports(), [])
             self.assertIn("レッスン 2", channel.sent[-1][0])
 
             with mock.patch("src.lesson.run_cli", flaky_cli):
-                asyncio.run(lesson_command("振り返らずに生成"))
+                asyncio.run(lesson_command())
             self.assertEqual(set(failures()[0]), {1}, "and never sent twice")
 
     def test_second_learner_reuses_the_shared_cache(self):

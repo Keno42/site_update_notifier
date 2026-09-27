@@ -85,8 +85,38 @@ class ReviewQueue:
 
     # ---- 選ぶ ---------------------------------------------------------
 
+    def latest_lesson(self) -> int:
+        """キューに問いを足した最新のレッスン (直前に生成したレッスン)."""
+        return max((e.source_lesson for e in self.entries.values()), default=0)
+
+    def must_answer(self) -> list[str]:
+        """直前のレッスンの、まだ答えていない新出の問い. 通常の /lesson ではこれに全部
+        答えるまで次のレッスンを生成しない (答えがなければ音声レッスン側は成功とみなすので、
+        新出だけは必ず確かめる)."""
+        latest = self.latest_lesson()
+        return [
+            k
+            for k, e in self.entries.items()
+            if e.new and e.state == "unseen" and e.source_lesson == latest
+        ]
+
+    def drop_stale_new(self) -> list[str]:
+        """直前より前のレッスンの、答えないまま次のレッスンに進んだ新出の問いを外す
+        (/lesson-auto を挟んだときなど). 音声レッスン側では成功とみなされ済みなので報告は
+        要らない. 後の復習でその項目がまた出れば、通常の問いとしてキューに入り直す."""
+        latest = self.latest_lesson()
+        stale = [
+            k
+            for k, e in self.entries.items()
+            if e.new and e.state == "unseen" and e.source_lesson < latest
+        ]
+        for k in stale:
+            del self.entries[k]
+        return stale
+
     def select(self, today: date, limit: int = 0) -> list[str]:
-        """今回の振り返りで出す問いのキー. limit > 0 なら最大 limit 問で、期限の来ている
+        """今回の振り返りで出す問いのキー. 直前のレッスンの未回答の新出 (must_answer) は
+        limit を超えても全部、先頭に. limit > 0 なら残りを最大 limit 問まで、期限の来ている
         問いが足りなければ期限前の問いで埋める. limit = 0 なら期限の来ている問いすべて."""
 
         def order(k: str) -> tuple:
@@ -96,10 +126,11 @@ class ReviewQueue:
             latest_first = -e.source_lesson if tier == 0 else 0
             return (tier, latest_first, e.due, e.last_reviewed or "")
 
-        ranked = sorted(self.entries, key=order)
+        required = sorted(self.must_answer(), key=order)
+        rest = [k for k in sorted(self.entries, key=order) if k not in required]
         if limit <= 0:
-            return [k for k in ranked if self.entries[k].tier(today) < 5]
-        return ranked[:limit]
+            return required + [k for k in rest if self.entries[k].tier(today) < 5]
+        return required + rest[: max(0, limit - len(required))]
 
     def due_count(self, today: date) -> int:
         return sum(1 for e in self.entries.values() if e.tier(today) < 5)
