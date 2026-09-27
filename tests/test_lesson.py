@@ -89,7 +89,11 @@ class ReviewTests(unittest.TestCase):
     def test_session_saves_each_answer_to_the_queue(self):
         with tempfile.TemporaryDirectory() as td:
             s = session_on(td)
-            self.assertIn("||Takk.||", s.render(), "the answer is a spoiler")
+            self.assertNotIn("Takk.", s.render(), "no answer before the button")
+            self.assertNotIn(
+                "||", s.render(), "no spoiler: desktop Discord keeps it open"
+            )
+            self.assertIn("答え: **Takk.**", s.render(revealed=True))
             s.rate("failed")
             on_disk = ReviewQueue.load(s.path, D).entries
             self.assertEqual(on_disk["takk"].state, "failed", "saved right away")
@@ -166,12 +170,14 @@ class ViewTests(unittest.TestCase):
 
             session = session_on(td)
             view = ReviewView(session, 1, finish, expire)
-            buttons = {b.label: b for b in view.children}
             done = []
             for user_id, label in taps:
                 it = FakeInteraction(user_id)
+                buttons = {b.label: b for b in view.children}  # they change per step
+                it.labels = sorted(buttons)
                 if await view.interaction_check(it):
-                    await buttons[label].callback(it)
+                    if label in buttons:
+                        await buttons[label].callback(it)
                 done.append(it)
             if timeout:
                 await view.on_timeout()
@@ -184,13 +190,26 @@ class ViewTests(unittest.TestCase):
             return asyncio.run(scenario(td))
 
     def test_rating_every_question_finishes_once(self):
-        taps = [(1, "言えなかった"), (1, "言えた"), (1, "迷った"), (1, "言えた")]
+        see = (1, "答えを見る")
+        taps = [see, (1, "言えなかった"), see, (1, "言えた"), see, (1, "迷った"), see]
         finished, its, _ = self.run_view(taps)
         self.assertEqual(finished, [True])
-        self.assertIn("||Ég vil fara heim.||", its[0].edits[0][0], "next question")
-        self.assertIn("3/3問に回答", its[2].edits[0][0])
-        self.assertIsNone(its[2].edits[0][1], "buttons removed at the end")
-        self.assertEqual(its[3].edits, [], "a tap after the end is ignored")
+        self.assertEqual(
+            its[0].labels,
+            ["振り返らずに生成", "答えを見る"],
+            "no rating before the answer",
+        )
+        self.assertIn("答え: **Takk.**", its[0].edits[0][0])
+        self.assertEqual(
+            its[1].labels, ["振り返らずに生成", "言えた", "言えなかった", "迷った"]
+        )
+        next_q = its[1].edits[0][0]
+        self.assertIn("2/3", next_q)
+        self.assertNotIn("Ég vil fara heim.", next_q, "the next answer is hidden again")
+        self.assertIn("答え: **Ég vil fara heim.**", its[2].edits[0][0])
+        self.assertIn("3/3問に回答", its[5].edits[0][0])
+        self.assertIsNone(its[5].edits[0][1], "buttons removed at the end")
+        self.assertEqual(its[6].edits, [], "a tap after the end is ignored")
 
     def test_only_the_owner_can_answer(self):
         finished, its, session = self.run_view([(2, "言えた")])
@@ -199,14 +218,16 @@ class ViewTests(unittest.TestCase):
 
     def test_skip_keeps_the_unanswered_and_still_generates(self):
         finished, its, session = self.run_view(
-            [(1, "言えなかった"), (1, "振り返らずに生成")]
+            [(1, "答えを見る"), (1, "言えなかった"), (1, "振り返らずに生成")]
         )
         self.assertEqual(finished, [True])
-        self.assertIn("未回答の 2 問は次回", its[1].edits[0][0])
+        self.assertIn("未回答の 2 問は次回", its[2].edits[0][0])
         self.assertEqual(session.saved, ["failed", "unseen", "unseen"])
 
     def test_timeout_keeps_the_answers_and_the_rest(self):
-        finished, _, session = self.run_view([(1, "迷った")], timeout=True)
+        finished, _, session = self.run_view(
+            [(1, "答えを見る"), (1, "迷った")], timeout=True
+        )
         self.assertEqual(finished, ["expired"])
         self.assertEqual(session.saved, ["shaky", "unseen", "unseen"])
 
@@ -402,9 +423,9 @@ class EndToEndTests(unittest.TestCase):
                 view = replies[0][1]
                 self.assertIsNotNone(view, "a review starts")
                 self.assertIn("振り返り 1/2", replies[0][0], "bounded by the limit")
-                buttons = {b.label: b for b in view.children}
-                await buttons["言えなかった"].callback(FakeInteraction(1))
-                await buttons["振り返らずに生成"].callback(FakeInteraction(1))
+                for label in ("答えを見る", "言えなかった", "振り返らずに生成"):
+                    buttons = {b.label: b for b in view.children}
+                    await buttons[label].callback(FakeInteraction(1))
 
             asyncio.run(review())
             self.assertIn("レッスン 2", channel.sent[-1][0])
@@ -443,8 +464,8 @@ class EndToEndTests(unittest.TestCase):
                 replies = []
                 await lessons.start(self.interaction(channel, replies))
                 view = replies[0][1]
-                buttons = {b.label: b for b in view.children}
                 for label in taps:
+                    buttons = {b.label: b for b in view.children}
                     await buttons[label].callback(FakeInteraction(1))
 
             def failures():
@@ -454,7 +475,9 @@ class EndToEndTests(unittest.TestCase):
                 return [learner["items"][i]["failures"] for i in failed.items], queue
 
             with mock.patch("src.lesson.run_cli", flaky_cli):
-                asyncio.run(lesson_command("言えなかった", "振り返らずに生成"))
+                asyncio.run(
+                    lesson_command("答えを見る", "言えなかった", "振り返らずに生成")
+                )
             self.assertIn("report できませんでした", channel.sent[-1][0])
             counts, queue = failures()
             self.assertEqual(set(counts), {0}, "not in learner.json yet")

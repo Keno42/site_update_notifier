@@ -177,12 +177,16 @@ class ReviewSession:
     def shaky_ids(self) -> list[str]:
         return self._ids("shaky")
 
-    def render(self) -> str:
+    def render(self, revealed: bool = False) -> str:
+        """今の問い. 答えは ``revealed`` のときだけ載せる: スポイラー (||…||) は PC 版の
+        Discord がメッセージ単位で「開いた」状態を覚えていて、同じメッセージを次の問いに
+        編集しても開いたままになるため、ボタンで出す."""
         e = self.entry(len(self.results))
-        return (
+        text = (
             f"**振り返り {len(self.results) + 1}/{len(self.keys)}**"
-            f"（レッスン{e.source_lesson}）\n{e.prompt}\n答え: ||{e.answer}||"
+            f"（レッスン{e.source_lesson}）\n{e.prompt}"
         )
+        return text + (f"\n答え: **{e.answer}**" if revealed else "")
 
     def summary(self) -> str:
         lines = [f"**振り返り**: {len(self.results)}/{len(self.keys)}問に回答"]
@@ -543,7 +547,7 @@ class Lessons:
 
 
 class ReviewView(discord.ui.View):
-    """1問ずつ: 答えはスポイラー、評価ボタンを押すと次の問いに差し替え."""
+    """1問ずつ: 「答えを見る」で答えと評価ボタンを出し、評価すると次の問いに差し替え."""
 
     def __init__(
         self,
@@ -558,21 +562,41 @@ class ReviewView(discord.ui.View):
         self.finish = finish
         self.expire = expire
         self.message: discord.InteractionMessage | None = None
-        for result, style in (
-            ("ok", discord.ButtonStyle.success),
-            ("shaky", discord.ButtonStyle.secondary),
-            ("failed", discord.ButtonStyle.danger),
-        ):
-            button: discord.ui.Button = discord.ui.Button(
-                label=RESULTS[result], style=style
+        self._show(revealed=False)
+
+    def _show(self, revealed: bool) -> None:
+        """答えの前は「答えを見る」だけ、答えの後は評価ボタン. どちらにもスキップ."""
+        self.clear_items()
+        if revealed:
+            for result, style in (
+                ("ok", discord.ButtonStyle.success),
+                ("shaky", discord.ButtonStyle.secondary),
+                ("failed", discord.ButtonStyle.danger),
+            ):
+                button: discord.ui.Button = discord.ui.Button(
+                    label=RESULTS[result], style=style
+                )
+                button.callback = self._rate_callback(result)  # type: ignore[method-assign]
+                self.add_item(button)
+        else:
+            reveal: discord.ui.Button = discord.ui.Button(
+                label="答えを見る", style=discord.ButtonStyle.primary
             )
-            button.callback = self._rate_callback(result)  # type: ignore[method-assign]
-            self.add_item(button)
+            reveal.callback = self._reveal  # type: ignore[method-assign]
+            self.add_item(reveal)
         skip: discord.ui.Button = discord.ui.Button(
             label="振り返らずに生成", style=discord.ButtonStyle.secondary, row=1
         )
         skip.callback = self._skip  # type: ignore[method-assign]
         self.add_item(skip)
+
+    async def _reveal(self, interaction: discord.Interaction) -> None:
+        if self.is_finished() or self.session.done:
+            return
+        self._show(revealed=True)
+        await interaction.response.edit_message(
+            content=self.session.render(revealed=True), view=self
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -590,7 +614,10 @@ class ReviewView(discord.ui.View):
                 return
             self.session.rate(result)
             if not self.session.done:
-                await interaction.response.edit_message(content=self.session.render())
+                self._show(revealed=False)
+                await interaction.response.edit_message(
+                    content=self.session.render(), view=self
+                )
                 return
             self.stop()
             await interaction.response.edit_message(
