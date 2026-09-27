@@ -7,8 +7,10 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
 
 `/lesson` を実行すると:
 
-1. 振り返りキューから最大 `LESSON_REVIEW_LIMIT` 問を 1 問ずつ出す（問い → 答えはスポイラー →
+1. 振り返りキューから最大 `LESSON_REVIEW_LIMIT` 問を 1 問ずつ出す（問い → 「答えを見る」→
    「言えた / 迷った / 言えなかった」）。「振り返らずに生成」でスキップもできる
+   （答えはスポイラーにしない: PC 版 Discord は一度開いたスポイラーを、編集で次の問いに
+   変わっても開いたままにするため）
 2. 答えた分の結果で `audiolesson report --failed …` を実行する
 3. 次のレッスンを生成し、その問いをキューに足して、音声と transcript をチャンネルに投稿する
    （「Discord 振り返り: 次回 15問（確認待ち 43件）」のように次回の見通しも添える）
