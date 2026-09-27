@@ -31,7 +31,7 @@ INTERVALS: dict[str, tuple[int, ...]] = {
     "shaky": (1, 3, 7),
     "ok": (1, 3, 7, 14, 30),
 }
-# これだけ期限を過ぎた問いは新出項目と同じ優先度に上げる (新出が毎回あっても埋もれない)
+# これだけ期限を過ぎた問いは「言えなかった」と同じ優先度に上げる (新出が毎回あっても埋もれない)
 PROMOTE_AFTER_DAYS = 7
 
 
@@ -55,13 +55,18 @@ class Entry:
     due: str = ""
 
     def tier(self, today: date) -> int:
-        """小さいほど先に出す. 期限前は 5."""
+        """小さいほど先に出す. 期限前は 5.
+
+        まだ答えていない新出の問いが最優先 (issue #119): 答えがなければ音声レッスン側は
+        成功とみなすので、確かめずに済ませてしまわないよう、前回の新出を必ず先に聞く."""
         due = date.fromisoformat(self.due)
         if due > today:
             return 5
-        if self.state == "failed":
+        if self.new and self.state == "unseen":
             return 0
-        tier = {"shaky": 2, "ok": 4}.get(self.state, 1 if self.new else 3)
+        if self.state == "failed":
+            return 1
+        tier = {"shaky": 2, "ok": 4}.get(self.state, 3)
         if tier > 1 and (today - due).days >= PROMOTE_AFTER_DAYS:
             tier = 1  # 長く待たされている
         return tier
@@ -86,7 +91,10 @@ class ReviewQueue:
 
         def order(k: str) -> tuple:
             e = self.entries[k]
-            return (e.tier(today), e.due, e.last_reviewed or "")
+            tier = e.tier(today)
+            # 新出どうしは新しいレッスンから (前回の新出が上限で押し出されない)
+            latest_first = -e.source_lesson if tier == 0 else 0
+            return (tier, latest_first, e.due, e.last_reviewed or "")
 
         ranked = sorted(self.entries, key=order)
         if limit <= 0:
@@ -129,12 +137,11 @@ class ReviewQueue:
     def add_from_plan(self, plan: dict, today: date) -> int:
         """生成したレッスンの問いを足す. 既存の問いは置き換えも削除もしない.
 
-        新出項目の問いは翌日から. 復習した項目の問いは、その項目がまだ一度も
+        新出項目の問いはすぐ (同じ日の次の /lesson でも) 出す. 復習した項目の問いは、その項目がまだ一度も
         キューに入っていない (Discord で確かめる機会がなかった) ときだけ足す.
         足した数を返す."""
         new_ids = {i["id"] for i in plan.get("new_items", [])}
         queued = {i for e in self.entries.values() for i in e.items}
-        due = (today + timedelta(days=1)).isoformat()
         added = 0
         for q in plan.get("review", []):
             items = list(q.get("items") or [])
@@ -144,6 +151,7 @@ class ReviewQueue:
             is_new = bool(new_ids & set(items))
             if not is_new and set(items) <= queued:
                 continue  # どの項目もすでに確認の予定がある
+            due = (today if is_new else today + timedelta(days=1)).isoformat()
             self.entries[key] = Entry(
                 items=items,
                 prompt=q["prompt"],
