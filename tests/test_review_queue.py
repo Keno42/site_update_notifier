@@ -164,37 +164,66 @@ class ReportBookkeepingTests(unittest.TestCase):
             {"a": at(3, "a"), "b": at(7, "b"), "c": at(7, "c"), "d": at(7, "d")}
         )
 
-    def test_answers_are_grouped_by_source_lesson(self):
+    def test_answers_are_grouped_by_source_lesson_and_outcome(self):
+        """Issue #119: every outcome is reported, not only failures — the audio lesson
+        schedules recalled, hesitated and not recalled differently."""
         q = self.queue()
         q.record("a", "failed", D)
         q.record("b", "ok", D)
-        q.record("c", "failed", D)
-        self.assertEqual(q.reports(), [(3, ["a"]), (7, ["c"])])
-        q.mark_reported(3, ["a"])
-        self.assertEqual(q.reports(), [(7, ["c"])])
+        q.record("c", "shaky", D)
+        self.assertEqual(
+            q.reports(),
+            [
+                (3, {"failed": ["a"], "shaky": [], "ok": []}),
+                (7, {"failed": [], "shaky": ["c"], "ok": ["b"]}),
+            ],
+        )
+        q.mark_reported(3, q.reports()[0][1])
+        self.assertEqual([n for n, _ in q.reports()], [7])
 
-    def test_an_ok_only_lesson_still_needs_a_report(self):
+    def test_a_reported_lesson_leaves_the_queue(self):
         q = self.queue()
         q.record("b", "ok", D)
-        self.assertEqual(q.reports(), [(7, [])], "reported without --failed")
-        q.mark_reported(7, [])
+        sent = q.reports()[0][1]
+        self.assertEqual(sent, {"failed": [], "shaky": [], "ok": ["b"]})
+        q.mark_reported(7, sent)
         self.assertEqual(q.reports(), [])
 
     def test_answers_given_while_a_report_is_in_flight_are_kept(self):
         q = self.queue()
         q.record("c", "failed", D)
         sent = q.reports()[0][1]
-        q.record("d", "failed", D)  # answered during the CLI call
+        q.record("d", "shaky", D)  # answered during the CLI call
         q.mark_reported(7, sent)
-        self.assertEqual(q.reports(), [(7, ["d"])])
+        self.assertEqual(q.reports(), [(7, {"failed": [], "shaky": ["d"], "ok": []})])
 
     def test_pending_reports_survive_a_restart(self):
         q = self.queue()
         q.record("a", "failed", D)
+        q.record("b", "ok", D)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "pending_review.json"
             q.save(path)
-            self.assertEqual(ReviewQueue.load(path, D).reports(), [(3, ["a"])])
+            self.assertEqual(ReviewQueue.load(path, D).reports(), q.reports())
+
+    def test_pending_failures_saved_by_the_previous_version_load(self):
+        """Before #119 only failures were kept, as a bare list per lesson."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "pending_review.json"
+            raw = {
+                "format": FORMAT,
+                "items": {},
+                "pending_reports": {"3": ["a"], "7": []},
+            }
+            path.write_text(json.dumps(raw), "utf-8")
+            self.assertEqual(
+                ReviewQueue.load(path, D).reports(),
+                [
+                    (3, {"failed": ["a"], "shaky": [], "ok": []}),
+                    (7, {"failed": [], "shaky": [], "ok": []}),
+                ],
+                "an answered-but-unreported lesson is still reported",
+            )
 
 
 class PlanTests(unittest.TestCase):
