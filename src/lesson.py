@@ -122,15 +122,26 @@ class LessonConfig:
         ]
 
     def report_args(
-        self, name: str, failed: list[str], lesson: int | None = None
+        self,
+        name: str,
+        failed: list[str],
+        lesson: int | None = None,
+        hesitated: list[str] | None = None,
+        recalled: list[str] | None = None,
     ) -> list[str]:
         """lesson を省くと最新のレッスンへの報告になる. 振り返りでは出題元のレッスンを
-        必ず渡す (flush_reports)."""
+        必ず渡す (flush_reports). 迷った / 言えたも送る: 音声レッスン側は言えなかった・
+        迷った・言えたで次の復習を変える (issue #119)."""
         args = ["report", "--learner", str(self.learner_path(name))]
         if lesson is not None:
             args += ["--lesson", str(lesson)]
-        if failed:
-            args += ["--failed", ",".join(failed)]
+        for flag, ids in (
+            ("--failed", failed),
+            ("--hesitated", hesitated),
+            ("--recalled", recalled),
+        ):
+            if ids:
+                args += [flag, ",".join(ids)]
         return args
 
 
@@ -452,17 +463,22 @@ class Lessons:
         届いた分だけキューから消すので、失敗した分は次の /lesson で送り直す (一度届いた
         報告は二度送らない). 最新のレッスンが「報告済み」になるのは、そのレッスンの問いに
         答えたときだけ. すべて届けば True."""
-        for lesson, failed in queue.reports():
-            rc, out, err = await run_cli(
-                self.cfg, self.cfg.report_args(name, failed, lesson=lesson)
+        for lesson, outcome in queue.reports():
+            args = self.cfg.report_args(
+                name,
+                outcome["failed"],
+                lesson=lesson,
+                hesitated=outcome["shaky"],
+                recalled=outcome["ok"],
             )
+            rc, out, err = await run_cli(self.cfg, args)
             if rc != 0:
                 await channel.send(
                     f"レッスン{lesson}の結果を report できませんでした"
                     f"（次の /lesson で送り直します）:\n```\n{_tail(err or out)}\n```"
                 )
                 return False
-            queue.mark_reported(lesson, failed)
+            queue.mark_reported(lesson, outcome)
             queue.save(path)
         return True
 

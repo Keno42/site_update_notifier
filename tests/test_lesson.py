@@ -76,6 +76,12 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(cfg.report_args("yuki", [], lesson=6)[-2:], ["--lesson", "6"])
         self.assertNotIn("--failed", cfg.report_args("yuki", []))
+        self.assertEqual(
+            cfg.report_args("yuki", [], lesson=6, hesitated=["c"], recalled=["d", "e"])[
+                -4:
+            ],
+            ["--hesitated", "c", "--recalled", "d,e"],
+        )
         self.assertEqual(cfg.review_limit, 20, "a session is bounded by default")
         self.assertNotIn("--auto", args)
         self.assertEqual(cfg.generate_args("yuki", auto=True).count("--auto"), 1)
@@ -266,7 +272,15 @@ class ReportTests(unittest.TestCase):
                 calls,
                 [
                     ["report", "--learner", learner, "--lesson", "3", "--failed", "a"],
-                    ["report", "--learner", learner, "--lesson", "7"],
+                    [
+                        "report",
+                        "--learner",
+                        learner,
+                        "--lesson",
+                        "7",
+                        "--recalled",
+                        "b",
+                    ],
                 ],
                 "lesson 10 is not marked reported: none of its questions was answered",
             )
@@ -448,6 +462,13 @@ class EndToEndTests(unittest.TestCase):
             learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
             for item_id in failed[0].items:
                 self.assertEqual(learner["items"][item_id]["failures"], 1, "reported")
+            shaky = [e for e in queue.entries.values() if e.state == "shaky"]
+            self.assertEqual(len(shaky), 1)
+            only_shaky = set(shaky[0].items) - set(failed[0].items)
+            self.assertTrue(only_shaky)
+            for item_id in only_shaky:
+                # issue #119: hesitation reaches the audio lesson too
+                self.assertEqual(learner["items"][item_id]["hesitated"], 1)
             unseen_before = {k for k, e in queued.items()} - {
                 k for k, e in queue.entries.items() if e.state != "unseen"
             }

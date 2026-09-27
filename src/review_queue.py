@@ -9,7 +9,8 @@
 同じ項目が別の問いにも入ることがある.
 
 答えた結果のうち音声レッスン側 (audiolesson report) にまだ届いていないものは
-``pending_reports`` に出題元のレッスンごとに残し、報告できたら消す.
+``pending_reports`` に出題元のレッスンごとに、結果 (言えた / 迷った / 言えなかった) 別に
+残し、報告できたら消す. 音声レッスン側はどれも別々に扱う (issue #119).
 """
 
 from __future__ import annotations
@@ -24,6 +25,12 @@ from pathlib import Path
 
 FORMAT = "lesson-review-queue/2"
 STATES = ("unseen", "ok", "shaky", "failed")
+Report = dict[str, list[str]]  # 結果 ("failed" / "shaky" / "ok") → 項目
+
+
+def empty_report() -> Report:
+    return {"failed": [], "shaky": [], "ok": []}
+
 
 # 結果ごとの次の確認までの日数。同じ結果が続くたびに次の値へ進む (最後の値で頭打ち)
 INTERVALS: dict[str, tuple[int, ...]] = {
@@ -79,9 +86,9 @@ def key_for(items: list[str]) -> str:
 @dataclass
 class ReviewQueue:
     entries: dict[str, Entry] = field(default_factory=dict)
-    # 出題元レッスン → まだ report していない「言えなかった」項目. キーがあること自体が
-    # 「このレッスンの問いに答えたが、まだ報告していない」を表す (言えただけなら空リスト)
-    pending_reports: dict[int, list[str]] = field(default_factory=dict)
+    # 出題元レッスン → まだ report していない結果別の項目. キーがあること自体が
+    # 「このレッスンの問いに答えたが、まだ報告していない」を表す
+    pending_reports: dict[int, Report] = field(default_factory=dict)
 
     # ---- 選ぶ ---------------------------------------------------------
 
@@ -147,20 +154,26 @@ class ReviewQueue:
         e.reviews += 1
         e.last_reviewed = today.isoformat()
         e.due = (today + timedelta(days=next_interval(result, e.streak))).isoformat()
-        failed = self.pending_reports.setdefault(e.source_lesson, [])
-        if result == "failed":
-            failed += [i for i in e.items if i not in failed]
+        ids = self.pending_reports.setdefault(e.source_lesson, empty_report())[result]
+        ids += [i for i in e.items if i not in ids]
 
     # ---- 音声レッスン側への報告 -------------------------------------------
 
-    def reports(self) -> list[tuple[int, list[str]]]:
-        """まだ届いていない報告: (出題元レッスン, 言えなかった項目) をレッスン順に."""
-        return [(n, list(ids)) for n, ids in sorted(self.pending_reports.items())]
+    def reports(self) -> list[tuple[int, Report]]:
+        """まだ届いていない報告: (出題元レッスン, 結果別の項目) をレッスン順に."""
+        return [
+            (n, {k: list(v) for k, v in r.items()})
+            for n, r in sorted(self.pending_reports.items())
+        ]
 
-    def mark_reported(self, lesson: int, sent: list[str]) -> None:
+    def mark_reported(self, lesson: int, sent: Report) -> None:
         """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す."""
-        left = [i for i in self.pending_reports.get(lesson, []) if i not in sent]
-        if left:
+        pending = self.pending_reports.get(lesson, empty_report())
+        left = {
+            k: [i for i in ids if i not in sent.get(k, [])]
+            for k, ids in pending.items()
+        }
+        if any(left.values()):
             self.pending_reports[lesson] = left
         else:
             self.pending_reports.pop(lesson, None)
@@ -214,7 +227,7 @@ class ReviewQueue:
         if raw.get("format") == FORMAT:
             return cls(
                 {k: Entry(**v) for k, v in raw.get("items", {}).items()},
-                {int(n): ids for n, ids in raw.get("pending_reports", {}).items()},
+                {int(n): _report(r) for n, r in raw.get("pending_reports", {}).items()},
             )
         queue = cls.from_legacy(raw, today)
         shutil.copyfile(path, path.with_name(path.name + ".v1.bak"))
@@ -247,3 +260,13 @@ class ReviewQueue:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
         os.replace(tmp, path)
+
+
+def _report(raw: list[str] | dict[str, list[str]]) -> Report:
+    """保存された報告. 以前の形式 (言えなかった項目のリストだけ) も読む."""
+    report = empty_report()
+    if isinstance(raw, list):
+        report["failed"] = list(raw)
+    else:
+        report.update({k: list(v) for k, v in raw.items() if k in report})
+    return report
