@@ -1,0 +1,35 @@
+name: Unit tests
+
+# Runs the unit tests, including the end-to-end /lesson flow through the real
+# language-learning-audio CLI (stub audio). Plain pull_request (not _target), so the
+# PR's code runs without the repository's secrets or write access.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with the language-learning-audio submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -t . -v
