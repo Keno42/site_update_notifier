@@ -456,6 +456,11 @@ class GenerationTests(unittest.TestCase):
                 "lesson 2 was generated from the state lesson 1 left",
             )
             self.assertIn("lesson-002.script.json", second.manifest["files"])
+            # language-learning-audio #130: the form's candidates come from the plan
+            self.assertIsInstance(second.plan["review_candidates"], list)
+            known = ("同じ場面が", "最後に出たのが早い", "終盤にヒントなしで")
+            for c in second.candidates():
+                self.assertTrue(second.describe(c).startswith(known), c)
             self.assertIn("generate", second.manifest["generate_args"])
             self.assertEqual(
                 [v.children[0].custom_id for v in channel.views if v is not None],
