@@ -234,7 +234,10 @@ class ViewTests(unittest.TestCase):
         client = discord.Client(intents=discord.Intents.default())
         self.assertIsNone(setup(client, SimpleNamespace()))
         config = SimpleNamespace(LESSON_ROOT="/data", LESSON_USERS={1: "yuki"})
-        self.assertTrue(callable(setup(client, config)))
+        with mock.patch.object(discord.app_commands.CommandTree, "add_command") as add:
+            self.assertTrue(callable(setup(client, config)))
+        names = [call.args[0].name for call in add.call_args_list]
+        self.assertEqual(names, ["lesson", "lesson-auto", "version"])
 
 
 class ReportTests(unittest.TestCase):

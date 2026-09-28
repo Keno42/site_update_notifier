@@ -109,6 +109,23 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 5. Discord の Developer Portal: bot を `applications.commands` スコープ付きで招待し直す
    （まだなら）。レッスン用チャンネルでファイル添付の権限があることを確認する
 
+### /version
+
+いつ起動し、どのコミットで動いているかを本人にだけ表示する（`src/version.py`）。自動更新が
+効いたかの確認用。
+
+```
+起動: 2026-09-29 02:41:30 +0900（稼働 2時間15分）
+**bot** `0afcac7`（2026-09-28 17:03）Bump language-learning-audio to #126: …
+**language-learning-audio** `b429c96`（2026-09-29 02:37）#29 «Ég á …» family: … (#127)
+```
+
+- 値は起動時に一度だけ読む。pull しても再起動するまでは、ディスク上ではなく今動いている版を答える
+- language-learning-audio は submodule が実際に指しているコミット（`git submodule update`
+  を忘れていると、bot のコミットが新しくてもこちらは古いまま、と分かる）
+- 日時はサーバーのローカル時刻。git で読めないときは「不明」
+- `/lesson` と同じく `LESSON_ROOT` / `LESSON_USERS` があるときだけ登録される
+
 ### language-learning-audio を更新する
 
 submodule は特定のコミットを指す。新しい版を使うときは:

@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable
 import discord
 from discord import app_commands
 
+from . import version
 from .review_queue import Entry, ReviewQueue
 
 LLA_DIR = (
@@ -660,8 +661,8 @@ class ReviewView(discord.ui.View):
 
 
 def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] | None:
-    """config に LESSON_ROOT と LESSON_USERS があれば /lesson と /lesson-auto を登録し、
-    スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
+    """config に LESSON_ROOT と LESSON_USERS があれば /lesson と /lesson-auto と /version
+    を登録し、スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
     cfg = LessonConfig.from_module(config)
     if cfg is None:
         logging.info("LESSON_ROOT / LESSON_USERS が未設定のため /lesson は無効です。")
@@ -687,6 +688,7 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
             description="振り返りなしで次のレッスンを生成します（できた前提でペースが上がる）",
             callback=lesson_auto,
         ),
+        version.command(),
     ):
         tree.add_command(command, guild=guild)
 
