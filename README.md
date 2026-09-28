@@ -69,7 +69,9 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 記録するだけで、v1 では `learner.json`・復習・次のレッスンの生成には一切使わない。
 
 - レッスンの投稿に「フィードバック」ボタンが付く（`/lesson-feedback [lesson]` でも開ける）。
-  ボタンは custom_id にレッスン番号を持つので、自動更新で bot が再起動した後でも押せる
+  ボタンは custom_id に学習者とレッスンの記録の ID（`lesson-012`、再生成なら `lesson-012.2`）
+  を持つので、自動更新で bot が再起動した後でも、同じ番号を再生成した後でも、押した投稿の
+  レッスンに紐付く。押せるのはそのレッスンを受けた人だけ
 - フォーム（本人にだけ見える）: 新出の一覧（訳つき）と、レッスンから機械的に見つけた候補
   （同じ場面の繰り返し、最後に出たのが早い新出、終盤にヒントなしで言う機会がない新出。
   language-learning-audio の plan.json の `review_candidates`）を見ながら
@@ -79,14 +81,18 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
   - メモ（任意）
 - `/lesson-feedback-report [lesson]`: 最新のフィードバックの要約を投稿
 - `/lesson-feedback-export [lesson]`: フィードバックとレッスンの記録一式を zip で添付
-  （Issue や PR、外部での分析用）
+  （Issue や PR、外部での分析用）。learner.json とメモを含むので本人にだけ見える形で返す
+- `lesson` は `12`（その番号の最後の記録）、`12.2` や `lesson-012.2`（再生成した記録）、
+  `lesson-012`（1 回目）。省略すると最新
+- `/lesson` と同じく、`LESSON_CHANNEL_ID` を指定するとそのチャンネルでだけ使える
 
 置き場所は learner.json と同じ `<LESSON_ROOT>/<名前>/`（git の外なので、自動更新の pull で
 消えたり上書きされたりしない）:
 
 ```text
-lesson_feedback.jsonl     追記のみ。1 行 = 1 回分（レッスン番号、bot / language-learning-audio の
-                          コミット、transcript・script・生成前 learner.json の sha256、回答、メモ）
+lesson_feedback.jsonl     追記のみ。1 行 = 1 回分（記録の ID、bot / language-learning-audio の
+                          コミット、transcript・script・生成前 learner.json の sha256、回答、メモ）。
+                          電源断で途中で切れた行があっても、読めなくなるのはその行だけ
 lesson_manifests/lesson-012/
   manifest.json           生成日時、コミット、各ファイルの sha256、生成に使った引数
   lesson-012.plan.json / .script.json / .transcript.md

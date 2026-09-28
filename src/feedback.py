@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -41,6 +42,8 @@ MANIFESTS = "lesson_manifests"
 LESSON_FILES = (".plan.json", ".script.json", ".transcript.md")
 LEARNER_BEFORE = "learner.before.json"
 MANIFEST_RE = re.compile(r"lesson-(\d+)(?:\.(\d+))?$")
+# コマンドで指定するレッスン: 12 / 012 / lesson-012 / 12.2 / lesson-012.2
+REF_RE = re.compile(r"(?:lesson-)?0*(\d+)(?:\.(\d+))?")
 
 LOADS = {"light": "軽い", "right": "ちょうどいい", "heavy": "重い"}
 FRICTIONS = {
@@ -64,6 +67,24 @@ def sha256(path: Path) -> str:
 def _manifest_key(d: Path) -> tuple[int, int] | None:
     m = MANIFEST_RE.match(d.name)
     return (int(m[1]), int(m[2] or 1)) if m else None
+
+
+def parse_ref(ref: str | int | None) -> tuple[int, int | None] | None:
+    """(レッスン番号, 何回目の記録か or None=最新). ref が None なら None、
+    読めなければ ValueError.
+
+    記録の ID (lesson-012 / lesson-012.2) はその記録だけを指す: lesson-012 は再生成が
+    あっても 1 回目 (投稿のボタンはこれで呼ぶ). 番号だけ (12) なら最後の記録、12.2 は
+    2 回目."""
+    if ref is None:
+        return None
+    text = str(ref).strip()
+    m = REF_RE.fullmatch(text)
+    if m is None:
+        raise ValueError(f"レッスンの指定が読めません: {ref!r}")
+    if m[2]:
+        return int(m[1]), int(m[2])
+    return int(m[1]), 1 if text.startswith("lesson-") else None
 
 
 class Ledger:
@@ -120,24 +141,40 @@ class Ledger:
         )
         return d
 
-    def manifest_dir(self, lesson: int | None = None) -> Path | None:
-        """lesson の記録 (同じ番号が複数あれば最後のもの). None なら最新のレッスン."""
+    def _dirs(self) -> list[tuple[tuple[int, int], Path]]:
         if not self.manifests.exists():
-            return None
-        keyed = [
+            return []
+        return sorted(
             (key, d)
             for d in self.manifests.iterdir()
             if d.is_dir() and (key := _manifest_key(d)) is not None
-        ]
-        if lesson is not None:
-            keyed = [(key, d) for key, d in keyed if key[0] == lesson]
-        return max(keyed)[1] if keyed else None
+        )
 
-    def load(self, lesson: int | None = None) -> "Record | None":
-        d = self.manifest_dir(lesson)
+    def manifest_dir(self, ref: str | int | None = None) -> Path | None:
+        """記録のディレクトリ. ref が lesson-012.2 / 12.2 ならその記録、12 なら同じ番号の
+        最後の記録、None なら最新のレッスン. フィードバックは記録 (再生成なら .2) に
+        紐付けるので、投稿のボタンは記録の ID で呼ぶ."""
+        dirs = self._dirs()
+        want = parse_ref(ref)
+        if want is not None:
+            lesson, rev = want
+            dirs = [
+                (key, d)
+                for key, d in dirs
+                if key[0] == lesson and (rev is None or key[1] == rev)
+            ]
+        return dirs[-1][1] if dirs else None
+
+    def siblings(self, record: "Record") -> list[str]:
+        """同じ番号の記録 (再生成) の ID, 古い順."""
+        return [d.name for key, d in self._dirs() if key[0] == record.lesson]
+
+    def load(self, ref: str | int | None = None) -> "Record | None":
+        d = self.manifest_dir(ref)
         if d is None:
             return None
         manifest = json.loads((d / "manifest.json").read_text("utf-8"))
+        manifest.setdefault("id", d.name)
         plan_path = d / f"lesson-{manifest['lesson']:03d}.plan.json"
         plan = json.loads(plan_path.read_text("utf-8")) if plan_path.exists() else {}
         return Record(d, manifest, plan)
@@ -145,42 +182,54 @@ class Ledger:
     # ---- feedback events
 
     def append(self, event: dict) -> None:
-        """1 行追記して fsync する. 既存の行は読み書きしない."""
+        """1 行追記して fsync する. 既存の行は書き換えない. 前回の書き込みが電源断などで
+        途中で切れていたら (末尾が改行でない)、まず改行を足して区切る: 切れた行だけが
+        読めなくなり、今回の行は巻き込まれない."""
         self.user_dir.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(event, ensure_ascii=False) + "\n"
-        with open(self.path, "a", encoding="utf-8") as f:
+        line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+        with open(self.path, "ab") as f:
+            if f.tell() > 0:
+                with open(self.path, "rb") as r:
+                    r.seek(-1, os.SEEK_END)
+                    if r.read(1) != b"\n":
+                        line = b"\n" + line
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
 
-    def events(self, lesson: int | None = None) -> list[dict]:
+    def events(self, manifest: str | None = None) -> list[dict]:
+        """読めた行だけ. 途中で切れた行 (UTF-8 の文字の途中で切れたものも) は 1 行ずつ
+        読み飛ばすので、ほかの行は読める. manifest を渡すとその記録へのものだけ."""
         if not self.path.exists():
             return []
         out = []
-        for line in self.path.read_text("utf-8").splitlines():
+        for raw in self.path.read_bytes().split(b"\n"):
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # 書きかけの行 (電源断など) は読み飛ばす
-            if lesson is None or event.get("lesson") == lesson:
+                event = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            if manifest is None or event.get("manifest") == manifest:
                 out.append(event)
         return out
 
-    def export(self, lesson: int, out_dir: Path) -> Path | None:
-        """そのレッスンのフィードバックと記録一式を zip にする (GitHub や外部の分析用)."""
-        record = self.load(lesson)
-        events = self.events(lesson)
-        if record is None and not events:
+    def export(self, ref: str | int | None, out_dir: Path) -> Path | None:
+        """その記録へのフィードバックと記録一式を zip にする (GitHub や外部の分析用)."""
+        record = self.load(ref)
+        if record is None:
             return None
-        out = out_dir / f"lesson-{lesson:03d}-feedback.zip"
+        out = out_dir / f"{record.id}-feedback.zip"
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr(
                 "feedback.jsonl",
-                "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events),
+                "".join(
+                    json.dumps(e, ensure_ascii=False) + "\n"
+                    for e in self.events(record.id)
+                ),
             )
-            if record is not None:
-                for p in sorted(record.dir.iterdir()):
-                    z.write(p, f"{record.dir.name}/{p.name}")
+            for p in sorted(record.dir.iterdir()):
+                z.write(p, f"{record.dir.name}/{p.name}")
         return out
 
 
@@ -195,6 +244,18 @@ class Record:
     @property
     def lesson(self) -> int:
         return int(self.manifest["lesson"])
+
+    @property
+    def id(self) -> str:
+        """lesson-012 / 再生成なら lesson-012.2."""
+        return str(self.manifest.get("id") or self.dir.name)
+
+    @property
+    def title(self) -> str:
+        rev = _manifest_key(self.dir)
+        return f"レッスン {self.lesson}" + (
+            f"（再生成 {rev[1]} 回目）" if rev and rev[1] > 1 else ""
+        )
 
     def items(self) -> dict[str, dict]:
         return {
@@ -269,7 +330,7 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
         "ts": now.isoformat(timespec="seconds"),
         "user": user,
         "lesson": record.lesson,
-        "manifest": record.manifest.get("id"),
+        "manifest": record.id,
         "revisions": record.manifest.get("revisions", {}),
         **record.digests(),
         "usable": answers.usable,
@@ -283,9 +344,7 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
 
 
 def form_text(record: Record, answers: Answers | None = None) -> str:
-    lines = [
-        f"**レッスン {record.lesson} のフィードバック**（30秒ほど。負荷だけは必須）"
-    ]
+    lines = [f"**{record.title} のフィードバック**（30秒ほど。負荷だけは必須）"]
     new = record.new_items()
     if new:
         lines.append(
@@ -303,27 +362,28 @@ def form_text(record: Record, answers: Answers | None = None) -> str:
     return _clip("\n".join(lines), MESSAGE_MAX)
 
 
-def report_text(record: Record | None, events: list[dict], lesson: int) -> str:
+def report_text(record: Record, events: list[dict], siblings: list[str]) -> str:
+    others = [s for s in siblings if s != record.id]
+    note = f"\n（同じ番号の別の記録: {'、'.join(others)}）" if others else ""
     if not events:
-        return f"レッスン {lesson} のフィードバックはまだありません。"
+        return f"{record.title} のフィードバックはまだありません。{note}"
     e = events[-1]
-    items = record.items() if record else {}
+    items = record.items()
 
     def names(ids: list[str]) -> str:
         return "、".join(items.get(i, {}).get("target") or i for i in ids) or "なし"
 
     rev = e.get("revisions") or {}
     lines = [
-        f"**レッスン {lesson} のフィードバック**（{len(events)}件、最新 {e.get('ts', '?')}）",
+        f"**{record.title} のフィードバック**（{len(events)}件、最新 {e.get('ts', '?')}）",
         f"負荷: {LOADS.get(e.get('load') or '', e.get('load') or '未回答')}",
         f"使えそう: {names(e.get('usable', []))}",
         f"早めにもう一度: {names(e.get('sooner', []))}",
     ]
     if e.get("candidates_confirmed"):
-        describe = record.describe if record else (lambda c: str(c.get("kind")))
         lines.append(
             "当てはまった候補: "
-            + " / ".join(describe(c) for c in e["candidates_confirmed"])
+            + " / ".join(record.describe(c) for c in e["candidates_confirmed"])
         )
     shown = len(e.get("candidates_shown", []))
     if shown:
@@ -338,7 +398,7 @@ def report_text(record: Record | None, events: list[dict], lesson: int) -> str:
         lines.append(f"メモ: {e['note']}")
     lines.append(
         f"生成: bot `{(rev.get('bot') or '?')[:7]}` / "
-        f"language-learning-audio `{(rev.get('lla') or '?')[:7]}`"
+        f"language-learning-audio `{(rev.get('lla') or '?')[:7]}`（{record.id}）" + note
     )
     return _clip("\n".join(lines), MESSAGE_MAX)
 
@@ -466,7 +526,7 @@ class FeedbackView(discord.ui.View):
         await self.submit(self.answers)
         self.stop()
         await interaction.response.edit_message(
-            content=f"レッスン {self.record.lesson} のフィードバックを記録しました。ありがとうございます。",
+            content=f"{self.record.title} のフィードバックを記録しました。ありがとうございます。",
             view=None,
         )
 
@@ -475,44 +535,68 @@ class FeedbackView(discord.ui.View):
 
 
 class Feedback:
-    """Discord からの入口: 投稿のボタン、/lesson-feedback、report、export."""
+    """Discord からの入口: 投稿のボタン、/lesson-feedback、report、export.
+
+    /lesson と同じく登録ユーザーだけ、LESSON_CHANNEL_ID があればそのチャンネルでだけ.
+    export は learner.json やメモを含むので本人にだけ見える形で返す."""
 
     def __init__(
         self,
         users: dict[int, str],
         user_dir: Callable[[str], Path],
+        channel_id: int = 0,
         now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
     ) -> None:
         self.users = users
         self.user_dir = user_dir
+        self.channel_id = channel_id
         self.now = now
 
     def ledger(self, name: str) -> Ledger:
         return Ledger(self.user_dir(name))
 
-    async def _name(self, interaction: discord.Interaction) -> str | None:
+    async def _deny(self, interaction: discord.Interaction, text: str) -> None:
+        await interaction.response.send_message(text, ephemeral=True)
+
+    async def _record(
+        self, interaction: discord.Interaction, ref: str | int | None
+    ) -> tuple[str, Ledger, Record] | None:
+        """使える人・チャンネルか確かめ、指定の記録を読む. だめなら返事をして None."""
         name = self.users.get(interaction.user.id)
         if name is None:
-            await interaction.response.send_message(
-                "このコマンドは登録されたユーザーだけが使えます。", ephemeral=True
+            await self._deny(
+                interaction, "このコマンドは登録されたユーザーだけが使えます。"
             )
-        return name
+            return None
+        if self.channel_id and interaction.channel_id != self.channel_id:
+            await self._deny(interaction, f"<#{self.channel_id}> で実行してください。")
+            return None
+        try:
+            parse_ref(ref)
+        except ValueError:
+            await self._deny(
+                interaction,
+                "レッスンは 12 や 12.2（再生成した記録）のように指定してください。",
+            )
+            return None
+        ledger = self.ledger(name)
+        record = ledger.load(ref)
+        if record is None:
+            which = f"レッスン {ref} の" if ref is not None else "レッスンの"
+            await self._deny(
+                interaction,
+                f"{which}記録がありません（この機能より前に生成したレッスンは対象外です）。",
+            )
+            return None
+        return name, ledger, record
 
     async def open_form(
-        self, interaction: discord.Interaction, lesson: int | None = None
+        self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
-        name = await self._name(interaction)
-        if name is None:
+        found = await self._record(interaction, ref)
+        if found is None:
             return
-        ledger = self.ledger(name)
-        record = ledger.load(lesson)
-        if record is None:
-            which = f"レッスン {lesson}" if lesson is not None else "レッスン"
-            await interaction.response.send_message(
-                f"{which}の記録がありません（この機能より前に生成したレッスンは対象外です）。",
-                ephemeral=True,
-            )
-            return
+        name, ledger, record = found
 
         async def submit(answers: Answers) -> None:
             ledger.append(build_event(record, answers, name, self.now()))
@@ -523,77 +607,56 @@ class Feedback:
             ephemeral=True,
         )
 
-    def _lesson(self, ledger: Ledger, lesson: int | None) -> int | None:
-        if lesson is not None:
-            return lesson
-        record = ledger.load()
-        return record.lesson if record else None
-
     async def report(
-        self, interaction: discord.Interaction, lesson: int | None = None
+        self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
-        name = await self._name(interaction)
-        if name is None:
+        found = await self._record(interaction, ref)
+        if found is None:
             return
-        ledger = self.ledger(name)
-        n = self._lesson(ledger, lesson)
-        if n is None:
-            await interaction.response.send_message(
-                "記録されたレッスンがありません。", ephemeral=True
-            )
-            return
+        _, ledger, record = found
         await interaction.response.send_message(
-            report_text(ledger.load(n), ledger.events(n), n)
+            report_text(record, ledger.events(record.id), ledger.siblings(record))
         )
 
     async def export(
-        self,
-        interaction: discord.Interaction,
-        lesson: int | None = None,
-        tmp: Path | None = None,
+        self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
-        name = await self._name(interaction)
-        if name is None:
+        found = await self._record(interaction, ref)
+        if found is None:
             return
-        ledger = self.ledger(name)
-        n = self._lesson(ledger, lesson)
-        out_dir = tmp or (ledger.user_dir / "work")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = ledger.export(n, out_dir) if n is not None else None
-        if path is None:
-            which = f"レッスン {n} の" if n is not None else "レッスンの"
-            await interaction.response.send_message(
-                f"{which}記録がありません。", ephemeral=True
-            )
-            return
-        data = io.BytesIO(path.read_bytes())
-        path.unlink(missing_ok=True)
+        _, ledger, record = found
+        with tempfile.TemporaryDirectory() as td:
+            path = ledger.export(record.id, Path(td))
+            assert path is not None
+            data = io.BytesIO(path.read_bytes())
         await interaction.response.send_message(
-            f"レッスン {n} のフィードバックと記録一式です。",
+            f"{record.title}（{record.id}）のフィードバックと記録一式です。",
             file=discord.File(data, filename=path.name),
+            ephemeral=True,
         )
 
 
 class FeedbackButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"lla-feedback:(?P<owner>[0-9]+):(?P<lesson>[0-9]+)",
+    template=r"lla-feedback:(?P<owner>[0-9]+):(?P<manifest>lesson-[0-9]+(?:\.[0-9]+)?)",
 ):
-    """レッスン投稿のボタン. custom_id にレッスンを受けた人の Discord ID とレッスン番号を
-    持つので、bot を再起動 (自動更新) した後の投稿でも押せる (client.add_dynamic_items
-    で登録). 押せるのはその人だけ."""
+    """レッスン投稿のボタン. custom_id にレッスンを受けた人の Discord ID と記録の ID
+    (lesson-012、再生成なら lesson-012.2) を持つ: bot を再起動 (自動更新) した後でも
+    押せ、同じ番号を再生成した後でも、押した投稿のレッスンに紐付く
+    (client.add_dynamic_items で登録). 押せるのはその人だけ."""
 
     handler: "Feedback | None" = None
 
-    def __init__(self, owner: int, lesson: int) -> None:
+    def __init__(self, owner: int, manifest: str) -> None:
         super().__init__(
             discord.ui.Button(
                 label="フィードバック",
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"lla-feedback:{owner}:{lesson}",
+                custom_id=f"lla-feedback:{owner}:{manifest}",
             )
         )
         self.owner = owner
-        self.lesson = lesson
+        self.manifest = manifest
 
     @classmethod
     async def from_custom_id(  # type: ignore[override]
@@ -602,7 +665,7 @@ class FeedbackButton(
         item: discord.ui.Button,
         match: re.Match[str],
     ) -> "FeedbackButton":
-        return cls(int(match["owner"]), int(match["lesson"]))
+        return cls(int(match["owner"]), match["manifest"])
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.owner:
@@ -611,10 +674,10 @@ class FeedbackButton(
             )
             return
         if FeedbackButton.handler is not None:
-            await FeedbackButton.handler.open_form(interaction, self.lesson)
+            await FeedbackButton.handler.open_form(interaction, self.manifest)
 
 
-def feedback_view(owner: int, lesson: int) -> discord.ui.View:
+def feedback_view(owner: int, manifest: str) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    view.add_item(FeedbackButton(owner, lesson))
+    view.add_item(FeedbackButton(owner, manifest))
     return view
