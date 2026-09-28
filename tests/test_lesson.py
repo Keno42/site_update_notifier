@@ -237,7 +237,17 @@ class ViewTests(unittest.TestCase):
         with mock.patch.object(discord.app_commands.CommandTree, "add_command") as add:
             self.assertTrue(callable(setup(client, config)))
         names = [call.args[0].name for call in add.call_args_list]
-        self.assertEqual(names, ["lesson", "lesson-auto", "version"])
+        self.assertEqual(
+            names,
+            [
+                "lesson",
+                "lesson-auto",
+                "lesson-feedback",
+                "lesson-feedback-report",
+                "lesson-feedback-export",
+                "version",
+            ],
+        )
 
 
 class ReportTests(unittest.TestCase):
@@ -356,6 +366,7 @@ class ProgressTests(unittest.TestCase):
 class FakeChannel(discord.abc.Messageable):
     def __init__(self):
         self.sent = []
+        self.views = []
 
     def typing(self):
         channel = self
@@ -369,8 +380,9 @@ class FakeChannel(discord.abc.Messageable):
 
         return Typing()
 
-    async def send(self, content=None, files=None):
+    async def send(self, content=None, files=None, view=None):
         self.sent.append((content, [f.filename for f in files or []]))
+        self.views.append(view)
         for f in files or []:
             f.close()  # as discord.py does after sending
 

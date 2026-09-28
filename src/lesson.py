@@ -3,7 +3,8 @@
 
 language-learning-audio (submodule: external/language-learning-audio) の CLI を
 subprocess で呼ぶ。永続化するのはユーザーごとの learner.json と、Discord 振り返りの
-キュー pending_review.json (src/review_queue.py) だけで、生成物は投稿後に消す。
+キュー pending_review.json (src/review_queue.py)、フィードバック用のレッスンの記録
+(src/feedback.py) で、作業ディレクトリの生成物は投稿後に消す。
 """
 
 from __future__ import annotations
@@ -16,14 +17,14 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import discord
 from discord import app_commands
 
-from . import version
+from . import feedback, version
 from .review_queue import Entry, ReviewQueue
 
 LLA_DIR = (
@@ -489,13 +490,15 @@ class Lessons:
         work = self.cfg.work_dir(name)
         cleanup(work)
         work.mkdir(parents=True, exist_ok=True)
+        learner = self.cfg.learner_path(name)
+        # 生成前の learner.json: レッスンの記録に残し、選ばれ方を後から再現できるように
+        learner_before = learner.read_bytes() if learner.exists() else None
+        args = self.cfg.generate_args(name, auto)
         try:
             status = StatusMessage(channel)
             await status.start()
             async with channel.typing():
-                rc, out, err = await run_cli(
-                    self.cfg, self.cfg.generate_args(name, auto), status.update
-                )
+                rc, out, err = await run_cli(self.cfg, args, status.update)
             await status.finish(rc == 0)
             if rc != 0:
                 await channel.send(
@@ -507,6 +510,7 @@ class Lessons:
                 await channel.send("生成結果 (plan.json) が見つかりませんでした。")
                 return
             plan = json.loads(plan_path.read_text("utf-8"))
+            manifest = self.save_manifest(name, work, plan, learner_before, args)
             # 自動モードでも問いはキューに足す: 次に /lesson を使えばそこで振り返れる
             today = self.today()
             path = self.cfg.pending_path(name)
@@ -515,9 +519,41 @@ class Lessons:
             queue.save(path)
             tomorrow = today + timedelta(days=1)
             note = "" if auto else review_note(queue, tomorrow, self.cfg.review_limit)
-            await self.post(channel, work, plan, note)
+            owner = next((u for u, n in self.cfg.users.items() if n == name), 0)
+            await self.post(channel, work, plan, note, owner, manifest)
         finally:
             cleanup(work)
+
+    def save_manifest(
+        self,
+        name: str,
+        work: Path,
+        plan: dict,
+        learner_before: bytes | None,
+        args: list[str],
+    ) -> str | None:
+        """生成したレッスンの記録を残し、その ID (lesson-012 / 再生成なら lesson-012.2)
+        を返す (フィードバックの紐付け先, issue #128). 失敗しても投稿は止めない (None)."""
+        lla = version.head_commit(self.cfg.lla_dir)
+        bot = version.INFO.bot
+        try:
+            d = feedback.Ledger(self.cfg.user_dir(name)).save_manifest(
+                work,
+                plan,
+                learner_before,
+                self.cfg.learner_path(name),
+                {
+                    # bot は動いている版、language-learning-audio は生成に使ったディスク上の版
+                    "bot": bot.full if bot else None,
+                    "lla": lla.full if lla else None,
+                },
+                args,
+                datetime.now().astimezone(),
+            )
+        except OSError:
+            logging.exception("レッスンの記録を保存できませんでした")
+            return None
+        return d.name
 
     async def post(
         self,
@@ -525,7 +561,11 @@ class Lessons:
         work: Path,
         plan: dict,
         review: str = "",
+        owner: int = 0,
+        manifest: str | None = None,
     ) -> None:
+        """owner: レッスンを受けた人の Discord ID (フィードバックボタンを押せる人).
+        manifest: レッスンの記録の ID. 記録がなければボタンは付けない."""
         n = plan["lesson_number"]
         stem = work / f"lesson-{n:03d}"
         files = []
@@ -560,7 +600,11 @@ class Lessons:
             f"復習: {reviewed}項目" + (f"\n{review}" if review else "") + audio_note
         )
         try:
-            await channel.send(text, files=files)
+            if manifest:
+                view = feedback.feedback_view(owner, manifest)
+                await channel.send(text, files=files, view=view)
+            else:
+                await channel.send(text, files=files)
         finally:
             for f in files:
                 f.close()
@@ -661,13 +705,17 @@ class ReviewView(discord.ui.View):
 
 
 def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] | None:
-    """config に LESSON_ROOT と LESSON_USERS があれば /lesson と /lesson-auto と /version
-    を登録し、スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
+    """config に LESSON_ROOT と LESSON_USERS があれば /lesson, /lesson-auto,
+    /lesson-feedback (-report, -export), /version と、レッスン投稿のフィードバック
+    ボタンを登録し、スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
     cfg = LessonConfig.from_module(config)
     if cfg is None:
         logging.info("LESSON_ROOT / LESSON_USERS が未設定のため /lesson は無効です。")
         return None
     lessons = Lessons(cfg)
+    fb = feedback.Feedback(cfg.users, cfg.user_dir, cfg.channel_id)
+    feedback.FeedbackButton.handler = fb
+    client.add_dynamic_items(feedback.FeedbackButton)
     tree = app_commands.CommandTree(client)
     guild = discord.Object(id=cfg.guild_id) if cfg.guild_id else None
 
@@ -676,6 +724,28 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
 
     async def lesson_auto(interaction: discord.Interaction) -> None:
         await lessons.start(interaction, auto=True)
+
+    lesson_option = app_commands.describe(
+        lesson="レッスン番号（例: 12。再生成した記録は 12.2。省略すると最新）"
+    )
+
+    @lesson_option
+    async def lesson_feedback(
+        interaction: discord.Interaction, lesson: str | None = None
+    ) -> None:
+        await fb.open_form(interaction, lesson)
+
+    @lesson_option
+    async def feedback_report(
+        interaction: discord.Interaction, lesson: str | None = None
+    ) -> None:
+        await fb.report(interaction, lesson)
+
+    @lesson_option
+    async def feedback_export(
+        interaction: discord.Interaction, lesson: str | None = None
+    ) -> None:
+        await fb.export(interaction, lesson)
 
     for command in (
         app_commands.Command(
@@ -687,6 +757,21 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
             name="lesson-auto",
             description="振り返りなしで次のレッスンを生成します（できた前提でペースが上がる）",
             callback=lesson_auto,
+        ),
+        app_commands.Command(
+            name="lesson-feedback",
+            description="レッスンの手応えを記録します（30秒ほど）",
+            callback=lesson_feedback,
+        ),
+        app_commands.Command(
+            name="lesson-feedback-report",
+            description="レッスンのフィードバックの要約を表示します",
+            callback=feedback_report,
+        ),
+        app_commands.Command(
+            name="lesson-feedback-export",
+            description="レッスンのフィードバックと記録一式を zip で添付します",
+            callback=feedback_export,
         ),
         version.command(),
     ):

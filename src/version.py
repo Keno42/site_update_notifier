@@ -24,6 +24,7 @@ class Commit:
     short: str
     date: str  # コミット日時 (サーバーのローカル時刻, 分まで)
     subject: str
+    full: str = ""  # 完全なハッシュ (レッスンの記録に残す)
 
     def line(self, name: str) -> str:
         subject = self.subject
@@ -42,7 +43,7 @@ def head_commit(path: Path) -> Commit | None:
                 str(path),
                 "log",
                 "-1",
-                "--format=%h%x00%cd%x00%s",
+                "--format=%h%x00%cd%x00%s%x00%H",
                 "--date=format-local:%Y-%m-%d %H:%M",
             ],
             capture_output=True,
@@ -53,7 +54,7 @@ def head_commit(path: Path) -> Commit | None:
     except (OSError, subprocess.SubprocessError):
         return None
     parts = out.split("\x00")
-    if len(parts) != 3:
+    if len(parts) != 4:
         return None
     return Commit(*parts)
 

@@ -15,7 +15,8 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
 2. 答えた結果を `audiolesson report --recalled … --hesitated … --failed …` で送る
 3. 次のレッスンを生成し、その問いをキューに足して、音声と transcript をチャンネルに投稿する
    （「Discord 振り返り: 次回 15問（確認待ち 43件）」のように次回の見通しも添える）
-4. 生成物を消す（残るのは `learner.json` と振り返りキュー `pending_review.json` だけ）
+4. 生成物を消す（残るのは `learner.json`、振り返りキュー `pending_review.json`、フィードバック用の
+   レッスンの記録 `lesson_manifests/` と `lesson_feedback.jsonl`）
 
 ### 振り返りキュー
 
@@ -61,6 +62,45 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 残せば 2 回目以降は新しい文だけ）。
 
 音声がアップロード上限を超えるときは ffmpeg でビットレートを落として送る。
+
+### レッスン後のフィードバック（language-learning-audio #128）
+
+レッスンの手応えを直後に 30 秒ほどで記録し、SSH なしで Discord から取り出す（`src/feedback.py`）。
+記録するだけで、v1 では `learner.json`・復習・次のレッスンの生成には一切使わない。
+
+- レッスンの投稿に「フィードバック」ボタンが付く（`/lesson-feedback [lesson]` でも開ける）。
+  ボタンは custom_id に学習者とレッスンの記録の ID（`lesson-012`、再生成なら `lesson-012.2`）
+  を持つので、自動更新で bot が再起動した後でも、同じ番号を再生成した後でも、押した投稿の
+  レッスンに紐付く。押せるのはそのレッスンを受けた人だけ
+- フォーム（本人にだけ見える）: 新出の一覧（訳つき）と、レッスンから機械的に見つけた候補
+  （同じ場面の繰り返し、最後に出たのが早い新出、終盤にヒントなしで言う機会がない新出。
+  language-learning-audio の plan.json の `review_candidates`）を見ながら
+  - 今使えそうな新出（複数選択）/ 早めにもう一度聞きたい新出（複数選択）
+  - 全体の負荷: 軽い / ちょうどいい / 重い（これだけ必須）
+  - 当てはまった候補と気になった点（繰り返し・何を答えるか分かりにくい・テンポ・その他）
+  - メモ（任意）
+- `/lesson-feedback-report [lesson]`: 最新のフィードバックの要約を投稿
+- `/lesson-feedback-export [lesson]`: フィードバックとレッスンの記録一式を zip で添付
+  （Issue や PR、外部での分析用）。learner.json とメモを含むので本人にだけ見える形で返す
+- `lesson` は `12`（その番号の最後の記録）、`12.2` や `lesson-012.2`（再生成した記録）、
+  `lesson-012`（1 回目）。省略すると最新
+- `/lesson` と同じく、`LESSON_CHANNEL_ID` を指定するとそのチャンネルでだけ使える
+
+置き場所は learner.json と同じ `<LESSON_ROOT>/<名前>/`（git の外なので、自動更新の pull で
+消えたり上書きされたりしない）:
+
+```text
+lesson_feedback.jsonl     追記のみ。1 行 = 1 回分（記録の ID、bot / language-learning-audio の
+                          コミット、transcript・script・生成前 learner.json の sha256、回答、メモ）。
+                          電源断で途中で切れた行があっても、読めなくなるのはその行だけ
+lesson_manifests/lesson-012/
+  manifest.json           生成日時、コミット、各ファイルの sha256、生成に使った引数
+  lesson-012.plan.json / .script.json / .transcript.md
+  learner.before.json     生成前の learner.json（選ばれ方を後から再現するため）
+```
+
+記録は生成したときのまま変えない（同じ番号をもう一度生成したら `lesson-012.2` を別に作る）。
+この機能より前に生成したレッスンには記録がないので、フィードバックの対象外。
 
 ### サーバーでの初回セットアップ
 
