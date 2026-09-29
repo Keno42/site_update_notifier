@@ -446,9 +446,10 @@ class EndToEndTests(unittest.TestCase):
             # every new item is asked next time, past the limit of 2
             self.assertIn("Discord 振り返り: 次回 3問（確認待ち 3件）", text)
             user = Path(td) / "yuki"
-            self.assertEqual(
-                sorted(p.name for p in user.iterdir())[:1], ["learner.json"]
-            )
+            self.assertTrue((user / "learner.json").exists())
+            # the first lesson guides to the feedback button and the weekly voice check
+            self.assertIn("/lesson-feedback", text)
+            self.assertIn("週1回の音声チェック", text)
             self.assertEqual(list((user / "work").iterdir()), [], "outputs removed")
             queued = ReviewQueue.load(cfg.pending_path("yuki"), D).entries
             self.assertGreater(len(queued), 2, "more questions than one session holds")
@@ -467,10 +468,15 @@ class EndToEndTests(unittest.TestCase):
                     replies[0][0],
                     "every new item of the last lesson, past the limit of 2",
                 )
+                self.assertIn(
+                    f"これから定着度チェックです（前回までの表現、全{len(new)}問）",
+                    replies[0][0],
+                )
                 self.assertEqual(await answer_all(view, second="迷った"), len(new))
 
             asyncio.run(review())
             self.assertIn("レッスン 2", channel.sent[-1][0])
+            self.assertNotIn("週1回の音声チェック", channel.sent[-1][0], "once a week")
             self.assertEqual(lessons.busy, set())
             queue = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
             failed = [e for e in queue.entries.values() if e.state == "failed"]
@@ -613,3 +619,37 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuidanceTests(unittest.TestCase):
+    def test_review_intro_only_on_the_first_question(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "pending_review.json"
+            queue = ReviewQueue.load(path, D)
+            queue.add_from_plan(
+                {"lesson_number": 1, "new_items": [], "review": QUESTIONS}, D
+            )
+            keys = queue.select(D, 10)
+            session = ReviewSession(queue, keys, path, D)
+            self.assertTrue(session.render().startswith("これから定着度チェックです"))
+            self.assertIn("これから定着度チェック", session.render(revealed=True))
+            session.rate("ok")
+            self.assertNotIn("これから定着度チェック", session.render())
+
+    def test_voice_check_reminder_once_per_interval(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(root=Path(td), users={1: "yuki"})
+            cfg.user_dir("yuki").mkdir()
+            lessons = Lessons(cfg)
+            self.assertTrue(lessons.calibration_due("yuki", D))
+            self.assertFalse(lessons.calibration_due("yuki", D + timedelta(days=6)))
+            self.assertTrue(lessons.calibration_due("yuki", D + timedelta(days=7)))
+            cfg.calibration_path("yuki").write_text("{broken", "utf-8")
+            self.assertTrue(
+                lessons.calibration_due("yuki", D + timedelta(days=8)),
+                "unreadable: remind",
+            )
+            off = Lessons(
+                LessonConfig(root=Path(td), users={1: "yuki"}, calibration_days=0)
+            )
+            self.assertFalse(off.calibration_due("yuki", D + timedelta(days=30)))

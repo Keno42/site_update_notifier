@@ -31,6 +31,15 @@ LLA_DIR = (
     Path(__file__).resolve().parent.parent / "external" / "language-learning-audio"
 )
 RESULTS = {"ok": "言えた", "shaky": "迷った", "failed": "言えなかった"}
+REVIEW_INTRO = (
+    "これから定着度チェックです（前回までの表現、全{n}問）。問いを見て声に出して答えてから"
+    "「答えを見る」で確かめ、言えた／迷った／言えなかったを選んでください。"
+)
+FEEDBACK_GUIDE = "聞き終えたら「フィードバック」ボタン（または /lesson-feedback）で手応えを記録してください（30秒ほど）。"
+CALIBRATION_GUIDE = (
+    "🎙 週1回の音声チェック（GPT Voice で10〜15分）の時期です。"
+    "手順とプロンプト: https://github.com/Keno42/language-learning-audio/issues/129"
+)
 
 
 @dataclass
@@ -48,6 +57,7 @@ class LessonConfig:
     upload_limit_mb: float = 20
     review_limit: int = 20  # 1 回の振り返りの最大問数. 0 なら期限の来ている問いすべて
     timeout_min: float = 60
+    calibration_days: int = 7  # 音声チェックの案内の間隔 (日). 0 なら案内しない
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
 
@@ -75,6 +85,9 @@ class LessonConfig:
             ),
             review_limit=getattr(config, "LESSON_REVIEW_LIMIT", defaults.review_limit),
             timeout_min=getattr(config, "LESSON_TIMEOUT_MIN", defaults.timeout_min),
+            calibration_days=getattr(
+                config, "LESSON_CALIBRATION_DAYS", defaults.calibration_days
+            ),
         )
 
     def user_dir(self, name: str) -> Path:
@@ -84,6 +97,9 @@ class LessonConfig:
 
     def learner_path(self, name: str) -> Path:
         return self.user_dir(name) / "learner.json"
+
+    def calibration_path(self, name: str) -> Path:
+        return self.user_dir(name) / "calibration_reminder.json"
 
     def pending_path(self, name: str) -> Path:
         return self.user_dir(name) / "pending_review.json"
@@ -199,6 +215,8 @@ class ReviewSession:
             f"**振り返り {len(self.results) + 1}/{len(self.keys)}**"
             f"（レッスン{e.source_lesson}）\n{e.prompt}"
         )
+        if not self.results:
+            text = REVIEW_INTRO.format(n=len(self.keys)) + "\n\n" + text
         return text + (f"\n答え: **{e.answer}**" if revealed else "")
 
     def summary(self) -> str:
@@ -520,7 +538,10 @@ class Lessons:
             tomorrow = today + timedelta(days=1)
             note = "" if auto else review_note(queue, tomorrow, self.cfg.review_limit)
             owner = next((u for u, n in self.cfg.users.items() if n == name), 0)
-            await self.post(channel, work, plan, note, owner, manifest)
+            guide = [FEEDBACK_GUIDE] if manifest else []
+            if self.calibration_due(name, today):
+                guide.append(CALIBRATION_GUIDE)
+            await self.post(channel, work, plan, note, owner, manifest, guide)
         finally:
             cleanup(work)
 
@@ -555,6 +576,21 @@ class Lessons:
             return None
         return d.name
 
+    def calibration_due(self, name: str, today: date) -> bool:
+        """週1回の音声チェック (language-learning-audio #129) を案内する日か. 案内したら
+        その日を記録し、calibration_days 日たつまで次は出さない."""
+        if self.cfg.calibration_days <= 0:
+            return False
+        path = self.cfg.calibration_path(name)
+        try:
+            last = date.fromisoformat(json.loads(path.read_text("utf-8"))["last"])
+        except (OSError, ValueError, KeyError, TypeError):
+            last = None
+        if last is not None and (today - last).days < self.cfg.calibration_days:
+            return False
+        path.write_text(json.dumps({"last": today.isoformat()}), "utf-8")
+        return True
+
     async def post(
         self,
         channel: discord.abc.Messageable,
@@ -563,6 +599,7 @@ class Lessons:
         review: str = "",
         owner: int = 0,
         manifest: str | None = None,
+        guide: list[str] | None = None,
     ) -> None:
         """owner: レッスンを受けた人の Discord ID (フィードバックボタンを押せる人).
         manifest: レッスンの記録の ID. 記録がなければボタンは付けない."""
@@ -599,6 +636,8 @@ class Lessons:
             f"**レッスン {n}**（約{minutes:.0f}分）\n新出: {new or 'なし'}\n"
             f"復習: {reviewed}項目" + (f"\n{review}" if review else "") + audio_note
         )
+        if guide:
+            text += "\n\n" + "\n".join(guide)
         try:
             if manifest:
                 view = feedback.feedback_view(owner, manifest)
