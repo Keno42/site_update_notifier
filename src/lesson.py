@@ -1,36 +1,54 @@
-"""/lesson: 前回レッスンの振り返り → report → 次のレッスン生成 → 投稿.
+"""/lesson: 前回レッスンの振り返り (と読みカード) → report → 次のレッスン生成 → 投稿.
 /lesson-auto: 振り返りも自己申告もせず生成 → 投稿 (auto モード: できた前提でペースが上がる).
 
 language-learning-audio (submodule: external/language-learning-audio) の CLI を
 subprocess で呼ぶ。永続化するのはユーザーごとの learner.json と、Discord 振り返りの
-キュー pending_review.json (src/review_queue.py)、フィードバック用のレッスンの記録
-(src/feedback.py) で、作業ディレクトリの生成物は投稿後に消す。
+キュー pending_review.json (src/review_queue.py)、読みカードの予定 reading_queue.json
+(src/reading.py)、フィードバック用のレッスンの記録 (src/feedback.py) で、作業ディレクトリの
+生成物は投稿後に消す。
+
+ユーザーのディレクトリに旅程のプロフィール trip.toml (language-learning-audio #132) が
+あれば、生成に --trip で渡す (旅行の can-do 項目を先に教える順番になる. ペースは変わらない).
+中身は読まず、レッスンの記録に残すのはその sha256 だけ.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import logging
 import re
 import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import discord
 from discord import app_commands
 
-from . import feedback, version
+from . import feedback, reading, version
 from .review_queue import Entry, ReviewQueue
 
 LLA_DIR = (
     Path(__file__).resolve().parent.parent / "external" / "language-learning-audio"
 )
 RESULTS = {"ok": "言えた", "shaky": "迷った", "failed": "言えなかった"}
+REVIEW_INTRO = (
+    "これから定着度チェックです（前回までの表現、全{n}問）。問いを見て声に出して答えてから"
+    "「答えを見る」で確かめ、言えた／迷った／言えなかったを選んでください。"
+)
+READING_INTRO = "続けて読みカードが{n}枚あります（書いてあるものを声に出して読む）。"
+FEEDBACK_GUIDE = "聞き終えたら「フィードバック」ボタン（または /lesson-feedback）で手応えを記録してください（30秒ほど）。"
+CALIBRATION_GUIDE = (
+    "🎙 週1回の音声チェック（GPT Voice で10〜15分）の時期です。"
+    "手順とプロンプト: https://github.com/Keno42/language-learning-audio/issues/129"
+)
 
 
 @dataclass
@@ -48,6 +66,13 @@ class LessonConfig:
     upload_limit_mb: float = 20
     review_limit: int = 20  # 1 回の振り返りの最大問数. 0 なら期限の来ている問いすべて
     timeout_min: float = 60
+    calibration_days: int = 7  # 音声チェックの案内の間隔 (日). 0 なら案内しない
+    # 振り返りの最後に出す読みカードの枚数. 問いをその分減らすので振り返りの時間は増えない.
+    # 0 なら出さない
+    reading_cards: int = 5
+    # trip.toml の地名 (places) も読みカードにする. カードは振り返りのチャンネルに出るので、
+    # チャンネルを他の人と共有しているなら False に
+    reading_own_places: bool = True
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
 
@@ -75,6 +100,15 @@ class LessonConfig:
             ),
             review_limit=getattr(config, "LESSON_REVIEW_LIMIT", defaults.review_limit),
             timeout_min=getattr(config, "LESSON_TIMEOUT_MIN", defaults.timeout_min),
+            calibration_days=getattr(
+                config, "LESSON_CALIBRATION_DAYS", defaults.calibration_days
+            ),
+            reading_cards=getattr(
+                config, "LESSON_READING_CARDS", defaults.reading_cards
+            ),
+            reading_own_places=getattr(
+                config, "LESSON_READING_OWN_PLACES", defaults.reading_own_places
+            ),
         )
 
     def user_dir(self, name: str) -> Path:
@@ -85,8 +119,29 @@ class LessonConfig:
     def learner_path(self, name: str) -> Path:
         return self.user_dir(name) / "learner.json"
 
+    def calibration_path(self, name: str) -> Path:
+        return self.user_dir(name) / "calibration_reminder.json"
+
     def pending_path(self, name: str) -> Path:
         return self.user_dir(name) / "pending_review.json"
+
+    def reading_path(self, name: str) -> Path:
+        return self.user_dir(name) / "reading_queue.json"
+
+    def trip_path(self, name: str) -> Path:
+        """旅程のプロフィール (手で置く. bot は中身を読まず、CLI に渡すだけ)."""
+        return self.user_dir(name) / "trip.toml"
+
+    @property
+    def question_limit(self) -> int:
+        """読みカードを出すときの問いの上限の目安 (review_limit からカードの分を引く)."""
+        if self.review_limit <= 0 or self.reading_cards <= 0:
+            return self.review_limit
+        return max(self.review_limit - self.reading_cards, 1)
+
+    def reading_tts_dir(self) -> Path:
+        """公開デッキのカードの 🔊 音声のキャッシュ (自分の地名のカードは保存しない)."""
+        return self.root / "reading-tts"
 
     def work_dir(self, name: str) -> Path:
         return self.user_dir(name) / "work"
@@ -104,6 +159,9 @@ class LessonConfig:
         extra = list(self.extra_args)
         if auto and "--auto" not in extra:
             extra.append("--auto")
+        trip = self.trip_path(name)
+        if trip.exists() and "--trip" not in extra:
+            extra += ["--trip", str(trip)]
         return [
             "generate",
             "--curriculum",
@@ -152,34 +210,60 @@ class LessonConfig:
 
 @dataclass
 class ReviewSession:
-    """今回の振り返り: キューから選んだ問いを 1 問ずつ. 答えるたびにキューへ書き込むので、
-    途中で時間切れになっても答えた分は残り、残りは未回答のまま次回へ回る."""
+    """今回の振り返り: キューから選んだ問いを 1 問ずつ、続けて読みカード (cards) を 1 枚ずつ.
+    答えるたびにキュー (読みカードは reading_queue.json) へ書き込むので、途中で時間切れに
+    なっても答えた分は残り、残りは未回答のまま次回へ回る."""
 
     queue: ReviewQueue
     keys: list[str]
     path: Path
     today: date
+    cards: list[dict] = field(default_factory=list)
+    reading_queue: reading.ReadingQueue | None = None
+    reading_path: Path | None = None
     results: list[str] = field(default_factory=list)
 
     @property
+    def total(self) -> int:
+        return len(self.keys) + len(self.cards)
+
+    @property
     def done(self) -> bool:
-        return len(self.results) >= len(self.keys)
+        return len(self.results) >= self.total
 
     def entry(self, n: int) -> Entry:
         return self.queue.entries[self.keys[n]]
+
+    def current_card(self) -> dict | None:
+        """今が読みカードならそのカード."""
+        n = len(self.results) - len(self.keys)
+        return self.cards[n] if 0 <= n < len(self.cards) else None
 
     def rate(self, result: str) -> None:
         if result not in RESULTS:
             raise ValueError(result)
         if self.done:
             return
-        self.queue.record(self.keys[len(self.results)], result, self.today)
-        self.queue.save(self.path)
+        card = self.current_card()
+        if card is None:
+            self.queue.record(self.keys[len(self.results)], result, self.today)
+            self.queue.save(self.path)
+        elif self.reading_queue is not None and self.reading_path is not None:
+            self.reading_queue.record(card["id"], result, self.today)
+            self.reading_queue.save(self.reading_path)
         self.results.append(result)
+
+    @property
+    def question_results(self) -> list[str]:
+        return self.results[: len(self.keys)]
+
+    @property
+    def card_results(self) -> list[str]:
+        return self.results[len(self.keys) :]
 
     def _ids(self, result: str) -> list[str]:
         ids: list[str] = []
-        for n, r in enumerate(self.results):
+        for n, r in enumerate(self.question_results):
             if r == result:
                 ids += [i for i in self.entry(n).items if i not in ids]
         return ids
@@ -190,22 +274,33 @@ class ReviewSession:
     def shaky_ids(self) -> list[str]:
         return self._ids("shaky")
 
-    def render(self, revealed: bool = False) -> str:
+    def render(self, revealed: bool = False, speak: bool = False) -> str:
         """今の問い. 答えは ``revealed`` のときだけ載せる: スポイラー (||…||) は PC 版の
         Discord がメッセージ単位で「開いた」状態を覚えていて、同じメッセージを次の問いに
-        編集しても開いたままになるため、ボタンで出す."""
-        e = self.entry(len(self.results))
-        text = (
-            f"**振り返り {len(self.results) + 1}/{len(self.keys)}**"
-            f"（レッスン{e.source_lesson}）\n{e.prompt}"
-        )
-        return text + (f"\n答え: **{e.answer}**" if revealed else "")
+        編集しても開いたままになるため、ボタンで出す. speak: 🔊 ボタンがある."""
+        card = self.current_card()
+        if card is not None:
+            n = len(self.card_results) + 1
+            text = reading.render_card(card, n, len(self.cards), revealed, speak)
+        else:
+            e = self.entry(len(self.results))
+            text = (
+                f"**振り返り {len(self.results) + 1}/{len(self.keys)}**"
+                f"（レッスン{e.source_lesson}）\n{e.prompt}"
+            ) + (f"\n答え: **{e.answer}**" if revealed else "")
+        if not self.results:
+            intro = REVIEW_INTRO.format(n=len(self.keys))
+            if self.cards:
+                intro += READING_INTRO.format(n=len(self.cards))
+            text = intro + "\n\n" + text
+        return text
 
     def summary(self) -> str:
-        lines = [f"**振り返り**: {len(self.results)}/{len(self.keys)}問に回答"]
+        answered = self.question_results
+        lines = [f"**振り返り**: {len(answered)}/{len(self.keys)}問に回答"]
         for result in ("failed", "shaky"):
             answers = [
-                self.entry(n).answer for n, r in enumerate(self.results) if r == result
+                self.entry(n).answer for n, r in enumerate(answered) if r == result
             ]
             if answers:
                 lines.append(f"{RESULTS[result]}: {'、'.join(dict.fromkeys(answers))}")
@@ -213,9 +308,18 @@ class ReviewSession:
             lines.append(
                 "（迷った項目は言えなかった扱いにはせず、早めにもう一度確認します）"
             )
-        left = len(self.keys) - len(self.results)
+        left = len(self.keys) - len(answered)
         if left:
             lines.append(f"未回答の {left} 問は次回に回します。")
+        if self.card_results:
+            counts = "・".join(
+                f"{RESULTS[r]} {self.card_results.count(r)}"
+                for r in ("ok", "shaky", "failed")
+                if r in self.card_results
+            )
+            lines.append(
+                f"**読み**: {len(self.card_results)}/{len(self.cards)}枚（{counts}）"
+            )
         return "\n".join(lines)
 
 
@@ -416,7 +520,20 @@ class Lessons:
 
                 await self.guarded(channel, report_then_generate())
                 return
-            session = ReviewSession(queue, keys, path, today)
+            cards: list[dict] = []
+            rq: reading.ReadingQueue | None = None
+            responded = False
+            if self.cfg.reading_cards > 0:
+                # デッキは CLI から読むので、Discord の応答期限 (3 秒) に先に返事をしておく
+                await interaction.response.send_message("振り返りを準備しています…")
+                responded = True
+                rq, cards = await self.pick_cards(name, queue, today)
+                if cards and self.cfg.review_limit > 0:
+                    # 問いをカードの分だけ減らす: 振り返りの時間は増やさない
+                    keys = queue.select(today, self.cfg.review_limit - len(cards))
+            session = ReviewSession(
+                queue, keys, path, today, cards, rq, self.cfg.reading_path(name)
+            )
 
             async def finish(generate: bool) -> None:
                 async def run() -> None:
@@ -433,16 +550,77 @@ class Lessons:
             async def expire() -> None:
                 await finish(False)  # 答えた分だけ報告し、生成はしない
 
-            view = ReviewView(session, interaction.user.id, finish, expire)
-            await interaction.response.send_message(session.render(), view=view)
-            handed_to_view = True
-            view.message = await interaction.original_response()
+            view = ReviewView(
+                session, interaction.user.id, finish, expire, speak=self.speak
+            )
+            if responded:
+                view.message = await interaction.edit_original_response(
+                    content=session.render(), view=view
+                )
+                handed_to_view = True
+            else:
+                await interaction.response.send_message(session.render(), view=view)
+                handed_to_view = True
+                view.message = await interaction.original_response()
             # 前回届かなかった報告があれば、振り返りの間に送り直す (同じ queue を使うので、
             # その間に答えた分と食い違わない)
             await self.guarded(channel, self.flush_reports(channel, name, queue, path))
         finally:
             if not handed_to_view:
                 self.busy.discard(name)
+
+    async def pick_cards(
+        self, name: str, queue: ReviewQueue, today: date
+    ) -> tuple[reading.ReadingQueue, list[dict]]:
+        """今回の読みカード. 枚数は reading_cards までで、直前のレッスンの新出の問い
+        (必ず出す. なくても 1 問は残す) と合わせて review_limit を超えない分だけ."""
+        n = self.cfg.reading_cards
+        if self.cfg.review_limit > 0:
+            n = min(n, self.cfg.review_limit - max(len(queue.must_answer()), 1))
+        rq = reading.ReadingQueue.load(self.cfg.reading_path(name))
+        if n <= 0:
+            return rq, []
+        deck = await self.reading_deck(name)
+        return rq, rq.select(deck, today, n)
+
+    async def reading_deck(self, name: str) -> list[dict]:
+        """``audiolesson reading`` のデッキ (メモリ上だけ). 読めなければ空で、振り返りは
+        問いだけで続ける. trip.toml の地名が入りうるので、エラーの中身もログに出さない."""
+        args = ["reading", self.cfg.curriculum]
+        trip = self.cfg.trip_path(name)
+        if self.cfg.reading_own_places and trip.exists():
+            args += ["--trip", str(trip)]
+        try:
+            rc, out, _ = await asyncio.wait_for(run_cli(self.cfg, args), timeout=60)
+            if rc == 0:
+                return reading.parse_deck(out)
+            logging.warning(f"読みカードのデッキを読めませんでした (rc={rc})")
+        except Exception as e:
+            logging.warning(
+                f"読みカードのデッキを読めませんでした ({type(e).__name__})"
+            )
+        return []
+
+    @contextlib.asynccontextmanager
+    async def speak(self, card: dict) -> AsyncIterator[Path]:
+        """カードの 🔊 の mp3. 公開デッキのカードはキャッシュし、自分の地名のカード
+        (own) は一時ファイルにして送ったら消す."""
+        voice = reading.profile_voice(self.cfg.lla_dir / self.cfg.profile)
+        if card.get("own"):
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "reading.mp3"
+                await reading.synthesize(card["text"], voice, out)
+                yield out
+            return
+        cache = self.cfg.reading_tts_dir()
+        cache.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha1(f"{voice}|{card['text']}".encode()).hexdigest()
+        out = cache / f"{key}.mp3"
+        if not out.exists():
+            tmp = cache / f"{key}.tmp.mp3"
+            await reading.synthesize(card["text"], voice, tmp)
+            tmp.replace(out)
+        yield out
 
     @staticmethod
     async def guarded(channel: discord.abc.Messageable, work: Awaitable[Any]) -> None:
@@ -518,9 +696,12 @@ class Lessons:
             queue.add_from_plan(plan, today)
             queue.save(path)
             tomorrow = today + timedelta(days=1)
-            note = "" if auto else review_note(queue, tomorrow, self.cfg.review_limit)
+            note = "" if auto else review_note(queue, tomorrow, self.cfg.question_limit)
             owner = next((u for u, n in self.cfg.users.items() if n == name), 0)
-            await self.post(channel, work, plan, note, owner, manifest)
+            guide = [FEEDBACK_GUIDE] if manifest else []
+            if self.calibration_due(name, today):
+                guide.append(CALIBRATION_GUIDE)
+            await self.post(channel, work, plan, note, owner, manifest, guide)
         finally:
             cleanup(work)
 
@@ -536,6 +717,15 @@ class Lessons:
         を返す (フィードバックの紐付け先, issue #128). 失敗しても投稿は止めない (None)."""
         lla = version.head_commit(self.cfg.lla_dir)
         bot = version.INFO.bot
+        # 旅程のプロフィールは中身を残さず、どの版で生成したかだけ (sha256) を残す
+        i = args.index("--trip") if "--trip" in args[:-1] else -1
+        trip = Path(args[i + 1]) if i >= 0 else None
+        try:
+            trip_sha256 = (
+                hashlib.sha256(trip.read_bytes()).hexdigest() if trip else None
+            )
+        except OSError:
+            trip_sha256 = None
         try:
             d = feedback.Ledger(self.cfg.user_dir(name)).save_manifest(
                 work,
@@ -549,11 +739,27 @@ class Lessons:
                 },
                 args,
                 datetime.now().astimezone(),
+                trip_sha256=trip_sha256,
             )
         except OSError:
             logging.exception("レッスンの記録を保存できませんでした")
             return None
         return d.name
+
+    def calibration_due(self, name: str, today: date) -> bool:
+        """週1回の音声チェック (language-learning-audio #129) を案内する日か. 案内したら
+        その日を記録し、calibration_days 日たつまで次は出さない."""
+        if self.cfg.calibration_days <= 0:
+            return False
+        path = self.cfg.calibration_path(name)
+        try:
+            last = date.fromisoformat(json.loads(path.read_text("utf-8"))["last"])
+        except (OSError, ValueError, KeyError, TypeError):
+            last = None
+        if last is not None and (today - last).days < self.cfg.calibration_days:
+            return False
+        path.write_text(json.dumps({"last": today.isoformat()}), "utf-8")
+        return True
 
     async def post(
         self,
@@ -563,6 +769,7 @@ class Lessons:
         review: str = "",
         owner: int = 0,
         manifest: str | None = None,
+        guide: list[str] | None = None,
     ) -> None:
         """owner: レッスンを受けた人の Discord ID (フィードバックボタンを押せる人).
         manifest: レッスンの記録の ID. 記録がなければボタンは付けない."""
@@ -599,6 +806,8 @@ class Lessons:
             f"**レッスン {n}**（約{minutes:.0f}分）\n新出: {new or 'なし'}\n"
             f"復習: {reviewed}項目" + (f"\n{review}" if review else "") + audio_note
         )
+        if guide:
+            text += "\n\n" + "\n".join(guide)
         try:
             if manifest:
                 view = feedback.feedback_view(owner, manifest)
@@ -623,12 +832,17 @@ class ReviewView(discord.ui.View):
         owner_id: int,
         finish: Callable[[bool], Awaitable[None]],  # 引数: 続けて生成するか
         expire: Callable[[], Awaitable[None]],
+        # 読みカードの 🔊: カード → mp3 のパスを渡す async context manager. None ならボタンなし
+        speak: (
+            Callable[[dict], contextlib.AbstractAsyncContextManager[Path]] | None
+        ) = None,
     ) -> None:
         super().__init__(timeout=1800)
         self.session = session
         self.owner_id = owner_id
         self.finish = finish
         self.expire = expire
+        self.speak = speak
         self.message: discord.InteractionMessage | None = None
         self._show(revealed=False)
 
@@ -646,6 +860,12 @@ class ReviewView(discord.ui.View):
                 )
                 button.callback = self._rate_callback(result)  # type: ignore[method-assign]
                 self.add_item(button)
+            if self.speak is not None and self.session.current_card() is not None:
+                listen: discord.ui.Button = discord.ui.Button(
+                    label="🔊", style=discord.ButtonStyle.secondary
+                )
+                listen.callback = self._speak  # type: ignore[method-assign]
+                self.add_item(listen)
         else:
             reveal: discord.ui.Button = discord.ui.Button(
                 label="答えを見る", style=discord.ButtonStyle.primary
@@ -658,8 +878,24 @@ class ReviewView(discord.ui.View):
             return
         self._show(revealed=True)
         await interaction.response.edit_message(
-            content=self.session.render(revealed=True), view=self
+            content=self.session.render(revealed=True, speak=self.speak is not None),
+            view=self,
         )
+
+    async def _speak(self, interaction: discord.Interaction) -> None:
+        """今の読みカードの発音を、押した本人にだけ mp3 で送る. 振り返りは進めない."""
+        card = self.session.current_card()
+        if self.is_finished() or card is None or self.speak is None:
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            async with self.speak(card) as mp3:
+                await interaction.followup.send(
+                    file=discord.File(mp3, filename="reading.mp3"), ephemeral=True
+                )
+        except Exception as e:
+            logging.warning(f"読みカードの音声を作れませんでした ({type(e).__name__})")
+            await interaction.followup.send("音声を作れませんでした。", ephemeral=True)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:

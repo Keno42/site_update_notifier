@@ -106,9 +106,13 @@ class Ledger:
         revisions: dict[str, str | None],
         args: list[str],
         now: datetime,
+        trip_sha256: str | None = None,
     ) -> Path:
         """生成したレッスンの記録を残す. 同じ番号の記録があっても上書きせず、
-        lesson-012.2 のように別に作る (生成済みの記録は変えない)."""
+        lesson-012.2 のように別に作る (生成済みの記録は変えない).
+
+        trip_sha256: 生成に使った旅程のプロフィール (language-learning-audio #132) の
+        ハッシュ. プロフィールの中身 (日程・行き先) は記録にもエクスポートにも入れない."""
         n = int(plan["lesson_number"])
         base = f"lesson-{n:03d}"
         d, k = self.manifests / base, 2
@@ -135,6 +139,7 @@ class Ledger:
             "learner_after_sha256": (
                 sha256(learner_after) if learner_after.exists() else None
             ),
+            "trip_sha256": trip_sha256,
         }
         (d / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=1), "utf-8"

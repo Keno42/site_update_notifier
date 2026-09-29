@@ -11,12 +11,13 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
    「言えた / 迷った / 言えなかった」。答えはスポイラーにしない: PC 版 Discord は一度開いた
    スポイラーを、編集で次の問いに変わっても開いたままにするため）。直前のレッスンの新出は上限を
    超えても全部出し、全部に答えるまで次のレッスンは生成しない（答えのない項目は音声レッスン側で
-   「言えた」とみなされるため）。振り返らずに生成したいときは `/lesson-auto`
+   「言えた」とみなされるため）。振り返らずに生成したいときは `/lesson-auto`。
+   続けて読みカードを数枚出す（下の「読みカード」）
 2. 答えた結果を `audiolesson report --recalled … --hesitated … --failed …` で送る
 3. 次のレッスンを生成し、その問いをキューに足して、音声と transcript をチャンネルに投稿する
    （「Discord 振り返り: 次回 15問（確認待ち 43件）」のように次回の見通しも添える）
-4. 生成物を消す（残るのは `learner.json`、振り返りキュー `pending_review.json`、フィードバック用の
-   レッスンの記録 `lesson_manifests/` と `lesson_feedback.jsonl`）
+4. 生成物を消す（残るのは `learner.json`、振り返りキュー `pending_review.json`、読みカードの予定
+   `reading_queue.json`、フィードバック用のレッスンの記録 `lesson_manifests/` と `lesson_feedback.jsonl`）
 
 ### 振り返りキュー
 
@@ -63,6 +64,45 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 
 音声がアップロード上限を超えるときは ffmpeg でビットレートを落として送る。
 
+### 読みカード（language-learning-audio #133）
+
+音声レッスンは綴りを見せないので、振り返りの最後に `LESSON_READING_CARDS` 枚（既定 5）、
+看板・店の言葉・地名などのカードを出す（`src/reading.py`）。
+
+- 1 枚ずつ: 書いてあるものを声に出して読む →「答えを見る」で意味・読み方の目安・成り立ち
+  （地名の部品）を見る →「言えた / 迷った / 言えなかった」。答えを見た後の 🔊 で、押した本人にだけ
+  発音の mp3 が届く（edge-tts。公開カードの音声は `<LESSON_ROOT>/reading-tts/` にキャッシュ）
+- **振り返りの時間は増えない**: 問いの上限をカードの分だけ減らす（既定なら問い 15 + カード 5）。
+  直前のレッスンの新出の問いは必ず出すので、カードはその残りの分だけ（問いは最低 1 問残す）
+- デッキは毎回 `audiolesson reading` の JSON をメモリ上で読むだけで、ディスクには書かない。
+  残すのはカード ID ごとの予定（`reading_queue.json`）だけ。デッキから消えたカードは出さない
+- 出す順: 期限の来たカード（言えなかった → 迷った → 言えた）→ デッキ順の新しいカード
+  （文字と音 → 看板 → 店 → 地名 → 地名の部品）。次の確認までの日数は振り返りの問いと同じ
+- 結果は音声レッスン側（`learner.json`）には報告しない
+- デッキを読めなかったときはカードなしで、問いだけで振り返る
+
+### 旅程のプロフィール（language-learning-audio #132）
+
+`<LESSON_ROOT>/<名前>/trip.toml` を手で置くと:
+
+- 生成に `--trip` で渡す: 旅行の can-do 項目（季節の設定があればその季節の分も）を先に教える
+  順番になる。**ペースは変わらない**（言えた / 迷った / 言えなかったで決まるまま）
+- `places` の地名も読みカードになる（ID は `own_1`, `own_2` … と番号だけ）。カードは振り返りの
+  チャンネルに出るので、チャンネルを他の人と共有しているなら `LESSON_READING_OWN_PLACES = False`
+- bot はプロフィールの中身を読まず、どこにも書かない。レッスンの記録（`manifest.json`）に残るのは
+  `trip_sha256`（どの版で生成したか）だけで、エクスポートにも中身は入らない。自分の地名のカードの
+  🔊 音声は一時ファイルで、送ったら消す
+
+書き方は language-learning-audio の `audiolesson/trip.py`（`departure` / `boost` / `places` / `season`）。
+
+### 案内
+
+`/lesson` は、いま何をする時間かを短く案内する。
+
+- 振り返りの最初の問いに「これから定着度チェックです（前回までの表現、全 N 問）」と手順を添える。
+- レッスンの投稿に、聞き終えたらフィードバックボタン（または `/lesson-feedback`）で記録するよう添える。
+- `LESSON_CALIBRATION_DAYS` 日ごとに（既定 7 日）、週1回の音声チェック（GPT Voice、#129）の時期であることを、手順とプロンプトへのリンク付きで添える。前回案内した日は `<LESSON_ROOT>/<名前>/calibration_reminder.json` に残る。
+
 ### レッスン後のフィードバック（language-learning-audio #128）
 
 レッスンの手応えを直後に 30 秒ほどで記録し、SSH なしで Discord から取り出す（`src/feedback.py`）。
@@ -94,7 +134,8 @@ lesson_feedback.jsonl     追記のみ。1 行 = 1 回分（記録の ID、bot /
                           コミット、transcript・script・生成前 learner.json の sha256、回答、メモ）。
                           電源断で途中で切れた行があっても、読めなくなるのはその行だけ
 lesson_manifests/lesson-012/
-  manifest.json           生成日時、コミット、各ファイルの sha256、生成に使った引数
+  manifest.json           生成日時、コミット、各ファイルの sha256、生成に使った引数、
+                          旅程のプロフィールを使ったならその sha256（中身は残さない）
   lesson-012.plan.json / .script.json / .transcript.md
   learner.before.json     生成前の learner.json（選ばれ方を後から再現するため）
 ```
@@ -137,6 +178,9 @@ lesson_manifests/lesson-012/
    LESSON_TIMEOUT_MIN = 60               # 生成がこれ以上かかったら止めてエラーにする
    LESSON_UPLOAD_LIMIT_MB = 20
    LESSON_REVIEW_LIMIT = 20              # 1 回の振り返りの最大問数（出せなかった分は次回へ）。0 なら期限の来ている問いすべて
+   LESSON_CALIBRATION_DAYS = 7           # 週1回の音声チェック（language-learning-audio #129）を案内する間隔。0 で案内しない
+   LESSON_READING_CARDS = 5              # 振り返りの最後の読みカードの枚数（その分問いを減らす）。0 で出さない
+   LESSON_READING_OWN_PLACES = True      # trip.toml の地名も読みカードにする（チャンネルを共有しているなら False）
    ```
 
 3. `LESSON_ROOT` を作って bot の実行ユーザーに書き込み権限を付け、`learner.json` を

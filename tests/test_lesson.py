@@ -9,7 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import hashlib
+
 import discord
+
+from src import feedback
 
 from src.lesson import (
     LLA_DIR,
@@ -406,6 +410,7 @@ class EndToEndTests(unittest.TestCase):
     """実際の CLI (stub 音声) で 生成 → 投稿 → 振り返り → report → 次の生成."""
 
     def config(self, td, **kw):
+        kw.setdefault("reading_cards", 0)  # 読みカードは test_reading_cards_* で
         return LessonConfig(
             root=Path(td),
             users={1: "yuki"},
@@ -423,12 +428,16 @@ class EndToEndTests(unittest.TestCase):
         async def original_response():
             return None
 
+        async def edit_original_response(content=None, view=None):
+            replies.append((content, view))
+
         return SimpleNamespace(
             user=SimpleNamespace(id=1),
             channel_id=5,
             channel=channel,
             response=Response(),
             original_response=original_response,
+            edit_original_response=edit_original_response,
         )
 
     def test_review_report_and_next_lesson_through_discord(self):
@@ -446,9 +455,10 @@ class EndToEndTests(unittest.TestCase):
             # every new item is asked next time, past the limit of 2
             self.assertIn("Discord 振り返り: 次回 3問（確認待ち 3件）", text)
             user = Path(td) / "yuki"
-            self.assertEqual(
-                sorted(p.name for p in user.iterdir())[:1], ["learner.json"]
-            )
+            self.assertTrue((user / "learner.json").exists())
+            # the first lesson guides to the feedback button and the weekly voice check
+            self.assertIn("/lesson-feedback", text)
+            self.assertIn("週1回の音声チェック", text)
             self.assertEqual(list((user / "work").iterdir()), [], "outputs removed")
             queued = ReviewQueue.load(cfg.pending_path("yuki"), D).entries
             self.assertGreater(len(queued), 2, "more questions than one session holds")
@@ -467,10 +477,15 @@ class EndToEndTests(unittest.TestCase):
                     replies[0][0],
                     "every new item of the last lesson, past the limit of 2",
                 )
+                self.assertIn(
+                    f"これから定着度チェックです（前回までの表現、全{len(new)}問）",
+                    replies[0][0],
+                )
                 self.assertEqual(await answer_all(view, second="迷った"), len(new))
 
             asyncio.run(review())
             self.assertIn("レッスン 2", channel.sent[-1][0])
+            self.assertNotIn("週1回の音声チェック", channel.sent[-1][0], "once a week")
             self.assertEqual(lessons.busy, set())
             queue = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
             failed = [e for e in queue.entries.values() if e.state == "failed"]
@@ -547,6 +562,73 @@ class EndToEndTests(unittest.TestCase):
                 asyncio.run(lesson_command())
             self.assertEqual(set(failures()[0]), {1}, "and never sent twice")
 
+    def test_reading_cards_and_the_trip_profile_through_discord(self):
+        """#133: the review ends with reading cards in place of some questions (the same
+        total); #132: a trip.toml is passed to generate, and the lesson record keeps only
+        its sha256. Nothing from the profile is written by the bot."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td, review_limit=20, reading_cards=3)
+            user = cfg.user_dir("yuki")
+            user.mkdir(parents=True)
+            trip = cfg.trip_path("yuki")
+            trip.write_text(
+                'places = ["Testvík"]\nseason = "winter-holidays"\n', "utf-8"
+            )
+            day = {"today": D}
+            lessons = Lessons(cfg, today=lambda: day["today"])
+            channel = FakeChannel()
+            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            self.assertIn("レッスン 1", channel.sent[-1][0])
+            record = feedback.Ledger(user).load(None)
+            self.assertIn("--trip", record.manifest["generate_args"])
+            self.assertEqual(
+                record.manifest["trip_sha256"],
+                hashlib.sha256(trip.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(record.plan["config"]["priority_items"] > 0, True)
+
+            day["today"] = D + timedelta(days=1)
+            queued = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
+            new = [e for e in queued.entries.values() if e.new]
+            replies = []
+
+            async def review():
+                await lessons.start(self.interaction(channel, replies))
+                self.assertEqual(replies[0], ("振り返りを準備しています…", None))
+                text, view = replies[-1]
+                self.assertIn(f"全{len(new)}問", text)
+                self.assertIn("読みカードが3枚", text)
+                return await answer_all(view, first="言えた", second="言えなかった")
+
+            answered = asyncio.run(review())
+            self.assertEqual(answered, min(len(new) + 3, 20))
+            self.assertIn("レッスン 2", channel.sent[-1][0])
+            saved = json.loads(cfg.reading_path("yuki").read_text("utf-8"))
+            self.assertEqual(len(saved["cards"]), answered - len(new))
+            learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
+            self.assertFalse(
+                set(saved["cards"]) & set(learner["items"]),
+                "reading cards are not reported to learner.json",
+            )
+            # nothing the bot wrote holds the private place name
+            for p in Path(td).rglob("*"):
+                if p.is_file() and p != trip:
+                    self.assertNotIn(b"Testv", p.read_bytes(), p)
+
+    def test_reading_deck_includes_own_places_only_when_allowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td, reading_cards=5)
+            cfg.user_dir("yuki").mkdir(parents=True)
+            cfg.trip_path("yuki").write_text('places = ["Testvík"]\n', "utf-8")
+            deck = asyncio.run(Lessons(cfg).reading_deck("yuki"))
+            own = [c for c in deck if c.get("own")]
+            self.assertEqual([c["text"] for c in own], ["Testvík"])
+            self.assertTrue(all(c["id"].startswith("own_") for c in own))
+            self.assertGreater(len(deck), 80)
+            cfg.reading_own_places = False
+            deck = asyncio.run(Lessons(cfg).reading_deck("yuki"))
+            self.assertFalse([c for c in deck if c.get("own")])
+
     def test_second_learner_reuses_the_shared_cache(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = LessonConfig(
@@ -613,3 +695,37 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuidanceTests(unittest.TestCase):
+    def test_review_intro_only_on_the_first_question(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "pending_review.json"
+            queue = ReviewQueue.load(path, D)
+            queue.add_from_plan(
+                {"lesson_number": 1, "new_items": [], "review": QUESTIONS}, D
+            )
+            keys = queue.select(D, 10)
+            session = ReviewSession(queue, keys, path, D)
+            self.assertTrue(session.render().startswith("これから定着度チェックです"))
+            self.assertIn("これから定着度チェック", session.render(revealed=True))
+            session.rate("ok")
+            self.assertNotIn("これから定着度チェック", session.render())
+
+    def test_voice_check_reminder_once_per_interval(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(root=Path(td), users={1: "yuki"})
+            cfg.user_dir("yuki").mkdir()
+            lessons = Lessons(cfg)
+            self.assertTrue(lessons.calibration_due("yuki", D))
+            self.assertFalse(lessons.calibration_due("yuki", D + timedelta(days=6)))
+            self.assertTrue(lessons.calibration_due("yuki", D + timedelta(days=7)))
+            cfg.calibration_path("yuki").write_text("{broken", "utf-8")
+            self.assertTrue(
+                lessons.calibration_due("yuki", D + timedelta(days=8)),
+                "unreadable: remind",
+            )
+            off = Lessons(
+                LessonConfig(root=Path(td), users={1: "yuki"}, calibration_days=0)
+            )
+            self.assertFalse(off.calibration_due("yuki", D + timedelta(days=30)))
