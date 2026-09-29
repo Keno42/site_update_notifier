@@ -615,6 +615,47 @@ class EndToEndTests(unittest.TestCase):
                 if p.is_file() and p != trip:
                     self.assertNotIn(b"Testv", p.read_bytes(), p)
 
+    def test_trip_from_the_channel_topic(self):
+        """No trip.toml: the [trip] in the channel topic is used. The record keeps
+        «channel-topic» in place of the temporary path, and its sha256; nothing the bot
+        writes holds the topic's contents. A broken topic: a notice, then no trip."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td, review_limit=20, reading_cards=0)
+            lessons = Lessons(cfg, today=lambda: D)
+            channel = FakeChannel()
+            channel.topic = (
+                "旅行チャンネル\n[trip]\n"
+                'places = ["Testvík"]\nseason = "winter-holidays"\n'
+            )
+            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            self.assertIn("レッスン 1", channel.sent[-1][0])
+            user = cfg.user_dir("yuki")
+            record = feedback.Ledger(user).load(None)
+            args = record.manifest["generate_args"]
+            self.assertEqual(args[args.index("--trip") + 1], "channel-topic")
+            canonical = 'places = ["Testvík"]\nseason = "winter-holidays"\n'
+            self.assertEqual(
+                record.manifest["trip_sha256"],
+                hashlib.sha256(canonical.encode()).hexdigest(),
+            )
+            self.assertGreater(record.plan["config"]["priority_items"], 0)
+            deck = asyncio.run(lessons.reading_deck("yuki", channel))
+            self.assertEqual([c["text"] for c in deck if c.get("own")], ["Testvík"])
+            for p in Path(td).rglob("*"):
+                if p.is_file():
+                    self.assertNotIn(b"Testv", p.read_bytes(), p)
+                    self.assertNotIn(b"winter-holidays", p.read_bytes(), p)
+
+            channel.topic = '[trip]\nhotel = "Testvík"\n'
+            channel.sent.clear()
+            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            self.assertIn("トピックの旅程の設定を読めませんでした", channel.sent[0][0])
+            self.assertNotIn("Testv", channel.sent[0][0])
+            self.assertIn("レッスン 2", channel.sent[-1][0])
+            record = feedback.Ledger(user).load(None)
+            self.assertNotIn("--trip", record.manifest["generate_args"])
+            self.assertIsNone(record.manifest["trip_sha256"])
+
     def test_reading_deck_includes_own_places_only_when_allowed(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = self.config(td, reading_cards=5)

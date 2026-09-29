@@ -7,9 +7,9 @@ subprocess で呼ぶ。永続化するのはユーザーごとの learner.json �
 (src/reading.py)、フィードバック用のレッスンの記録 (src/feedback.py) で、作業ディレクトリの
 生成物は投稿後に消す。
 
-ユーザーのディレクトリに旅程のプロフィール trip.toml (language-learning-audio #132) が
-あれば、生成に --trip で渡す (旅行の can-do 項目を先に教える順番になる. ペースは変わらない).
-中身は読まず、レッスンの記録に残すのはその sha256 だけ.
+旅程のプロフィール (language-learning-audio #132) があれば、生成に --trip で渡す (旅行の
+can-do 項目を先に教える順番になる. ペースは変わらない). ユーザーのディレクトリの trip.toml、
+なければチャンネルのトピックの [trip] (src/trip.py). レッスンの記録に残すのはその sha256 だけ.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import discord
 from discord import app_commands
 
-from . import feedback, reading, version
+from . import feedback, reading, trip, version
 from .review_queue import Entry, ReviewQueue
 
 LLA_DIR = (
@@ -70,8 +70,8 @@ class LessonConfig:
     # 振り返りの最後に出す読みカードの枚数. 問いをその分減らすので振り返りの時間は増えない.
     # 0 なら出さない
     reading_cards: int = 5
-    # trip.toml の地名 (places) も読みカードにする. カードは振り返りのチャンネルに出るので、
-    # チャンネルを他の人と共有しているなら False に
+    # 旅程の設定 (trip.toml / チャンネルのトピック) の地名 (places) も読みカードにする.
+    # カードは振り返りのチャンネルに出るので、trip.toml の地名を他の人に見せたくないなら False に
     reading_own_places: bool = True
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
@@ -129,7 +129,8 @@ class LessonConfig:
         return self.user_dir(name) / "reading_queue.json"
 
     def trip_path(self, name: str) -> Path:
-        """旅程のプロフィール (手で置く. bot は中身を読まず、CLI に渡すだけ)."""
+        """その人だけの旅程のプロフィール (手で置く. bot は中身を読まず、CLI に渡すだけ).
+        あればチャンネルのトピックの設定より優先する."""
         return self.user_dir(name) / "trip.toml"
 
     @property
@@ -155,12 +156,14 @@ class LessonConfig:
             return self.root / "tts-cache"
         return self.work_dir(name) / "cache"
 
-    def generate_args(self, name: str, auto: bool = False) -> list[str]:
+    def generate_args(
+        self, name: str, auto: bool = False, trip: Path | None = None
+    ) -> list[str]:
+        """trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める)."""
         extra = list(self.extra_args)
         if auto and "--auto" not in extra:
             extra.append("--auto")
-        trip = self.trip_path(name)
-        if trip.exists() and "--trip" not in extra:
+        if trip is not None and "--trip" not in extra:
             extra += ["--trip", str(trip)]
         return [
             "generate",
@@ -527,7 +530,7 @@ class Lessons:
                 # デッキは CLI から読むので、Discord の応答期限 (3 秒) に先に返事をしておく
                 await interaction.response.send_message("振り返りを準備しています…")
                 responded = True
-                rq, cards = await self.pick_cards(name, queue, today)
+                rq, cards = await self.pick_cards(name, queue, today, channel)
                 if cards and self.cfg.review_limit > 0:
                     # 問いをカードの分だけ減らす: 振り返りの時間は増やさない
                     keys = queue.select(today, self.cfg.review_limit - len(cards))
@@ -570,7 +573,7 @@ class Lessons:
                 self.busy.discard(name)
 
     async def pick_cards(
-        self, name: str, queue: ReviewQueue, today: date
+        self, name: str, queue: ReviewQueue, today: date, channel: Any = None
     ) -> tuple[reading.ReadingQueue, list[dict]]:
         """今回の読みカード. 枚数は reading_cards までで、直前のレッスンの新出の問い
         (必ず出す. なくても 1 問は残す) と合わせて review_limit を超えない分だけ."""
@@ -580,16 +583,20 @@ class Lessons:
         rq = reading.ReadingQueue.load(self.cfg.reading_path(name))
         if n <= 0:
             return rq, []
-        deck = await self.reading_deck(name)
+        deck = await self.reading_deck(name, channel)
         return rq, rq.select(deck, today, n)
 
-    async def reading_deck(self, name: str) -> list[dict]:
+    async def reading_deck(self, name: str, channel: Any = None) -> list[dict]:
         """``audiolesson reading`` のデッキ (メモリ上だけ). 読めなければ空で、振り返りは
-        問いだけで続ける. trip.toml の地名が入りうるので、エラーの中身もログに出さない."""
-        args = ["reading", self.cfg.curriculum]
-        trip = self.cfg.trip_path(name)
-        if self.cfg.reading_own_places and trip.exists():
-            args += ["--trip", str(trip)]
+        問いだけで続ける. 旅程の地名が入りうるので、エラーの中身もログに出さない.
+        旅程の設定を読めないときの案内は生成のときに出す."""
+        with trip.resolve(self.cfg.trip_path(name), channel) as (source, _):
+            args = ["reading", self.cfg.curriculum]
+            if self.cfg.reading_own_places and source is not None:
+                args += ["--trip", str(source.path)]
+            return await self._reading_deck(args)
+
+    async def _reading_deck(self, args: list[str]) -> list[dict]:
         try:
             rc, out, _ = await asyncio.wait_for(run_cli(self.cfg, args), timeout=60)
             if rc == 0:
@@ -665,13 +672,27 @@ class Lessons:
     async def generate_and_post(
         self, channel: discord.abc.Messageable, name: str, auto: bool = False
     ) -> None:
+        with trip.resolve(self.cfg.trip_path(name), channel) as (source, warning):
+            if warning:
+                await channel.send(warning)
+            await self._generate_and_post(channel, name, auto, source)
+
+    async def _generate_and_post(
+        self,
+        channel: discord.abc.Messageable,
+        name: str,
+        auto: bool,
+        source: trip.TripSource | None,
+    ) -> None:
         work = self.cfg.work_dir(name)
         cleanup(work)
         work.mkdir(parents=True, exist_ok=True)
         learner = self.cfg.learner_path(name)
         # 生成前の learner.json: レッスンの記録に残し、選ばれ方を後から再現できるように
         learner_before = learner.read_bytes() if learner.exists() else None
-        args = self.cfg.generate_args(name, auto)
+        args = self.cfg.generate_args(name, auto, source.path if source else None)
+        if source is not None and str(source.path) not in args:
+            source = None  # LESSON_EXTRA_ARGS の --trip が優先された
         try:
             status = StatusMessage(channel)
             await status.start()
@@ -688,7 +709,14 @@ class Lessons:
                 await channel.send("生成結果 (plan.json) が見つかりませんでした。")
                 return
             plan = json.loads(plan_path.read_text("utf-8"))
-            manifest = self.save_manifest(name, work, plan, learner_before, args)
+            manifest = self.save_manifest(
+                name,
+                work,
+                plan,
+                learner_before,
+                trip.recorded_args(args, source),
+                source.sha256 if source else None,
+            )
             # 自動モードでも問いはキューに足す: 次に /lesson を使えばそこで振り返れる
             today = self.today()
             path = self.cfg.pending_path(name)
@@ -712,20 +740,13 @@ class Lessons:
         plan: dict,
         learner_before: bytes | None,
         args: list[str],
+        trip_sha256: str | None = None,
     ) -> str | None:
         """生成したレッスンの記録を残し、その ID (lesson-012 / 再生成なら lesson-012.2)
-        を返す (フィードバックの紐付け先, issue #128). 失敗しても投稿は止めない (None)."""
+        を返す (フィードバックの紐付け先, issue #128). 失敗しても投稿は止めない (None).
+        旅程のプロフィールは中身を残さず、どの版で生成したかだけ (sha256) を残す."""
         lla = version.head_commit(self.cfg.lla_dir)
         bot = version.INFO.bot
-        # 旅程のプロフィールは中身を残さず、どの版で生成したかだけ (sha256) を残す
-        i = args.index("--trip") if "--trip" in args[:-1] else -1
-        trip = Path(args[i + 1]) if i >= 0 else None
-        try:
-            trip_sha256 = (
-                hashlib.sha256(trip.read_bytes()).hexdigest() if trip else None
-            )
-        except OSError:
-            trip_sha256 = None
         try:
             d = feedback.Ledger(self.cfg.user_dir(name)).save_manifest(
                 work,
