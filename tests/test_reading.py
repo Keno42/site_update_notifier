@@ -292,7 +292,7 @@ class PickCardsTests(unittest.TestCase):
             queue.add_from_plan(plan, D)
             lessons = Lessons(cfg)
 
-            async def deck(name):
+            async def deck(name, channel=None):
                 return list(DECK)
 
             lessons.reading_deck = deck
@@ -308,16 +308,15 @@ class PickCardsTests(unittest.TestCase):
 
 
 class TripArgsTests(unittest.TestCase):
-    def test_trip_is_passed_only_when_the_profile_exists(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = LessonConfig(root=Path(td), users={1: "yuki"})
-            self.assertNotIn("--trip", cfg.generate_args("yuki"))
-            cfg.user_dir("yuki").mkdir()
-            cfg.trip_path("yuki").write_text("", "utf-8")
-            args = cfg.generate_args("yuki")
-            self.assertEqual(args[args.index("--trip") + 1], str(cfg.trip_path("yuki")))
-            cfg.extra_args = ["--trip", "/elsewhere.toml"]
-            self.assertEqual(cfg.generate_args("yuki").count("--trip"), 1)
+    def test_trip_is_passed_only_when_given(self):
+        cfg = LessonConfig(root=Path("/x"), users={1: "yuki"})
+        self.assertNotIn("--trip", cfg.generate_args("yuki"))
+        args = cfg.generate_args("yuki", trip=Path("/x/yuki/trip.toml"))
+        self.assertEqual(args[args.index("--trip") + 1], "/x/yuki/trip.toml")
+        cfg.extra_args = ["--trip", "/elsewhere.toml"]
+        args = cfg.generate_args("yuki", trip=Path("/x/yuki/trip.toml"))
+        self.assertEqual(args.count("--trip"), 1)
+        self.assertIn("/elsewhere.toml", args)
 
     def test_question_limit_leaves_room_for_the_cards(self):
         cfg = LessonConfig(root=Path("/x"), users={1: "y"})

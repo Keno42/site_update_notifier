@@ -83,17 +83,43 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 
 ### 旅程のプロフィール（language-learning-audio #132）
 
-`<LESSON_ROOT>/<名前>/trip.toml` を手で置くと:
+旅程の設定は次のどちらかに書く（両方あれば 1 を使う）:
 
-- 生成に `--trip` で渡す: 旅行の can-do 項目（季節の設定があればその季節の分も）を先に教える
+1. `<LESSON_ROOT>/<名前>/trip.toml`（その人だけの設定。サーバーに手で置く）
+2. `/lesson` を実行するチャンネルの**トピック**（同じ旅行の人だけがいるチャンネル向け。スレッドなら
+   親チャンネルのトピック）。`[trip]` の行から空行までか、1 行の `trip = { … }` で書く:
+
+   ```text
+   アイスランド旅行 🇮🇸
+   [trip]
+   departure = 2030-01-31
+   boost = ["A6", "B2"]
+   places = ["Ísafjörður"]
+   season = "winter-holidays"
+   ```
+
+   ```text
+   trip = { departure = 2030-01-31, boost = ["A6", "B2"], season = "winter-holidays" }
+   ```
+
+キーはどちらも `departure` / `boost` / `places` / `season`（どれも省略できる。空なら Tier A → B の
+順）。意味は language-learning-audio の `audiolesson/trip.py` と `docs/TRAVEL-CANDO.md`。
+
+設定があると:
+
+- 生成に `--trip` で渡す: 旅行の can-do 項目（`season` があればその季節の分も）を先に教える
   順番になる。**ペースは変わらない**（言えた / 迷った / 言えなかったで決まるまま）
 - `places` の地名も読みカードになる（ID は `own_1`, `own_2` … と番号だけ）。カードは振り返りの
-  チャンネルに出るので、チャンネルを他の人と共有しているなら `LESSON_READING_OWN_PLACES = False`
-- bot はプロフィールの中身を読まず、どこにも書かない。レッスンの記録（`manifest.json`）に残るのは
-  `trip_sha256`（どの版で生成したか）だけで、エクスポートにも中身は入らない。自分の地名のカードの
-  🔊 音声は一時ファイルで、送ったら消す
-
-書き方は language-learning-audio の `audiolesson/trip.py`（`departure` / `boost` / `places` / `season`）。
+  チャンネルに出る。trip.toml の地名をチャンネルの他の人に見せたくないなら
+  `LESSON_READING_OWN_PLACES = False`
+- bot は設定の値をどこにも書かない。trip.toml は CLI に渡すだけ。トピックの設定は決まった形の
+  TOML に直して一時ファイルにし、使い終わったら消す。レッスンの記録（`manifest.json`）に残るのは
+  `trip_sha256`（どの版で生成したか）だけで、引数のパスはトピックなら `channel-topic` と残る。
+  エクスポートにも中身は入らない。自分の地名のカードの 🔊 音声も一時ファイルで、送ったら消す
+- トピックの `[trip]` を読めないとき（TOML の誤り、知らないキー、型の違い）は、生成の前に
+  「チャンネルのトピックの旅程の設定を読めませんでした: …」と出して旅程なしで生成する。
+  案内にはキー名と位置だけを出し、値は出さない
+- トピックはチャンネルに入れる人全員に見える。**同じ旅行の人だけがいるチャンネル**で使う
 
 ### 案内
 
@@ -180,7 +206,7 @@ lesson_manifests/lesson-012/
    LESSON_REVIEW_LIMIT = 20              # 1 回の振り返りの最大問数（出せなかった分は次回へ）。0 なら期限の来ている問いすべて
    LESSON_CALIBRATION_DAYS = 7           # 週1回の音声チェック（language-learning-audio #129）を案内する間隔。0 で案内しない
    LESSON_READING_CARDS = 5              # 振り返りの最後の読みカードの枚数（その分問いを減らす）。0 で出さない
-   LESSON_READING_OWN_PLACES = True      # trip.toml の地名も読みカードにする（チャンネルを共有しているなら False）
+   LESSON_READING_OWN_PLACES = True      # 旅程の設定の地名も読みカードにする（trip.toml の地名を見せたくないなら False）
    ```
 
 3. `LESSON_ROOT` を作って bot の実行ユーザーに書き込み権限を付け、`learner.json` を
