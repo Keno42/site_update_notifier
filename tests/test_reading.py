@@ -129,6 +129,35 @@ class ReadingQueueTests(unittest.TestCase):
         self.assertIn("🔊", shown)
         self.assertNotIn("🔊", render_card(DECK[2], 1, 3, revealed=True, speak=False))
 
+    def test_a_letters_card_shows_its_words_meanings_and_names_the_rule(self):
+        card = {
+            "id": "l_thorn", "stage": "letters", "text": "Það · Þetta",
+            "meaning": "þ: the 'th' of 'think'", "meaning_ja": "þ は英語 think の th",
+            "hint_ja": "サズ・セッタ", "words": [["Það", "それ"], ["Þetta", "これ"]],
+        }  # fmt: skip
+        shown = render_card(card, 1, 1, revealed=True, speak=False)
+        self.assertIn("意味: Það＝それ ／ Þetta＝これ", shown)
+        self.assertIn("読み方のきまり: þ は英語 think の th", shown)
+        self.assertNotIn("意味: þ", shown, "the rule is not labelled a meaning")
+        self.assertNotIn("the 'th'", shown)
+        # a deck from before `words`: still no rule under 意味
+        del card["words"]
+        shown = render_card(card, 1, 1, revealed=True, speak=False)
+        self.assertNotIn("意味:", shown)
+        self.assertIn("読み方のきまり:", shown)
+
+    def test_other_cards_list_each_words_meaning_too(self):
+        card = {
+            "id": "s_jol", "stage": "signs", "text": "Jóladagur · Aðfangadagur",
+            "meaning": "Christmas Day · Christmas Eve", "meaning_ja": "クリスマス当日・イブ",
+            "words": [["Jóladagur", "クリスマス当日"], ["Aðfangadagur", "クリスマスイブ"]],
+        }  # fmt: skip
+        shown = render_card(card, 1, 1, revealed=True, speak=False)
+        self.assertIn("意味: クリスマス当日・イブ", shown)
+        self.assertIn(
+            "それぞれ: Jóladagur＝クリスマス当日 ／ Aðfangadagur＝クリスマスイブ", shown
+        )
+
     def test_profile_voice(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "p.toml"
