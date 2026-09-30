@@ -12,12 +12,13 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
    スポイラーを、編集で次の問いに変わっても開いたままにするため）。直前のレッスンの新出は上限を
    超えても全部出し、全部に答えるまで次のレッスンは生成しない（答えのない項目は音声レッスン側で
    「言えた」とみなされるため）。振り返らずに生成したいときは `/lesson-auto`。
-   続けて読みカードを数枚出す（下の「読みカード」）
+   続けて場面カードと読みカードを数枚ずつ出す（下の「場面カード」「読みカード」）
 2. 答えた結果を `audiolesson report --recalled … --hesitated … --failed …` で送る
 3. 次のレッスンを生成し、その問いをキューに足して、音声と transcript をチャンネルに投稿する
    （「Discord 振り返り: 次回 15問（確認待ち 43件）」のように次回の見通しも添える）
-4. 生成物を消す（残るのは `learner.json`、振り返りキュー `pending_review.json`、読みカードの予定
-   `reading_queue.json`、フィードバック用のレッスンの記録 `lesson_manifests/` と `lesson_feedback.jsonl`）
+4. 生成物を消す（残るのは `learner.json`、振り返りキュー `pending_review.json`、場面カード・読みカードの
+   予定 `scene_queue.json` / `reading_queue.json`、フィードバック用のレッスンの記録 `lesson_manifests/` と
+   `lesson_feedback.jsonl`）
 
 ### 振り返りキュー
 
@@ -64,16 +65,36 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 
 音声がアップロード上限を超えるときは ffmpeg でビットレートを落として送る。
 
+### 場面カード（language-learning-audio #129）
+
+旅行の can-do 場面の一場面を台本どおりに練習する（`src/scenes.py`）。問いのあと、読みカードの前に
+`LESSON_SCENE_CARDS` 枚（既定 3）。
+
+- 1 枚ずつ: 日本語の状況（例:「レジで店員に何か聞かれました」）→ 相手の言葉があれば 🔊 で
+  アイスランド語を聞く（答えの前は文字では出さない）→ 声に出して答える →「答えを見る」で相手の
+  言葉の文字と意味、答えの例 →「言えた / 迷った / 言えなかった」。答えの後の 🔊 は答えの例の発音
+- 種類: 相手の言葉に答える（respond）、自分から言う（initiate: 挨拶・トイレの場所など）、
+  分からない早口を聞き返す（repair）。店員の決まり文句（«Viltu poka?» «Hvað má bjóða þér?»）は
+  答える場面で聞く
+- 出すのは、答えに必要な表現をレッスンで習ったカードだけ（`audiolesson scenes --learner`）。
+  年末年始のカードは旅程の設定の `season` が合うときだけ
+- 予定はカード ID ごとに `scene_queue.json`。出す順と次の確認までの日数は読みカードと同じ。
+  結果は音声レッスン側（`learner.json`）には報告しない
+- **準備状況**: `LESSON_READINESS_DAYS` 日ごと（既定 7 日）に、レッスンの投稿へ場面ごとの状況を添える。
+  準備OK（その場面のカードが全部出題でき、最後の評価がどれも言えた）・練習中・未学習（まだ 1 枚も
+  出題できない）の数を Tier A / B ごとに。前回添えた日は `readiness_reminder.json`
+
 ### 読みカード（language-learning-audio #133）
 
-音声レッスンは綴りを見せないので、振り返りの最後に `LESSON_READING_CARDS` 枚（既定 5）、
+音声レッスンは綴りを見せないので、振り返りの最後に `LESSON_READING_CARDS` 枚（既定 3）、
 看板・店の言葉・地名などのカードを出す（`src/reading.py`）。
 
 - 1 枚ずつ: 書いてあるものを声に出して読む →「答えを見る」で意味・読み方の目安・成り立ち
   （地名の部品）を見る →「言えた / 迷った / 言えなかった」。答えを見た後の 🔊 で、押した本人にだけ
   発音の mp3 が届く（edge-tts。公開カードの音声は `<LESSON_ROOT>/reading-tts/` にキャッシュ）
-- **振り返りの時間は増えない**: 問いの上限をカードの分だけ減らす（既定なら問い 15 + カード 5）。
-  直前のレッスンの新出の問いは必ず出すので、カードはその残りの分だけ（問いは最低 1 問残す）
+- **振り返りの時間は増えない**: 問いの上限を場面カード・読みカードの分だけ減らす（既定なら問い 14 +
+  場面 3 + 読み 3）。直前のレッスンの新出の問いは必ず出すので、カードはその残りの分だけ（場面カードが
+  先、問いは最低 1 問残す）
 - デッキは毎回 `audiolesson reading` の JSON をメモリ上で読むだけで、ディスクには書かない。
   残すのはカード ID ごとの予定（`reading_queue.json`）だけ。デッキから消えたカードは出さない
 - 出す順: 期限の来たカード（言えなかった → 迷った → 言えた）→ デッキ順の新しいカード
@@ -203,7 +224,9 @@ lesson_manifests/lesson-012/
    LESSON_TIMEOUT_MIN = 60               # 生成がこれ以上かかったら止めてエラーにする
    LESSON_UPLOAD_LIMIT_MB = 20
    LESSON_REVIEW_LIMIT = 20              # 1 回の振り返りの最大問数（出せなかった分は次回へ）。0 なら期限の来ている問いすべて
-   LESSON_READING_CARDS = 5              # 振り返りの最後の読みカードの枚数（その分問いを減らす）。0 で出さない
+   LESSON_SCENE_CARDS = 3                # 振り返りの場面カードの枚数（その分問いを減らす）。0 で出さない
+   LESSON_READING_CARDS = 3              # 振り返りの最後の読みカードの枚数（その分問いを減らす）。0 で出さない
+   LESSON_READINESS_DAYS = 7             # 場面ごとの準備状況をレッスンの投稿に添える間隔。0 で添えない
    LESSON_READING_OWN_PLACES = True      # 旅程の設定の地名も読みカードにする（trip.toml の地名を見せたくないなら False）
    ```
 
