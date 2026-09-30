@@ -376,6 +376,7 @@ class SpeakButtonTests(unittest.TestCase):
             s.rate("ok")
             s.rate("ok")
             view = ReviewView(s, 1, noop, noop, speak=speak)
+            view._show(revealed=True)  # a reading card's 🔊 comes after the answer
             it = FakeInteraction()
             await view._speak(it)
             return it.followups
@@ -389,7 +390,13 @@ class SpeakButtonTests(unittest.TestCase):
 class PickCardsTests(unittest.TestCase):
     def test_cards_never_crowd_out_every_question(self):
         async def scenario(td, limit, must_new):
-            cfg = LessonConfig(root=Path(td), users={1: "yuki"}, review_limit=limit)
+            cfg = LessonConfig(
+                root=Path(td),
+                users={1: "yuki"},
+                review_limit=limit,
+                reading_cards=5,
+                scene_cards=0,
+            )
             cfg.user_dir("yuki").mkdir(exist_ok=True)
             queue = ReviewQueue()
             plan = {
@@ -432,9 +439,12 @@ class TripArgsTests(unittest.TestCase):
     def test_question_limit_leaves_room_for_the_cards(self):
         cfg = LessonConfig(root=Path("/x"), users={1: "y"})
         self.assertEqual(
-            (cfg.review_limit, cfg.reading_cards, cfg.question_limit), (20, 5, 15)
+            (cfg.review_limit, cfg.scene_cards, cfg.reading_cards, cfg.question_limit),
+            (20, 3, 3, 14),
         )
         cfg.reading_cards = 0
+        self.assertEqual(cfg.question_limit, 17)
+        cfg.scene_cards = 0
         self.assertEqual(cfg.question_limit, 20)
         cfg.review_limit, cfg.reading_cards = 0, 5
         self.assertEqual(cfg.question_limit, 0)

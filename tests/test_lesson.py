@@ -411,6 +411,8 @@ class EndToEndTests(unittest.TestCase):
 
     def config(self, td, **kw):
         kw.setdefault("reading_cards", 0)  # 読みカードは test_reading_cards_* で
+        kw.setdefault("scene_cards", 0)  # 場面カードと準備状況は test_scene_cards_* で
+        kw.setdefault("readiness_days", 0)
         return LessonConfig(
             root=Path(td),
             users={1: "yuki"},
@@ -613,6 +615,48 @@ class EndToEndTests(unittest.TestCase):
             for p in Path(td).rglob("*"):
                 if p.is_file() and p != trip:
                     self.assertNotIn(b"Testv", p.read_bytes(), p)
+
+    def test_scene_cards_and_the_readiness_summary_through_discord(self):
+        """#129: scenario cards follow the questions, before the reading cards, within the
+        same review length; the lesson post carries the weekly readiness summary."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(
+                td, review_limit=20, scene_cards=2, reading_cards=1, readiness_days=7
+            )
+            day = {"today": D}
+            lessons = Lessons(cfg, today=lambda: day["today"])
+            channel = FakeChannel()
+            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            text = channel.sent[-1][0]
+            self.assertIn("レッスン 1", text)
+            self.assertIn("旅行の準備（場面カード）", text)
+            self.assertIn("Tier A（10場面）", text)
+
+            day["today"] = D + timedelta(days=1)
+            queued = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
+            new = [e for e in queued.entries.values() if e.new]
+            replies = []
+
+            async def review():
+                await lessons.start(self.interaction(channel, replies))
+                text, view = replies[-1]
+                self.assertIn(f"全{len(new)}問", text)
+                self.assertIn("場面カードが", text)
+                return await answer_all(view)
+
+            answered = asyncio.run(review())
+            scenes_done = json.loads(cfg.scene_path("yuki").read_text("utf-8"))["cards"]
+            self.assertTrue(scenes_done, "lesson 1 taught enough for a scene card")
+            self.assertLessEqual(len(scenes_done), 2)
+            reading_done = json.loads(cfg.reading_path("yuki").read_text("utf-8"))[
+                "cards"
+            ]
+            self.assertEqual(answered, len(new) + len(scenes_done) + len(reading_done))
+            self.assertLessEqual(answered, 20)
+            self.assertIn("レッスン 2", channel.sent[-1][0])
+            self.assertNotIn("旅行の準備", channel.sent[-1][0], "once a week")
+            learner = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
+            self.assertFalse(set(scenes_done) & set(learner["items"]), "not reported")
 
     def test_trip_from_the_channel_topic(self):
         """No trip.toml: the [trip] in the channel topic is used. The record keeps
