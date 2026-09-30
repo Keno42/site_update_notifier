@@ -19,13 +19,12 @@ from src.lesson import (
     LLA_DIR,
     LessonConfig,
     Lessons,
-    ReviewSession,
-    ReviewView,
     StatusMessage,
     cleanup,
     run_cli,
     setup,
 )
+from src.review import ReviewSession, ReviewView
 from src.review_queue import Entry
 from src.review_queue import ReviewQueue
 

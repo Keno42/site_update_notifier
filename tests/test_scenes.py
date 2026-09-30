@@ -9,8 +9,9 @@ from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.lesson import LessonConfig, Lessons, ReviewSession, ReviewView
-from src.reading import ReadingQueue
+from src.cards import CardQueue
+from src.lesson import LessonConfig, Lessons
+from src.review import ReviewSession, ReviewView
 from src.review_queue import ReviewQueue
 from src.scenes import parse_scenes, readiness, render_scene, speak_target
 
@@ -84,7 +85,7 @@ class ReadinessTests(unittest.TestCase):
                 "title_ja": "博物館",
             },
         ]
-        q = ReadingQueue()
+        q = CardQueue()
         q.record("a1_enter", "ok", D)
         q.record("a3_bag", "ok", D)
         text = readiness(cards, {"a1_enter", "a3_bag", "a3_receipt"}, q)
@@ -99,9 +100,9 @@ def session_with(td, scenes, cards=()):
     queue = ReviewQueue.load(path, D)
     queue.add_from_plan({"lesson_number": 1, "new_items": [], "review": QUESTIONS}, D)
     return ReviewSession(
-        queue, queue.select(D, 10), path, D, list(cards), ReadingQueue(),
+        queue, queue.select(D, 10), path, D, list(cards), CardQueue(),
         Path(td) / "reading_queue.json", scenes=list(scenes),
-        scene_queue=ReadingQueue(), scene_path=Path(td) / "scene_queue.json",
+        scene_queue=CardQueue(), scene_path=Path(td) / "scene_queue.json",
     )  # fmt: skip
 
 
@@ -121,11 +122,11 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(s.current_card()["id"], "opid")
             s.rate("ok")
             self.assertTrue(s.done)
-            saved = ReadingQueue.load(s.scene_path).cards
+            saved = CardQueue.load(s.scene_path).cards
             self.assertEqual(
                 (saved["a3_bag"].state, saved["a8_toilet"].state), ("failed", "shaky")
             )
-            self.assertEqual(list(ReadingQueue.load(s.reading_path).cards), ["opid"])
+            self.assertEqual(list(CardQueue.load(s.reading_path).cards), ["opid"])
             self.assertEqual(s.failed_ids(), [], "scene cards are not curriculum items")
             summary = s.summary()
             self.assertIn("**場面**: 2/2枚（迷った 1・言えなかった 1）", summary)
