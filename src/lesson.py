@@ -621,7 +621,8 @@ class Lessons:
             return
         cache = self.cfg.reading_tts_dir()
         cache.mkdir(parents=True, exist_ok=True)
-        key = hashlib.sha1(f"{voice}|{card['text']}".encode()).hexdigest()
+        # v2: 並べた表現のあいだに無音が入った版 (前の版のキャッシュは使わない)
+        key = hashlib.sha1(f"v2|{voice}|{card['text']}".encode()).hexdigest()
         out = cache / f"{key}.mp3"
         if not out.exists():
             tmp = cache / f"{key}.tmp.mp3"

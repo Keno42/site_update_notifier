@@ -3,14 +3,24 @@
 import asyncio
 import contextlib
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from src.lesson import LessonConfig, Lessons, ReviewSession, ReviewView
-from src.reading import ReadingQueue, parse_deck, profile_voice, render_card
+from src.reading import (
+    ReadingQueue,
+    join_args,
+    parse_deck,
+    profile_voice,
+    render_card,
+    synthesize,
+)
 from src.review_queue import ReviewQueue
 
 D = date(2026, 9, 26)
@@ -119,6 +129,35 @@ class ReadingQueueTests(unittest.TestCase):
         self.assertIn("🔊", shown)
         self.assertNotIn("🔊", render_card(DECK[2], 1, 3, revealed=True, speak=False))
 
+    def test_a_letters_card_shows_its_words_meanings_and_names_the_rule(self):
+        card = {
+            "id": "l_thorn", "stage": "letters", "text": "Það · Þetta",
+            "meaning": "þ: the 'th' of 'think'", "meaning_ja": "þ は英語 think の th",
+            "hint_ja": "サズ・セッタ", "words": [["Það", "それ"], ["Þetta", "これ"]],
+        }  # fmt: skip
+        shown = render_card(card, 1, 1, revealed=True, speak=False)
+        self.assertIn("意味: Það＝それ ／ Þetta＝これ", shown)
+        self.assertIn("読み方のきまり: þ は英語 think の th", shown)
+        self.assertNotIn("意味: þ", shown, "the rule is not labelled a meaning")
+        self.assertNotIn("the 'th'", shown)
+        # a deck from before `words`: still no rule under 意味
+        del card["words"]
+        shown = render_card(card, 1, 1, revealed=True, speak=False)
+        self.assertNotIn("意味:", shown)
+        self.assertIn("読み方のきまり:", shown)
+
+    def test_other_cards_list_each_words_meaning_too(self):
+        card = {
+            "id": "s_jol", "stage": "signs", "text": "Jóladagur · Aðfangadagur",
+            "meaning": "Christmas Day · Christmas Eve", "meaning_ja": "クリスマス当日・イブ",
+            "words": [["Jóladagur", "クリスマス当日"], ["Aðfangadagur", "クリスマスイブ"]],
+        }  # fmt: skip
+        shown = render_card(card, 1, 1, revealed=True, speak=False)
+        self.assertIn("意味: クリスマス当日・イブ", shown)
+        self.assertIn(
+            "それぞれ: Jóladagur＝クリスマス当日 ／ Aðfangadagur＝クリスマスイブ", shown
+        )
+
     def test_profile_voice(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "p.toml"
@@ -145,6 +184,78 @@ def session_with_cards(td, cards=DECK[:2]):
         ReadingQueue(),
         Path(td) / "reading_queue.json",
     )
+
+
+class SynthesizeTests(unittest.TestCase):
+    """🔊: expressions listed with «·» are read one by one with a pause between them;
+    read in one go they ran together."""
+
+    def run_synth(self, text, joined=True):
+        calls, joins = [], []
+
+        async def tts(t, voice, out):
+            calls.append(t)
+            out.write_bytes(b"ID3")
+
+        async def join(clips, pause, out):
+            joins.append((len(clips), pause))
+            if joined:
+                out.write_bytes(b"joined")
+            return joined
+
+        async def scenario(td):
+            out = Path(td) / "card.mp3"
+            with mock.patch("src.reading.join_with_silence", join):
+                await synthesize(text, "v", out, tts=tts)
+            return out.read_bytes()
+
+        with tempfile.TemporaryDirectory() as td:
+            return asyncio.run(scenario(td)), calls, joins
+
+    def test_one_expression_is_read_as_is(self):
+        _, calls, joins = self.run_synth("Opið")
+        self.assertEqual((calls, joins), (["Opið"], []))
+
+    def test_listed_expressions_are_read_one_by_one_and_joined_with_a_pause(self):
+        data, calls, joins = self.run_synth("Það · Þetta · Því miður")
+        self.assertEqual(calls, ["Það", "Þetta", "Því miður"])
+        self.assertEqual(joins, [(3, 1.0)])
+        self.assertEqual(data, b"joined")
+
+    def test_without_ffmpeg_sentences_keep_them_apart(self):
+        _, calls, _ = self.run_synth("Það · Þetta · Því miður", joined=False)
+        self.assertEqual(calls[-1], "Það. Þetta. Því miður.")
+
+    def test_join_args_put_silence_between_clips(self):
+        args = join_args(
+            [Path("a.mp3"), Path("b.mp3"), Path("c.mp3")], 1.0, Path("o.mp3")
+        )
+        self.assertEqual(args.count("anullsrc=r=24000:cl=mono"), 2)
+        self.assertEqual(args[args.index("-filter_complex") + 1].count("concat=n=5"), 1)
+        self.assertEqual(args[-1], "o.mp3")
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"), "no ffmpeg"
+    )
+    def test_the_joined_audio_has_the_pauses(self):
+        async def tts(text, voice, out):
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=0.3",
+                "-ar", "24000", "-ac", "1", str(out),
+            )  # fmt: skip
+            await proc.wait()
+
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "card.mp3"
+            asyncio.run(synthesize("A · B · C", "v", out, tts=tts))
+            seconds = float(
+                subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(out)],
+                    capture_output=True, text=True, check=True,
+                ).stdout
+            )  # fmt: skip
+        self.assertAlmostEqual(seconds, 3 * 0.3 + 2 * 1.0, delta=0.3)
 
 
 class SessionTests(unittest.TestCase):
