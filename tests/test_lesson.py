@@ -698,6 +698,30 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn("--trip", record.manifest["generate_args"])
             self.assertIsNone(record.manifest["trip_sha256"])
 
+    def test_levers_from_the_channel_topic(self):
+        """A [levers] section in the topic overrides LESSON_EXTRA_ARGS' levers for generate;
+        the lesson record and plan.json show what was used."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td)
+            cfg.extra_args += ["--max-same-situation", "3"]
+            lessons = Lessons(cfg, today=lambda: D)
+            channel = FakeChannel()
+            channel.topic = (
+                "旅行チャンネル\n[levers]\nmax_same_situation = 1\n"
+                "late_unhinted_recall = true\n"
+            )
+            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            self.assertIn("レッスン 1", channel.sent[-1][0])
+            record = feedback.Ledger(cfg.user_dir("yuki")).load(None)
+            args = record.manifest["generate_args"]
+            self.assertEqual(args.count("--max-same-situation"), 1)
+            self.assertEqual(args[args.index("--max-same-situation") + 1], "1")
+            self.assertIn("--late-unhinted-recall", args)
+            self.assertEqual(
+                record.plan["config"]["levers"],
+                {"max_same_situation": 1, "late_unhinted_recall": True},
+            )
+
     def test_reading_deck_includes_own_places_only_when_allowed(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = self.config(td, reading_cards=5)

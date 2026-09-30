@@ -3,7 +3,7 @@
 1. ユーザーのディレクトリの trip.toml (その人だけの設定. あればこちらを使う)
 2. /lesson を実行したチャンネルのトピック (同じ旅行の人だけがいるチャンネル向け)
 
-トピックには ``[trip]`` の節か、1 行の ``trip = { … }`` で書く:
+トピックには ``[trip]`` の節か、1 行の ``trip = { … }`` で書く (src/topic.py):
 
     アイスランド旅行 🇮🇸
     [trip]
@@ -21,23 +21,17 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import re
 import tempfile
-import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from .topic import TopicError as TripError
+from .topic import channel_topic, section
+
 KEYS = ("departure", "boost", "places", "season")
 TOPIC = "channel-topic"  # レッスンの記録の引数で、一時ファイルのパスの代わりに残す
-_HEADER = re.compile(r"^\s*\[\s*trip\s*\]\s*$", re.IGNORECASE)
-_OTHER_HEADER = re.compile(r"^\s*\[[^\[\]\"]+\]\s*$")
-_INLINE = re.compile(r"^\s*trip\s*=\s*\{.*\}\s*$", re.IGNORECASE)
-
-
-class TripError(ValueError):
-    """設定を読めない. メッセージに設定の値は入れない (キー名と位置だけ)."""
 
 
 @dataclass
@@ -47,40 +41,10 @@ class TripSource:
     sha256: str
 
 
-def channel_topic(channel: Any) -> str:
-    """チャンネルのトピック. スレッドなら親チャンネルのもの."""
-    topic = getattr(channel, "topic", None)
-    parent = getattr(channel, "parent", None)
-    if topic is None and parent is not None:
-        topic = getattr(parent, "topic", None)
-    return topic if isinstance(topic, str) else ""
-
-
 def parse_topic(topic: str) -> dict | None:
-    """トピックの旅程の設定. 書かれていなければ None."""
-    lines = [ln for ln in topic.splitlines() if not ln.strip().startswith("```")]
-    for i, line in enumerate(lines):
-        if _INLINE.match(line):
-            raw = _loads(line.strip()).get("trip")
-            if not isinstance(raw, dict):
-                raise TripError("trip = { … } の形で書いてください")
-            return validate(raw)
-        if _HEADER.match(line):
-            body = []
-            for ln in lines[i + 1 :]:
-                if not ln.strip() or _OTHER_HEADER.match(ln):
-                    break
-                body.append(ln)
-            return validate(_loads("\n".join(body)))
-    return None
-
-
-def _loads(text: str) -> dict:
-    try:
-        return tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        # tomllib のメッセージは位置だけで、値は含まない
-        raise TripError(f"TOML として読めません（{e}）") from None
+    """トピックの旅程の設定 (``[trip]`` の節, src/topic.py). 書かれていなければ None."""
+    raw = section(topic, "trip")
+    return None if raw is None else validate(raw)
 
 
 def validate(raw: dict) -> dict:

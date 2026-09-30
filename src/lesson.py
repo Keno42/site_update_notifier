@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import discord
 from discord import app_commands
 
-from . import feedback, reading, scenes, speech, trip, version
+from . import feedback, levers, reading, scenes, speech, trip, version
 from .cards import CardQueue
 from .review import ReviewSession, ReviewView, review_note
 from .review_queue import ReviewQueue
@@ -156,10 +156,15 @@ class LessonConfig:
         return self.work_dir(name) / "cache"
 
     def generate_args(
-        self, name: str, auto: bool = False, trip: Path | None = None
+        self,
+        name: str,
+        auto: bool = False,
+        trip: Path | None = None,
+        lever_args: list[str] | None = None,
     ) -> list[str]:
-        """trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める)."""
-        extra = list(self.extra_args)
+        """trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める).
+        lever_args: チャンネルのトピックのレバー (src/levers.py). None なら extra_args のまま."""
+        extra = levers.apply(self.extra_args, lever_args)
         if auto and "--auto" not in extra:
             extra.append("--auto")
         if trip is not None and "--trip" not in extra:
@@ -600,10 +605,13 @@ class Lessons:
     async def generate_and_post(
         self, channel: discord.abc.Messageable, name: str, auto: bool = False
     ) -> None:
+        lever_args, lever_warning = levers.from_topic(channel)
+        if lever_warning:
+            await channel.send(lever_warning)
         with trip.resolve(self.cfg.trip_path(name), channel) as (source, warning):
             if warning:
                 await channel.send(warning)
-            await self._generate_and_post(channel, name, auto, source)
+            await self._generate_and_post(channel, name, auto, source, lever_args)
 
     async def _generate_and_post(
         self,
@@ -611,6 +619,7 @@ class Lessons:
         name: str,
         auto: bool,
         source: trip.TripSource | None,
+        lever_args: list[str] | None = None,
     ) -> None:
         work = self.cfg.work_dir(name)
         cleanup(work)
@@ -618,7 +627,9 @@ class Lessons:
         learner = self.cfg.learner_path(name)
         # 生成前の learner.json: レッスンの記録に残し、選ばれ方を後から再現できるように
         learner_before = learner.read_bytes() if learner.exists() else None
-        args = self.cfg.generate_args(name, auto, source.path if source else None)
+        args = self.cfg.generate_args(
+            name, auto, source.path if source else None, lever_args
+        )
         if source is not None and str(source.path) not in args:
             source = None  # LESSON_EXTRA_ARGS の --trip が優先された
         try:
