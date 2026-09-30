@@ -456,9 +456,9 @@ class EndToEndTests(unittest.TestCase):
             self.assertIn("Discord 振り返り: 次回 3問（確認待ち 3件）", text)
             user = Path(td) / "yuki"
             self.assertTrue((user / "learner.json").exists())
-            # the first lesson guides to the feedback button and the weekly voice check
+            # the lesson guides to the feedback button; the GPT Voice check is gone (#129)
             self.assertIn("/lesson-feedback", text)
-            self.assertIn("週1回の音声チェック", text)
+            self.assertNotIn("音声チェック", text)
             self.assertEqual(list((user / "work").iterdir()), [], "outputs removed")
             queued = ReviewQueue.load(cfg.pending_path("yuki"), D).entries
             self.assertGreater(len(queued), 2, "more questions than one session holds")
@@ -485,7 +485,6 @@ class EndToEndTests(unittest.TestCase):
 
             asyncio.run(review())
             self.assertIn("レッスン 2", channel.sent[-1][0])
-            self.assertNotIn("週1回の音声チェック", channel.sent[-1][0], "once a week")
             self.assertEqual(lessons.busy, set())
             queue = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
             failed = [e for e in queue.entries.values() if e.state == "failed"]
@@ -752,21 +751,3 @@ class GuidanceTests(unittest.TestCase):
             self.assertIn("これから定着度チェック", session.render(revealed=True))
             session.rate("ok")
             self.assertNotIn("これから定着度チェック", session.render())
-
-    def test_voice_check_reminder_once_per_interval(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = LessonConfig(root=Path(td), users={1: "yuki"})
-            cfg.user_dir("yuki").mkdir()
-            lessons = Lessons(cfg)
-            self.assertTrue(lessons.calibration_due("yuki", D))
-            self.assertFalse(lessons.calibration_due("yuki", D + timedelta(days=6)))
-            self.assertTrue(lessons.calibration_due("yuki", D + timedelta(days=7)))
-            cfg.calibration_path("yuki").write_text("{broken", "utf-8")
-            self.assertTrue(
-                lessons.calibration_due("yuki", D + timedelta(days=8)),
-                "unreadable: remind",
-            )
-            off = Lessons(
-                LessonConfig(root=Path(td), users={1: "yuki"}, calibration_days=0)
-            )
-            self.assertFalse(off.calibration_due("yuki", D + timedelta(days=30)))

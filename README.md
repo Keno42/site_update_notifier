@@ -127,7 +127,6 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 
 - 振り返りの最初の問いに「これから定着度チェックです（前回までの表現、全 N 問）」と手順を添える。
 - レッスンの投稿に、聞き終えたらフィードバックボタン（または `/lesson-feedback`）で記録するよう添える。
-- `LESSON_CALIBRATION_DAYS` 日ごとに（既定 7 日）、週1回の音声チェック（GPT Voice、#129）の時期であることを、手順とプロンプトへのリンク付きで添える。前回案内した日は `<LESSON_ROOT>/<名前>/calibration_reminder.json` に残る。
 
 ### レッスン後のフィードバック（language-learning-audio #128）
 
@@ -204,7 +203,6 @@ lesson_manifests/lesson-012/
    LESSON_TIMEOUT_MIN = 60               # 生成がこれ以上かかったら止めてエラーにする
    LESSON_UPLOAD_LIMIT_MB = 20
    LESSON_REVIEW_LIMIT = 20              # 1 回の振り返りの最大問数（出せなかった分は次回へ）。0 なら期限の来ている問いすべて
-   LESSON_CALIBRATION_DAYS = 7           # 週1回の音声チェック（language-learning-audio #129）を案内する間隔。0 で案内しない
    LESSON_READING_CARDS = 5              # 振り返りの最後の読みカードの枚数（その分問いを減らす）。0 で出さない
    LESSON_READING_OWN_PLACES = True      # 旅程の設定の地名も読みカードにする（trip.toml の地名を見せたくないなら False）
    ```

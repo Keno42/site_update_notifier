@@ -45,10 +45,6 @@ REVIEW_INTRO = (
 )
 READING_INTRO = "続けて読みカードが{n}枚あります（書いてあるものを声に出して読む）。"
 FEEDBACK_GUIDE = "聞き終えたら「フィードバック」ボタン（または /lesson-feedback）で手応えを記録してください（30秒ほど）。"
-CALIBRATION_GUIDE = (
-    "🎙 週1回の音声チェック（GPT Voice で10〜15分）の時期です。"
-    "手順とプロンプト: https://github.com/Keno42/language-learning-audio/issues/129"
-)
 
 
 @dataclass
@@ -66,7 +62,6 @@ class LessonConfig:
     upload_limit_mb: float = 20
     review_limit: int = 20  # 1 回の振り返りの最大問数. 0 なら期限の来ている問いすべて
     timeout_min: float = 60
-    calibration_days: int = 7  # 音声チェックの案内の間隔 (日). 0 なら案内しない
     # 振り返りの最後に出す読みカードの枚数. 問いをその分減らすので振り返りの時間は増えない.
     # 0 なら出さない
     reading_cards: int = 5
@@ -100,9 +95,6 @@ class LessonConfig:
             ),
             review_limit=getattr(config, "LESSON_REVIEW_LIMIT", defaults.review_limit),
             timeout_min=getattr(config, "LESSON_TIMEOUT_MIN", defaults.timeout_min),
-            calibration_days=getattr(
-                config, "LESSON_CALIBRATION_DAYS", defaults.calibration_days
-            ),
             reading_cards=getattr(
                 config, "LESSON_READING_CARDS", defaults.reading_cards
             ),
@@ -118,9 +110,6 @@ class LessonConfig:
 
     def learner_path(self, name: str) -> Path:
         return self.user_dir(name) / "learner.json"
-
-    def calibration_path(self, name: str) -> Path:
-        return self.user_dir(name) / "calibration_reminder.json"
 
     def pending_path(self, name: str) -> Path:
         return self.user_dir(name) / "pending_review.json"
@@ -728,8 +717,6 @@ class Lessons:
             note = "" if auto else review_note(queue, tomorrow, self.cfg.question_limit)
             owner = next((u for u, n in self.cfg.users.items() if n == name), 0)
             guide = [FEEDBACK_GUIDE] if manifest else []
-            if self.calibration_due(name, today):
-                guide.append(CALIBRATION_GUIDE)
             await self.post(channel, work, plan, note, owner, manifest, guide)
         finally:
             cleanup(work)
@@ -767,21 +754,6 @@ class Lessons:
             logging.exception("レッスンの記録を保存できませんでした")
             return None
         return d.name
-
-    def calibration_due(self, name: str, today: date) -> bool:
-        """週1回の音声チェック (language-learning-audio #129) を案内する日か. 案内したら
-        その日を記録し、calibration_days 日たつまで次は出さない."""
-        if self.cfg.calibration_days <= 0:
-            return False
-        path = self.cfg.calibration_path(name)
-        try:
-            last = date.fromisoformat(json.loads(path.read_text("utf-8"))["last"])
-        except (OSError, ValueError, KeyError, TypeError):
-            last = None
-        if last is not None and (today - last).days < self.cfg.calibration_days:
-            return False
-        path.write_text(json.dumps({"last": today.isoformat()}), "utf-8")
-        return True
 
     async def post(
         self,
