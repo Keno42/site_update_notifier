@@ -5,7 +5,6 @@ Discord（と Slack）の bot。機能:
 - **サイト更新の通知**: `CHECK_URL` の記事一覧を `CHECK_INTERVAL` 秒ごとに確認し、新しい記事を `CHANNEL_ID` に投稿する
 - **会話**: bot へのメンション（またはロール）に ChatGPT（`GPT_MODEL`）で返事をする。返信を続けると会話が続く
 - **音声の書き起こし**: メンションに音声を添付すると Whisper で書き起こす（Slack では音声を投稿したスレッドに返す）。長い音声は約 12 分ずつに分けて処理する（`src/transcribe.py`）
-- **Issue**: 「Issue mode …」でその内容の Issue を `REPO_NAME` に作り、「check issue」で open な Issue を一覧する（`PAT` が必要）
 - **語学レッスン**: `/lesson` ほか（以下）
 
 ## /lesson（language-learning-audio）

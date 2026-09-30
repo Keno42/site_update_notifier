@@ -9,7 +9,6 @@ import random
 from datetime import datetime
 from config.config import CACHE_FILE
 from config import config
-from github import Github
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import requests
@@ -29,7 +28,6 @@ GPT_MODEL = config.GPT_MODEL
 REASONING_EFFORT = config.REASONING_EFFORT
 ERROR_MESSAGE = getattr(config, "ERROR_MESSAGE", "")
 SITE_UPDATE_MESSAGE = getattr(config, "SITE_UPDATE_MESSAGE", "{titles_text}")
-PAT = getattr(config, "PAT", "")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,22 +133,6 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # Issue mode用のチェック
-    if "Issue mode" in message.content:
-        issue_content = message.content.replace("Issue mode", "").strip()
-        if not PAT:
-            await message.reply("PATが設定されていません。Issueを作成できません。")
-            return
-        try:
-            from .issue_handler import create_issue
-
-            issue_result = await asyncio.to_thread(create_issue, issue_content)
-            await message.reply(issue_result)
-        except Exception as e:
-            logging.error(f"Issue作成中にエラーが発生しました: {e}")
-            await message.reply("Issueの作成に失敗しました。")
-        return
-
     # BotへのメンションまたはBotのロールが呼ばれた場合に反応
     bot_mentioned = client.user in message.mentions
     role_mentioned = False
@@ -175,26 +157,6 @@ async def on_message(message):
 
         if not prompt and not audio_files:
             await message.reply("何か質問してにゃ。")
-            return
-        if prompt.lower() == "check issue":
-            try:
-                g = Github(PAT)
-                repo = g.get_repo(config.REPO_NAME)
-                issues = repo.get_issues(state="open")
-                issues_list = []
-                for issue in issues:
-                    issues_list.append(
-                        f"Issue#{issue.number}: {issue.title} - URL: {issue.html_url}"
-                    )
-                reply_text = (
-                    "\n".join(issues_list)
-                    if issues_list
-                    else "現在オープンなIssueはありません。"
-                )
-                await message.reply(reply_text)
-            except Exception as e:
-                logging.error(f"Issue取得中にエラー発生: {e}")
-                await message.reply("Issueの取得に失敗しました。")
             return
         if message.reference:
             if message.author.bot:
