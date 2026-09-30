@@ -9,15 +9,12 @@ import random
 from datetime import datetime
 from config.config import CACHE_FILE
 from config import config
-from .dev import handle_dev_message_sync
-from .dev import transcribe_audio
 from github import Github
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import requests
 import tempfile
-from .audio_utils import split_audio_with_overlap
-from . import lesson
+from . import lesson, transcribe
 
 TOKEN = config.TOKEN
 CHANNEL_ID = getattr(config, "CHANNEL_ID", 0)
@@ -138,19 +135,6 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # Dev mode用のチェック
-    if PAT and "Dev mode" in message.content and client.user in message.mentions:
-        dev_command = message.content.replace("Dev mode", "").strip()
-        typing_task = asyncio.create_task(typing_loop(message.channel))
-        reply_text = await asyncio.to_thread(handle_dev_message_sync, dev_command)
-        typing_task.cancel()
-        try:
-            await typing_task
-        except asyncio.CancelledError:
-            pass
-        await message.reply(reply_text)
-        return
-
     # Issue mode用のチェック
     if "Issue mode" in message.content:
         issue_content = message.content.replace("Issue mode", "").strip()
@@ -225,58 +209,16 @@ async def on_message(message):
         typing_task = asyncio.create_task(typing_loop(message.channel))
 
         if audio_files:
-            transcriptions = []
-            for audio_file in audio_files:
+            texts = []
+            for attachment in audio_files:
                 try:
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".m4a", delete=False
-                    ) as tmp_file:
-                        tmp_file_path = tmp_file.name
-                        await audio_file.save(tmp_file_path)
-
-                    chunk_paths = split_audio_with_overlap(
-                        tmp_file_path,
-                        output_dir="audio_chunks",
-                    )
-
-                    transcriptions = []
-                    previous_transcription = ""  # 前のチャンクの文字起こし内容
-
-                    for i, cp in enumerate(chunk_paths):
-                        logging.info(
-                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こしを開始: {cp}"
-                        )
-
-                        # 前のチャンクの文字起こし内容をプロンプトに追加
-                        current_context = prompt
-                        if previous_transcription:
-                            prompt_prefix = f"{prompt}\n\n"
-                            current_context = prompt_prefix + previous_transcription
-                            logging.info("前のチャンクの内容をプロンプトに追加しました")
-
-                        # 文字起こし実行
-                        text = asyncio.run(
-                            transcribe_audio(cp, context=current_context)
-                        )
-                        transcriptions.append(text)
-
-                        # 次のチャンク用に現在の文字起こし内容を保存
-                        previous_transcription = text
-
-                        logging.info(
-                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こし完了"
-                        )
-
-                    final_result = "\n".join(transcriptions)
-                    reply_text = f"書き起こしが完了しました:\n{final_result}"
+                    texts.append(await transcribe_attachment(attachment, prompt))
                 except Exception as e:
                     logging.error(f"Failed to process audio file: {e}")
-                    await message.reply(f"音声ファイルの処理に失敗しました: {str(e)}")
-
-            # If any audio files were found, reply with the final transcription
-            if transcriptions:
-                final_result = "\n".join(transcriptions)
-                reply_text = f"書き起こしが完了しました:\n{final_result}"
+                    await message.reply(f"音声ファイルの処理に失敗しました: {e}")
+            reply_text = (
+                "書き起こしが完了しました:\n" + "\n".join(texts) if texts else ""
+            )
         else:
             reply_text = await call_chatgpt_with_history(conversation_history)
         typing_task.cancel()
@@ -284,11 +226,21 @@ async def on_message(message):
             await typing_task
         except asyncio.CancelledError:
             pass
+        if not reply_text:
+            return
         conversation_history.append({"role": "assistant", "content": reply_text})
         await message.reply(reply_text)
         return
     if GREETINGS and HEALTH_CHECK_GREETING in message.content.lower():
         await message.channel.send(random.choice(GREETINGS))
+
+
+async def transcribe_attachment(attachment: discord.Attachment, context: str) -> str:
+    """Discord の音声添付を一時ファイルに保存して書き起こす."""
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "audio.m4a")
+        await attachment.save(path)
+        return await asyncio.to_thread(transcribe.transcribe_file, path, context)
 
 
 async def check_website():
@@ -353,74 +305,23 @@ if bot_token:
                 headers = {"Authorization": f"Bearer {bot_token}"}
                 try:
                     logger.info(f"音声ファイルのダウンロードを開始: {audio_url}")
-                    # タイムアウト設定を追加 (60秒)
                     response = requests.get(
                         audio_url, headers=headers, timeout=60, stream=True
                     )
                     response.raise_for_status()
-
-                    # 一時ファイルを作成
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".m4a", delete=False
-                    ) as tmp_file:
-                        logger.info(f"一時ファイルに保存中: {tmp_file.name}")
-                        # 大きなファイルを効率的に処理するためにチャンクで書き込み
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                tmp_file.write(chunk)
-                        tmp_file_path = tmp_file.name
-
-                    logger.info(
-                        f"ダウンロード完了、音声分割処理を開始: {tmp_file_path}"
-                    )
-                    # ファイルを分割
-                    chunk_paths = split_audio_with_overlap(
-                        tmp_file_path,
-                        output_dir="audio_chunks",
-                    )
-
-                    logger.info(
-                        f"音声分割完了、{len(chunk_paths)}個のチャンクを処理します"
-                    )
-                    transcriptions = []
-                    previous_transcription = ""  # 前のチャンクの文字起こし内容
-
-                    for i, cp in enumerate(chunk_paths):
-                        logging.info(
-                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こしを開始: {cp}"
-                        )
-
-                        # 前のチャンクの文字起こし内容をプロンプトに追加
-                        current_context = message_text
-                        if previous_transcription:
-                            prompt_prefix = f"{message_text}\n\n"
-                            current_context = prompt_prefix + previous_transcription
-                            logging.info("前のチャンクの内容をプロンプトに追加しました")
-
-                        # 文字起こし実行
-                        text = asyncio.run(
-                            transcribe_audio(cp, context=current_context)
-                        )
-                        transcriptions.append(text)
-
-                        # 次のチャンク用に現在の文字起こし内容を保存
-                        previous_transcription = text
-
-                        logging.info(
-                            f"チャンク {i+1}/{len(chunk_paths)} の文字起こし完了"
-                        )
-
-                    final_result = "\n".join(transcriptions)
-                    logger.info(f"Audio file processed and split: {tmp_file_path}")
+                    with tempfile.TemporaryDirectory() as td:
+                        path = os.path.join(td, "audio.m4a")
+                        with open(path, "wb") as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                        final_result = transcribe.transcribe_file(path, message_text)
                     logger.info(f"Final transcription:\n{final_result}")
-
                     # Post a Slack reply in the thread where the audio was posted
                     slack_app.client.chat_postMessage(
                         channel=channel_id,
                         text=f"書き起こしが完了しました:\n{final_result}",
                         thread_ts=ts,
                     )
-
                 except Exception as e:
                     logger.error(f"Failed to process audio file: {e}")
             else:
