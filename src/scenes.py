@@ -5,7 +5,7 @@
 意味. GPT の音声練習の代わり (台本どおりに進まず、書き起こしも実際と違ったため).
 
 カードは ``audiolesson scenes`` の JSON をその場で読む. 予定は読みカードと同じ形
-(ReadingQueue) で scene_queue.json に、カード ID ごとに残す. 結果は音声レッスン側
+(CardQueue) で scene_queue.json に、カード ID ごとに残す. 結果は音声レッスン側
 (learner.json) には報告しない.
 
 週に一度、場面ごとの準備状況をレッスンの投稿に添える (readiness).
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 
-from .reading import ReadingQueue
+from .cards import CardQueue
 
 KIND_HINT = {
     "respond": "🔊 で相手の言葉を聞いて、声に出して答えてから「答えを見る」",
@@ -70,7 +70,7 @@ def render_scene(card: dict, n: int, total: int, revealed: bool, speak: bool) ->
     return "\n".join(lines)
 
 
-def readiness(all_cards: list[dict], available: set[str], queue: ReadingQueue) -> str:
+def readiness(all_cards: list[dict], available: set[str], queue: CardQueue) -> str:
     """場面ごとの準備状況 (#129 の指標). 準備OK: その場面のカードが全部出題できて、
     最後の評価がどれも言えた. 未学習: まだ 1 枚も出題できない. それ以外は練習中."""
     scenarios: dict[str, dict] = {}
@@ -110,6 +110,6 @@ def readiness(all_cards: list[dict], available: set[str], queue: ReadingQueue) -
     return "📋 **旅行の準備（場面カード）**\n" + "\n".join(lines)
 
 
-def _state(queue: ReadingQueue, card_id: str) -> str:
+def _state(queue: CardQueue, card_id: str) -> str:
     s = queue.cards.get(card_id)
     return s.state if s else "unseen"

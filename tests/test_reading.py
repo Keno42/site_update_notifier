@@ -12,15 +12,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from src.lesson import LessonConfig, Lessons, ReviewSession, ReviewView
-from src.reading import (
-    ReadingQueue,
-    join_args,
-    parse_deck,
-    profile_voice,
-    render_card,
-    synthesize,
-)
+from src.cards import CardQueue
+from src.lesson import LessonConfig, Lessons
+from src.reading import parse_deck, render_card
+from src.review import ReviewSession, ReviewView
+from src.speech import join_args, profile_voice, synthesize
 from src.review_queue import ReviewQueue
 
 D = date(2026, 9, 26)
@@ -67,9 +63,9 @@ QUESTIONS = [
 ]
 
 
-class ReadingQueueTests(unittest.TestCase):
+class CardQueueTests(unittest.TestCase):
     def test_new_cards_in_deck_order_then_due_cards_first(self):
-        q = ReadingQueue()
+        q = CardQueue()
         self.assertEqual([c["id"] for c in q.select(DECK, D, 2)], ["opid", "lokad"])
         q.record("opid", "ok", D)
         q.record("lokad", "failed", D)
@@ -82,7 +78,7 @@ class ReadingQueueTests(unittest.TestCase):
         self.assertEqual(q.select(DECK, D, 0), [])
 
     def test_intervals_grow_with_a_streak(self):
-        q = ReadingQueue()
+        q = CardQueue()
         q.record("opid", "ok", D)
         q.record("opid", "ok", D + timedelta(days=1))
         self.assertEqual(q.cards["opid"].due, (D + timedelta(days=4)).isoformat())
@@ -93,7 +89,7 @@ class ReadingQueueTests(unittest.TestCase):
             q.record("opid", "maybe", D)
 
     def test_cards_gone_from_the_deck_are_not_shown(self):
-        q = ReadingQueue()
+        q = CardQueue()
         q.record("old_card", "failed", D)
         self.assertNotIn(
             "old_card", [c["id"] for c in q.select(DECK, D + timedelta(days=5), 9)]
@@ -102,14 +98,14 @@ class ReadingQueueTests(unittest.TestCase):
     def test_saved_file_holds_ids_and_schedule_only(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "reading_queue.json"
-            q = ReadingQueue()
+            q = CardQueue()
             q.record("own_1", "shaky", D)
             q.save(path)
             text = path.read_text("utf-8")
             self.assertNotIn("Testvík", text)
-            self.assertEqual(ReadingQueue.load(path).cards, q.cards)
+            self.assertEqual(CardQueue.load(path).cards, q.cards)
             path.write_text("{broken", "utf-8")
-            self.assertEqual(ReadingQueue.load(path).cards, {})
+            self.assertEqual(CardQueue.load(path).cards, {})
             self.assertTrue(path.with_name("reading_queue.json.broken").exists())
 
     def test_parse_deck_drops_malformed_cards(self):
@@ -181,7 +177,7 @@ def session_with_cards(td, cards=DECK[:2]):
         path,
         D,
         list(cards),
-        ReadingQueue(),
+        CardQueue(),
         Path(td) / "reading_queue.json",
     )
 
@@ -205,7 +201,7 @@ class SynthesizeTests(unittest.TestCase):
 
         async def scenario(td):
             out = Path(td) / "card.mp3"
-            with mock.patch("src.reading.join_with_silence", join):
+            with mock.patch("src.speech.join_with_silence", join):
                 await synthesize(text, "v", out, tts=tts)
             return out.read_bytes()
 
@@ -272,7 +268,7 @@ class SessionTests(unittest.TestCase):
             s.rate("shaky")
             self.assertTrue(s.done)
             self.assertEqual(s.failed_ids(), ["takk"], "cards are not curriculum items")
-            saved = ReadingQueue.load(s.reading_path).cards
+            saved = CardQueue.load(s.reading_path).cards
             self.assertEqual(
                 (saved["opid"].state, saved["lokad"].state), ("failed", "shaky")
             )
@@ -290,7 +286,7 @@ class SessionTests(unittest.TestCase):
             s.rate("ok")
             s.rate("ok")
             s.rate("ok")
-            self.assertEqual(list(ReadingQueue.load(s.reading_path).cards), ["opid"])
+            self.assertEqual(list(CardQueue.load(s.reading_path).cards), ["opid"])
             self.assertNotIn("未回答", s.summary())
 
 
