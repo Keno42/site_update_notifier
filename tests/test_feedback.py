@@ -185,7 +185,7 @@ class FormTests(unittest.TestCase):
             record = saved(Path(td)).load()
             assert record is not None
             answers = Answers(
-                usable=["takk_fyrir"],
+                unheard=["takk_fyrir"],
                 sooner=["eg_var_ad_inf"],
                 load="right",
                 concerns=["c1", "f:repetitive"],
@@ -203,7 +203,8 @@ class FormTests(unittest.TestCase):
             self.assertEqual(len(e["candidates_shown"]), 2)
             text = report_text(record, [e], ["lesson-012"])
             self.assertIn("負荷: ちょうどいい", text)
-            self.assertIn("使えそう: Takk fyrir {thing}.", text)
+            self.assertIn("出てこなかった・聞こえなかった: Takk fyrir {thing}.", text)
+            self.assertNotIn("使えそう", text)
             self.assertIn(
                 "当てはまった候補: 終わり近くに、ヒントなしで言う場面がなかった: Ég var að {inf}.",
                 text,
@@ -270,9 +271,9 @@ class ViewTests(unittest.TestCase):
                 self.assertFalse(await view.interaction_check(interaction(log, user=2)))
                 await buttons["送信"].callback(interaction(log))
                 self.assertEqual(submitted, [], "the load is required")
-                usable, sooner, load, concerns = selects
-                usable._values = ["takk_fyrir"]
-                await usable.callback(interaction(log))
+                unheard, sooner, load, concerns = selects
+                unheard._values = ["takk_fyrir"]
+                await unheard.callback(interaction(log))
                 load._values = ["heavy"]
                 await load.callback(interaction(log))
                 concerns._values = ["c0", "f:pacing"]
@@ -288,7 +289,7 @@ class ViewTests(unittest.TestCase):
             view = asyncio.run(run())
             self.assertTrue(view.is_finished())
             (answers,) = submitted
-            self.assertEqual(answers.usable, ["takk_fyrir"])
+            self.assertEqual(answers.unheard, ["takk_fyrir"])
             self.assertEqual(answers.sooner, [])
             self.assertEqual(answers.load, "heavy")
             self.assertEqual(answers.concerns, ["c0", "f:pacing"])

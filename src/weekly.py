@@ -266,6 +266,9 @@ def build(user_dir: Path, today: date, days: int = 7) -> str:
             )
         )
         for e in events:
+            if e.get("unheard"):
+                missed = "、".join(names.get(i, i) for i in e["unheard"])
+                lines.append(f"　レッスン {e.get('lesson')} で出てこなかった: {missed}")
             if e.get("note"):
                 note = e["note"].replace("\n", " ")
                 lines.append(f"　メモ（レッスン {e.get('lesson')}）: {note[:80]}")

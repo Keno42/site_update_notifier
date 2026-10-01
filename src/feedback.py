@@ -321,7 +321,9 @@ def _clip(text: str, n: int = 100) -> str:
 
 @dataclass
 class Answers:
-    usable: list[str] = field(default_factory=list)
+    unheard: list[str] = field(
+        default_factory=list
+    )  # レッスン中ほとんど出てこなかった新出
     sooner: list[str] = field(default_factory=list)
     load: str | None = None
     concerns: list[str] = field(default_factory=list)  # "c<番号>" / "f:<種類>"
@@ -343,7 +345,7 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
         "manifest": record.id,
         "revisions": record.manifest.get("revisions", {}),
         **record.digests(),
-        "usable": answers.usable,
+        "unheard": answers.unheard,
         "sooner": answers.sooner,
         "load": answers.load,
         "friction": [v[2:] for v in answers.concerns if v.startswith("f:")],
@@ -390,9 +392,12 @@ def report_text(record: Record, events: list[dict], siblings: list[str]) -> str:
     lines = [
         f"**{record.title} のフィードバック**（{len(events)}件、最新 {e.get('ts', '?')}）",
         f"負荷: {LOADS.get(e.get('load') or '', e.get('load') or '未回答')}",
-        f"使えそう: {names(e.get('usable', []))}",
-        f"早めにもう一度: {names(e.get('sooner', []))}",
     ]
+    if "unheard" in e:
+        lines.append(f"出てこなかった・聞こえなかった: {names(e['unheard'])}")
+    if e.get("usable"):  # 以前のフォームの項目 (いま言えそうな表現)
+        lines.append(f"使えそう: {names(e['usable'])}")
+    lines.append(f"早めにもう一度: {names(e.get('sooner', []))}")
     if e.get("candidates_confirmed"):
         lines.append(
             "当てはまった候補: "
@@ -453,7 +458,10 @@ class FeedbackView(discord.ui.View):
         new = record.new_items()[:25]
         if new:
             for attr, placeholder in (
-                ("usable", "いま言えそうな表現（複数可・選ばなくてもOK）"),
+                (
+                    "unheard",
+                    "レッスン中ほとんど出てこなかった・聞こえなかった表現（複数可・選ばなくてもOK）",
+                ),
                 (
                     "sooner",
                     "まだ自信がない・もう一度やりたい表現（複数可・選ばなくてもOK）",
