@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 
 from src.feedback import FEEDBACK_FILE
-from src.weekly import build, item_outcome, lever_flags, word_count
+from src.weekly import build, item_outcome, lesson_shape, lever_flags, word_count
 
 TODAY = date(2026, 10, 1)
 
@@ -96,7 +96,74 @@ PLANS = {
 }
 
 
+SCRIPT = {
+    "meta": {"new_items": ["d", "e"]},
+    "exercises": [
+        {"kind": "opening", "item_ids": [], "start": 0, "duration": 2},
+        {"kind": "intro", "item_ids": ["d"], "start": 2, "duration": 10},
+        {
+            "kind": "recall",
+            "stage": "meaning",
+            "item_ids": ["d"],
+            "start": 12,
+            "duration": 8,
+        },
+        {
+            "kind": "recall",
+            "stage": "situation",
+            "item_ids": ["ja"],
+            "start": 20,
+            "duration": 8,
+        },
+        {
+            "kind": "recall",
+            "stage": "situation",
+            "item_ids": ["ja"],
+            "start": 28,
+            "duration": 8,
+        },
+        {
+            "kind": "connect",
+            "stage": "exchange",
+            "item_ids": ["ja", "nei"],
+            "start": 36,
+            "duration": 20,
+        },
+        {
+            "kind": "connect",
+            "stage": "recombine",
+            "item_ids": ["ja", "e"],
+            "start": 56,
+            "duration": 10,
+        },
+        {
+            "kind": "recall",
+            "stage": "meaning",
+            "item_ids": ["d"],
+            "start": 1256,
+            "duration": 8,
+        },
+        {"kind": "closing", "item_ids": [], "start": 1264, "duration": 3},
+    ],
+}
+
+
 class HelpersTests(unittest.TestCase):
+    def test_lesson_shape_shares_repeats_and_the_longest_gap(self):
+        names = {"ja": "Já.", "d": "Hæ.", "e": "Takk."}
+        text = lesson_shape(SCRIPT, names)
+        # recall 8+8+8+8 = 32 of 32+20+10+10 = 72 s; exchange 20; mixed 10; intro 10
+        self.assertIn("単発の想起 44%", text)
+        self.assertIn("相手の言葉があるやり取り 28%", text)
+        self.assertIn("混合復習 14%", text)
+        self.assertIn("導入 14%", text)
+        self.assertIn("復習で3回以上: Já. ×4", text)
+        # new item d: starts 2, 12, 1256: the gap 1244 s = 21 min; e: only one practice
+        self.assertIn("新出の最大の空白 21 分（Hæ.）", text)
+        self.assertEqual(
+            lesson_shape({"exercises": []}, {}).split("／")[1], "復習で3回以上: なし"
+        )
+
     def test_outcome_falls_back_to_the_presumed_schedule(self):
         it = item({10: True, 11: False, 12: "hesitated"})
         self.assertEqual(item_outcome(it, 10), "unreported")
@@ -142,16 +209,42 @@ class BuildTests(unittest.TestCase):
             text = build(user, TODAY, 7)
         self.assertIn("レッスン 10〜11（2回）", text, "lesson 9 is older than a week")
         self.assertIn("10: 新出 3（ペース 5）", text)
-        self.assertIn("6 個のうち 言えた 3・迷った 1・言えなかった 1・未確認 1", text)
+        self.assertIn(
+            "6 個のうち 言えた 3・迷った 1・言えなかった 1・確認の記録なし 1", text
+        )
         self.assertIn("レッスン 10: Eigðu góðan dag.", text)
         self.assertIn("レッスン 11: Hvað kostar þetta?", text)
         self.assertIn("フィードバック 1 件", text)
         self.assertIn("ちょうどいい 1", text)
-        self.assertIn("繰り返しが多い 1", text)
+        self.assertIn("同じ表現がくり返し出すぎた 1", text)
         self.assertIn("kaupi meði", text)
         self.assertIn("レッスン 11〜: LLA `c857a6f`、引数 --late-unhinted-recall", text)
         self.assertNotIn("/x/learner.json", text, "paths stay out")
         self.assertNotIn("heavy", text)
+
+    def test_the_latest_lessons_unanswered_items_wait_for_the_next_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            user = Path(td) / "yuki"
+            learner = json.loads(json.dumps(LEARNER))
+            learner["items"]["f"] = item({})  # lesson 11's item, never answered
+            write(user, learner)
+            text = build(user, TODAY, 7)
+        self.assertIn("次の振り返り待ち 1", text)
+        self.assertIn(
+            "確認の記録なし 1", text, "lesson 10's item has no confirmed answer"
+        )
+
+    def test_the_lessons_shape_comes_from_its_script(self):
+        with tempfile.TemporaryDirectory() as td:
+            user = Path(td) / "yuki"
+            write(user, LEARNER, PLANS)
+            (
+                user / "lesson_manifests" / "lesson-011" / "lesson-011.script.json"
+            ).write_text(json.dumps(SCRIPT), "utf-8")
+            text = build(user, TODAY, 7)
+        self.assertIn("**レッスンの中身**", text)
+        self.assertIn("・11: 単発の想起 44%", text)
+        self.assertIn("新出の最大の空白 21 分", text)
 
     def test_long_phrases_against_short_ones(self):
         with tempfile.TemporaryDirectory() as td:

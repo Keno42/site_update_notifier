@@ -31,7 +31,20 @@ OUTCOME_LABEL = {
     "recalled": "言えた",
     "hesitated": "迷った",
     "not_recalled": "言えなかった",
+    "pending": "次の振り返り待ち",
+    "unreported": "確認の記録なし",
 }
+# レッスンの練習時間の内訳に数える種類 (script.json の exercises)
+PRACTICE = ("recall", "connect", "generative", "dialogue")
+SHARES = (
+    ("recall", "単発の想起"),
+    ("exchange", "相手の言葉があるやり取り"),
+    ("mixed", "混合復習"),
+    ("generative", "新しい文づくり"),
+    ("intro", "導入"),
+)
+REPEATED = 3  # 復習の項目がこれ以上出たら「繰り返し」として挙げる
+MAX_SHAPES = 4  # 内訳を出すレッスンの数 (メッセージの長さのため)
 
 
 def read_json(path: Path) -> Any:
@@ -80,15 +93,65 @@ def targets(user_dir: Path) -> dict[str, str]:
     return out
 
 
-def manifests(user_dir: Path, today: date, days: int) -> list[dict]:
+def manifests(user_dir: Path, today: date, days: int) -> list[tuple[Path, dict]]:
     base = user_dir / MANIFESTS
     found = []
     if base.exists():
         for d in sorted(base.iterdir()):
             m = read_json(d / "manifest.json")
             if isinstance(m, dict) and in_window(m.get("created_at"), today, days):
-                found.append(m)
+                found.append((d, m))
     return found
+
+
+def share_kind(ex: dict) -> str | None:
+    kind = ex.get("kind")
+    if kind == "recall":
+        return "recall"
+    if kind == "dialogue" or (kind == "connect" and ex.get("stage") == "exchange"):
+        return "exchange"
+    if kind == "connect":
+        return "mixed"
+    if kind in ("generative", "intro"):
+        return kind
+    return None
+
+
+def lesson_shape(script: dict, names: dict[str, str]) -> str:
+    """1 レッスンの中身 (script.json): 練習時間の内訳、復習の項目の繰り返し、新出の
+    いちばん長い空白. 新出が何分も触れられないまま閉じの想起まで待たされないか (H4)、
+    よく知っている項目が繰り返し出ていないか (#153) を見る."""
+    new = set((script.get("meta") or {}).get("new_items", []))
+    time: Counter[str] = Counter()
+    count: Counter[str] = Counter()
+    starts: dict[str, list[float]] = {}
+    for ex in script.get("exercises", []):
+        kind = share_kind(ex)
+        if kind:
+            time[kind] += ex.get("duration", 0)
+        if ex.get("kind") in PRACTICE + ("intro",):
+            for i in set(ex.get("item_ids", [])):
+                count[i] += 1
+                starts.setdefault(i, []).append(ex.get("start", 0))
+    total = sum(time.values()) or 1
+    parts = [f"{label} {100 * time[k] / total:.0f}%" for k, label in SHARES if time[k]]
+    repeated = sorted(
+        ((n, i) for i, n in count.items() if i not in new and n >= REPEATED),
+        key=lambda t: (-t[0], t[1]),
+    )
+    gaps = [
+        (max(b - a for a, b in zip(ts, ts[1:])), i)
+        for i, ts in starts.items()
+        if i in new and len(ts) > 1
+    ]
+    out = "・".join(parts)
+    out += "／復習で3回以上: " + (
+        "、".join(f"{names.get(i, i)} ×{n}" for n, i in repeated[:4]) or "なし"
+    )
+    if gaps:
+        gap, item = max(gaps)
+        out += f"／新出の最大の空白 {gap / 60:.0f} 分（{names.get(item, item)}）"
+    return out
 
 
 def lever_flags(args: list[str]) -> str:
@@ -134,18 +197,21 @@ def build(user_dir: Path, today: date, days: int = 7) -> str:
     # 2. 新出の翌日の確認
     answered: Counter[str] = Counter()
     per_lesson = []
+    latest = learner["lessons"][-1]["number"]
     for lesson in lessons:
         c: Counter[str] = Counter(
             item_outcome(items.get(i, {}), lesson["number"])
             for i in lesson.get("new_items", [])
         )
+        if lesson["number"] == latest and c["unreported"]:
+            c["pending"] = c.pop("unreported")  # 直前のレッスン: 次の振り返りで聞く
         answered.update(c)
         per_lesson.append((lesson["number"], c))
     total = sum(answered.values())
     if total:
         parts = "・".join(
-            f"{OUTCOME_LABEL.get(k, '未確認')} {answered[k]}"
-            for k in ("recalled", "hesitated", "not_recalled", "unreported")
+            f"{OUTCOME_LABEL[k]} {answered[k]}"
+            for k in ("recalled", "hesitated", "not_recalled", "pending", "unreported")
             if answered[k]
         )
         lines.append(f"**新出の翌日の確認**: {total} 個のうち {parts}")
@@ -204,9 +270,20 @@ def build(user_dir: Path, today: date, days: int = 7) -> str:
                 note = e["note"].replace("\n", " ")
                 lines.append(f"　メモ（レッスン {e.get('lesson')}）: {note[:80]}")
 
-    # 5. 生成に使った版と引数 (変化があったときだけ、いつから)
+    # 5. レッスンの中身 (記録のあるレッスン)
+    shapes = []
+    for d, m in manifests(user_dir, today, days):
+        n = int(m.get("lesson", 0))
+        script = read_json(d / f"lesson-{n:03d}.script.json")
+        if isinstance(script, dict):
+            shapes.append((n, lesson_shape(script, names)))
+    if shapes:
+        lines.append("**レッスンの中身**")
+        lines += [f"・{n}: {text}" for n, text in shapes[-MAX_SHAPES:]]
+
+    # 6. 生成に使った版と引数 (変化があったときだけ、いつから)
     seen: list[tuple[str, str, int]] = []
-    for m in manifests(user_dir, today, days):
+    for _, m in manifests(user_dir, today, days):
         lla = ((m.get("revisions") or {}).get("lla") or "?")[:7]
         flags = lever_flags(m.get("generate_args", []))
         if not seen or seen[-1][:2] != (lla, flags):
