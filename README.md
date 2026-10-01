@@ -151,6 +151,26 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
   案内にはキー名と位置だけを出し、値は出さない
 - トピックはチャンネルに入れる人全員に見える。**同じ旅行の人だけがいるチャンネル**で使う
 
+### レバー（チャンネルのトピック）
+
+生成の設定のうち「レバー」（language-learning-audio の `docs/LEVERS.md`）は、`/lesson` を実行する
+チャンネルのトピックに `[levers]` の節（または 1 行の `levers = { … }`）を書くと変えられる
+（`src/levers.py`）。旅程の `[trip]` と同じトピックに並べて書いてよい（節は空行か次の `[…]` で終わる）:
+
+```text
+[levers]
+max_same_situation = 1       # 同じ状況文は 1 レッスンにこの回数まで（0 で制限なし）
+late_unhinted_recall = true  # 新出の最後の確認はヒントなし
+pause_multiplier = 1.2       # 答える時間の倍率（0.3〜3）
+```
+
+- トピックに `[levers]` があれば、`LESSON_EXTRA_ARGS` にある同じレバーより優先する。書かなかった
+  レバーは既定（無効）になる。`[levers]` がなければ `LESSON_EXTRA_ARGS` のまま
+- 変わるのは次に生成するレッスンだけ。使った値はレッスンの記録（`manifest.json` の引数と
+  `plan.json` の `config.levers`）に残るので、フィードバックと突き合わせられる
+- 読めないとき（知らないキー、範囲外の値）は「チャンネルのトピックのレバーの設定を読めませんでした: …」
+  と出して `config.py` の設定で生成する
+
 ### 案内
 
 `/lesson` は、いま何をする時間かを短く案内する。
