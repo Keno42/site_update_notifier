@@ -185,15 +185,21 @@ class ReviewQueue:
         キューに入っていない (Discord で確かめる機会がなかった) ときだけ足す.
         足した数を返す."""
         new_ids = {i["id"] for i in plan.get("new_items", [])}
+        open_ids = set(plan.get("open_items") or [])
         queued = {i for e in self.entries.values() for i in e.items}
         added = 0
         for q in plan.get("review", []):
             items = list(q.get("items") or [])
             key = key_for(items)
-            if not items or key in self.entries:
+            if not items:
+                continue
+            is_open = bool(open_ids & set(items))
+            if key in self.entries:
+                if is_open:
+                    self._bring_forward(self.entries[key], today)
                 continue
             is_new = bool(new_ids & set(items))
-            if not is_new and set(items) <= queued:
+            if not is_new and not is_open and set(items) <= queued:
                 continue  # どの項目もすでに確認の予定がある
             due = (today if is_new else today + timedelta(days=1)).isoformat()
             self.entries[key] = Entry(
@@ -207,6 +213,16 @@ class ReviewQueue:
             queued.update(items)
             added += 1
         return added
+
+    @staticmethod
+    def _bring_forward(entry: Entry, today: date) -> None:
+        """未解決の項目 (音声レッスン側の open_items) を含む問いは、期限を明日に戻す.
+        音声レッスン側は「言えた」と確かめられるまで項目を閉じない (language-learning-audio
+        #149) ので、``ok`` の間隔 (7日、14日…) を待たせると何週間も開いたままになる.
+        結果の履歴 (state・streak) はそのまま、次の確認の日だけ早める."""
+        tomorrow = (today + timedelta(days=1)).isoformat()
+        if entry.due > tomorrow:
+            entry.due = tomorrow
 
     # ---- 読み書き -------------------------------------------------------
 
