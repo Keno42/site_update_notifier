@@ -195,6 +195,7 @@ class BuildTests(unittest.TestCase):
                         "lesson": 11,
                         "load": "right",
                         "friction": ["repetitive"],
+                        "unheard": ["a", "b"],
                         "note": "kaupi meði は聞こえなかった",
                     },
                     ensure_ascii=False,
@@ -218,6 +219,7 @@ class BuildTests(unittest.TestCase):
         self.assertIn("ちょうどいい 1", text)
         self.assertIn("同じ表現がくり返し出すぎた 1", text)
         self.assertIn("kaupi meði", text)
+        self.assertIn("レッスン 11 で出てこなかった: Takk.、Eigðu góðan dag.", text)
         self.assertIn("レッスン 11〜: LLA `c857a6f`、引数 --late-unhinted-recall", text)
         self.assertNotIn("/x/learner.json", text, "paths stay out")
         self.assertNotIn("heavy", text)
