@@ -10,7 +10,6 @@ TOPIC = """アイスランド語 🇮🇸
 [trip]
 season = "winter-holidays"
 [levers]
-max_same_situation = 1
 late_unhinted_recall = true
 pause_multiplier = 1.2
 """
@@ -21,24 +20,16 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(section(TOPIC, "trip"), {"season": "winter-holidays"})
         self.assertEqual(
             parse(section(TOPIC, "levers")),
-            [
-                "--max-same-situation",
-                "1",
-                "--late-unhinted-recall",
-                "--pause-multiplier",
-                "1.2",
-            ],
+            ["--late-unhinted-recall", "--pause-multiplier", "1.2"],
         )
 
     def test_the_one_line_form_and_turning_levers_off(self):
-        topic = "levers = { max_same_situation = 0, late_unhinted_recall = false }"
+        topic = "levers = { late_unhinted_recall = false }"
         self.assertEqual(parse(section(topic, "levers")), [])
         self.assertIsNone(section("雑談チャンネル", "levers"))
 
     def test_bad_values_are_named_without_echoing_them(self):
         for raw in (
-            {"max_same_situation": -1},
-            {"max_same_situation": "one"},
             {"late_unhinted_recall": "yes"},
             {"pause_multiplier": 9},
             {"new_items": 12},
@@ -53,10 +44,21 @@ class ParseTests(unittest.TestCase):
         self.assertIn("レバーの設定を読めませんでした", warning)
         self.assertEqual(from_topic(SimpleNamespace(topic="雑談")), (None, ""))
 
+    def test_a_removed_lever_is_skipped_with_a_note(self):
+        channel = SimpleNamespace(
+            topic="[levers]\nmax_same_situation = 1\nlate_unhinted_recall = true\n"
+        )
+        args, note = from_topic(channel)
+        self.assertEqual(
+            args, ["--late-unhinted-recall"], "the other levers still apply"
+        )
+        self.assertIn("max_same_situation", note)
+        self.assertIn("消してください", note)
+
 
 class ApplyTests(unittest.TestCase):
     EXTRA = [
-        "--max-same-situation",
+        "--pause-multiplier",
         "2",
         "--late-unhinted-recall",
         "--provider",
@@ -65,8 +67,8 @@ class ApplyTests(unittest.TestCase):
 
     def test_the_topic_replaces_the_configs_levers_only(self):
         self.assertEqual(
-            apply(self.EXTRA, ["--max-same-situation", "1"]),
-            ["--provider", "stub", "--max-same-situation", "1"],
+            apply(self.EXTRA, ["--pause-multiplier", "1.2"]),
+            ["--provider", "stub", "--pause-multiplier", "1.2"],
         )
         self.assertEqual(apply(self.EXTRA, []), ["--provider", "stub"], "all off")
         self.assertEqual(apply(["--pause-multiplier=1.5", "--auto"], []), ["--auto"])
