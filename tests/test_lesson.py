@@ -849,6 +849,131 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class OpenItemQueueTests(unittest.TestCase):
+    """language-learning-audio #149: an item the audio keeps open (``plan.open_items``) is asked
+    again the next day, whatever interval its question had reached."""
+
+    def queue_with_ok_takk(self):
+        q = ReviewQueue()
+        q.add_from_plan(
+            {
+                "lesson_number": 1,
+                "new_items": [{"id": "takk"}],
+                "review": QUESTIONS[:1],
+            },
+            D,
+        )
+        for _ in range(3):
+            q.record("takk", "ok", D)  # interval now 7 days
+        return q
+
+    def test_an_open_item_is_asked_again_tomorrow_despite_an_ok_streak(self):
+        q = self.queue_with_ok_takk()
+        later = D + timedelta(days=2)
+        self.assertEqual(q.select(later), [])
+        q.add_from_plan(
+            {
+                "lesson_number": 2,
+                "new_items": [],
+                "open_items": ["takk"],
+                "review": QUESTIONS[:1],
+            },
+            later,
+        )
+        self.assertEqual(q.entries["takk"].due, (later + timedelta(days=1)).isoformat())
+        self.assertEqual(q.entries["takk"].state, "ok", "its history stays")
+        self.assertEqual(q.select(later + timedelta(days=1)), ["takk"])
+
+    def test_a_full_review_still_asks_the_open_item(self):
+        """Pulled forward, an ``ok`` question must not stay at the lowest priority: with the
+        review limit full of other due questions it is still selected, and answering clears it.
+        """
+        q = self.queue_with_ok_takk()
+        later = D + timedelta(days=2)
+        fillers = [
+            {"items": [f"f{n}"], "prompt": f"p{n}", "answer": f"a{n}"} for n in range(6)
+        ]
+        q.add_from_plan(
+            {"lesson_number": 2, "new_items": [], "review": fillers},
+            later - timedelta(days=1),
+        )
+        for n in range(6):
+            q.entries[f"f{n}"].state = "shaky" if n % 2 else "ok"
+        q.add_from_plan(
+            {
+                "lesson_number": 3,
+                "new_items": [],
+                "open_items": ["takk"],
+                "review": QUESTIONS[:1],
+            },
+            later,
+        )
+        day = later + timedelta(days=1)
+        self.assertIn("takk", q.select(day, 3))
+        q.record("takk", "ok", day)
+        self.assertFalse(q.entries["takk"].open)
+
+    def test_waiting_open_items_are_confirmed_a_few_per_plan(self):
+        """Open items that didn't fit the lesson (``open_not_fitted``) are asked in the review
+        too, at most OPEN_CONFIRM_PER_PLAN per plan, in the plan's order; one without a question
+        is skipped, and one already pulled forward isn't counted again."""
+        q = ReviewQueue()
+        ids = [f"w{n}" for n in range(6)]
+        qs = [{"items": [i], "prompt": f"p{i}", "answer": f"a{i}"} for i in ids]
+        q.add_from_plan({"lesson_number": 1, "new_items": [], "review": qs}, D)
+        for e in q.entries.values():
+            e.state, e.due = "ok", (D + timedelta(days=14)).isoformat()
+        waiting = ["nothing_queued", "w0", "w1", "w2", "w3", "w4"]
+        plan = {
+            "lesson_number": 2,
+            "new_items": [],
+            "open_items": [],
+            "open_not_fitted": waiting,
+            "review": [],
+        }
+        q.add_from_plan(plan, D + timedelta(days=1))
+        tomorrow = (D + timedelta(days=2)).isoformat()
+        pulled = [i for i in ids if q.entries[i].due == tomorrow]
+        self.assertEqual(pulled, ["w0", "w1", "w2"])
+        self.assertTrue(all(q.entries[i].open for i in pulled))
+        self.assertFalse(q.entries["w3"].open)
+        # the next plan takes the next ones; the first three aren't counted again
+        q.add_from_plan({**plan, "lesson_number": 3}, D + timedelta(days=1))
+        self.assertEqual(
+            [i for i in ids if q.entries[i].open], ["w0", "w1", "w2", "w3", "w4"]
+        )
+        self.assertEqual(q.entries["w5"].due, (D + timedelta(days=14)).isoformat())
+
+    def test_without_open_items_a_queued_question_keeps_its_date(self):
+        q = self.queue_with_ok_takk()
+        due = q.entries["takk"].due
+        q.add_from_plan(
+            {"lesson_number": 2, "new_items": [], "review": QUESTIONS[:1]},
+            D + timedelta(days=2),
+        )
+        self.assertEqual(q.entries["takk"].due, due)
+
+    def test_an_open_item_without_a_question_gets_one_even_if_queued_elsewhere(self):
+        q = ReviewQueue()
+        q.add_from_plan(
+            {"lesson_number": 1, "new_items": [], "review": [QUESTIONS[1]]}, D
+        )
+        extra = {"items": ["fara_heim"], "prompt": "家へ", "answer": "Heim."}
+        q.add_from_plan(
+            {
+                "lesson_number": 2,
+                "new_items": [],
+                "open_items": ["fara_heim"],
+                "review": [extra],
+            },
+            D,
+        )
+        self.assertIn("fara_heim", q.entries)
+        self.assertEqual(
+            q.entries["fara_heim"].due, (D + timedelta(days=1)).isoformat()
+        )
+
+
 class GuidanceTests(unittest.TestCase):
     def test_review_intro_only_on_the_first_question(self):
         with tempfile.TemporaryDirectory() as td:

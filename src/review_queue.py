@@ -38,6 +38,9 @@ INTERVALS: dict[str, tuple[int, ...]] = {
     "shaky": (1, 3, 7),
     "ok": (1, 3, 7, 14, 30),
 }
+# 音声レッスンに入りきらなかった未解決項目 (plan.open_not_fitted) の問いを、1 回のレッスン生成ごとに
+# 何件まで翌日に出すか。レッスンの時間は使わず、言えたら閉じ、言えなければ新しい失敗として練習に入る
+OPEN_CONFIRM_PER_PLAN = 3
 # これだけ期限を過ぎた問いは「言えなかった」と同じ優先度に上げる (新出が毎回あっても埋もれない)
 PROMOTE_AFTER_DAYS = 7
 
@@ -60,6 +63,9 @@ class Entry:
     streak: int = 0  # 同じ結果が続いた回数
     last_reviewed: str | None = None
     due: str = ""
+    # 音声レッスン側が未解決 (open) とした項目を含む問い (language-learning-audio #149).
+    # 言えなかったと同じ優先度で出し、答えたら外す
+    open: bool = False
 
     def tier(self, today: date) -> int:
         """小さいほど先に出す. 期限前は 5.
@@ -71,7 +77,7 @@ class Entry:
             return 5
         if self.new and self.state == "unseen":
             return 0
-        if self.state == "failed":
+        if self.state == "failed" or self.open:
             return 1
         tier = {"shaky": 2, "ok": 4}.get(self.state, 3)
         if tier > 1 and (today - due).days >= PROMOTE_AFTER_DAYS:
@@ -150,6 +156,7 @@ class ReviewQueue:
             raise ValueError(result)
         e = self.entries[key]
         e.streak = e.streak + 1 if e.state == result else 1
+        e.open = False
         e.state = result
         e.reviews += 1
         e.last_reviewed = today.isoformat()
@@ -185,15 +192,21 @@ class ReviewQueue:
         キューに入っていない (Discord で確かめる機会がなかった) ときだけ足す.
         足した数を返す."""
         new_ids = {i["id"] for i in plan.get("new_items", [])}
+        open_ids = set(plan.get("open_items") or [])
         queued = {i for e in self.entries.values() for i in e.items}
         added = 0
         for q in plan.get("review", []):
             items = list(q.get("items") or [])
             key = key_for(items)
-            if not items or key in self.entries:
+            if not items:
+                continue
+            is_open = bool(open_ids & set(items))
+            if key in self.entries:
+                if is_open:
+                    self._bring_forward(self.entries[key], today)
                 continue
             is_new = bool(new_ids & set(items))
-            if not is_new and set(items) <= queued:
+            if not is_new and not is_open and set(items) <= queued:
                 continue  # どの項目もすでに確認の予定がある
             due = (today if is_new else today + timedelta(days=1)).isoformat()
             self.entries[key] = Entry(
@@ -203,10 +216,49 @@ class ReviewQueue:
                 source_lesson=plan["lesson_number"],
                 new=is_new,
                 due=due,
+                open=is_open,
             )
             queued.update(items)
             added += 1
+        self._confirm_waiting_open(plan.get("open_not_fitted") or [], today)
         return added
+
+    def _confirm_waiting_open(self, waiting: list[str], today: date) -> None:
+        """レッスンに入りきらなかった未解決項目も、振り返りで一度確かめる (language-learning-audio
+        #149). 言えれば音声レッスン側で閉じ、レッスンの時間はかからない. 言えなければ新しい
+        失敗になる. plan の順 (最後に練習してから長いものが先) に、項目ごとに既存の問いを 1 件
+        (項目の少ないものを優先)、1 回の生成で ``OPEN_CONFIRM_PER_PLAN`` 件まで. 問いがまだない
+        項目は聞けないので飛ばす. すでに明日に引き寄せ済みの問いは数えない."""
+        tomorrow = (today + timedelta(days=1)).isoformat()
+        taken: set[str] = set()
+        for item in waiting:
+            if len(taken) >= OPEN_CONFIRM_PER_PLAN:
+                break
+            cands = [
+                (len(e.items), -e.source_lesson, k)
+                for k, e in self.entries.items()
+                if item in e.items
+            ]
+            if not cands:
+                continue
+            key = min(cands)[2]
+            e = self.entries[key]
+            if key in taken or (e.open and e.due <= tomorrow):
+                continue
+            self._bring_forward(e, today)
+            taken.add(key)
+
+    @staticmethod
+    def _bring_forward(entry: Entry, today: date) -> None:
+        """未解決の項目 (音声レッスン側の open_items) を含む問いは、期限を明日に戻す.
+        音声レッスン側は「言えた」と確かめられるまで項目を閉じない (language-learning-audio
+        #149) ので、``ok`` の間隔 (7日、14日…) を待たせると何週間も開いたままになる.
+        結果の履歴 (state・streak) はそのまま、次の確認の日だけ早め、優先度も上げる
+        (``open``: 期限前でなくなれば ``failed`` と同じ tier. ``ok`` のままだと上限で最初に外される)."""
+        tomorrow = (today + timedelta(days=1)).isoformat()
+        if entry.due > tomorrow:
+            entry.due = tomorrow
+        entry.open = True
 
     # ---- 読み書き -------------------------------------------------------
 
