@@ -44,10 +44,10 @@ PLAN = {
     "review_candidates": [
         {"kind": "repeated_situation", "items": ["takk"], "count": 2, "prompt": "…"},
         {
-            "kind": "repeated_situation",
+            "kind": "early_last_appearance",
             "items": ["takk_fyrir"],
-            "count": 3,
-            "prompt": "…",
+            "last_s": 600,
+            "end_s": 1800,
         },
         {
             "kind": "no_late_recall",
@@ -162,7 +162,9 @@ class LedgerTests(unittest.TestCase):
 
 
 class FormTests(unittest.TestCase):
-    def test_candidates_are_described_most_repeated_first(self):
+    def test_candidates_leave_out_repeated_situations(self):
+        """Older plans list the same situation asked twice; hearing an item in its scene
+        again is practice, so the card doesn't ask about it."""
         with tempfile.TemporaryDirectory() as td:
             record = saved(Path(td)).load()
             assert record is not None
@@ -170,14 +172,13 @@ class FormTests(unittest.TestCase):
             self.assertEqual(
                 described,
                 [
+                    "最後に出たのが早い: Takk fyrir {thing}.（10分ごろ／全30分）",
                     "終盤にヒントなしで言う機会がない: Ég var að {inf}.",
-                    "同じ場面が3回: Takk fyrir {thing}.",
-                    "同じ場面が2回: Takk.",
                 ],
             )
             text = form_text(record)
             self.assertIn("Takk fyrir {thing}.（〜をありがとう。）", text)
-            self.assertIn("・同じ場面が3回", text)
+            self.assertNotIn("同じ場面", text)
 
     def test_event_ties_answers_to_the_lesson_record(self):
         with tempfile.TemporaryDirectory() as td:
@@ -199,11 +200,14 @@ class FormTests(unittest.TestCase):
             self.assertEqual(e["learner_sha256"], files["learner.before.json"])
             self.assertEqual(e["friction"], ["repetitive"])
             self.assertEqual(e["candidates_confirmed"], [record.candidates()[1]])
-            self.assertEqual(len(e["candidates_shown"]), 3)
+            self.assertEqual(len(e["candidates_shown"]), 2)
             text = report_text(record, [e], ["lesson-012"])
             self.assertIn("負荷: ちょうどいい", text)
             self.assertIn("使えそう: Takk fyrir {thing}.", text)
-            self.assertIn("当てはまった候補: 同じ場面が3回: Takk fyrir {thing}.", text)
+            self.assertIn(
+                "当てはまった候補: 終盤にヒントなしで言う機会がない: Ég var að {inf}.",
+                text,
+            )
             self.assertIn("気になった点: 繰り返しが多い", text)
             self.assertIn("メモ: 後半が速い", text)
             self.assertIn("bot `aaaaaaa`", text)
@@ -458,7 +462,7 @@ class GenerationTests(unittest.TestCase):
             self.assertIn("lesson-002.script.json", second.manifest["files"])
             # language-learning-audio #130: the form's candidates come from the plan
             self.assertIsInstance(second.plan["review_candidates"], list)
-            known = ("同じ場面が", "最後に出たのが早い", "終盤にヒントなしで")
+            known = ("最後に出たのが早い", "終盤にヒントなしで")
             for c in second.candidates():
                 self.assertTrue(second.describe(c).startswith(known), c)
             self.assertIn("generate", second.manifest["generate_args"])

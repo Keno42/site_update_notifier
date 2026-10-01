@@ -703,24 +703,21 @@ class EndToEndTests(unittest.TestCase):
         the lesson record and plan.json show what was used."""
         with tempfile.TemporaryDirectory() as td:
             cfg = self.config(td)
-            cfg.extra_args += ["--max-same-situation", "3"]
+            cfg.extra_args += ["--pause-multiplier", "1.5"]
             lessons = Lessons(cfg, today=lambda: D)
             channel = FakeChannel()
             channel.topic = (
-                "旅行チャンネル\n[levers]\nmax_same_situation = 1\n"
+                "旅行チャンネル\n[levers]\npause_multiplier = 1.2\n"
                 "late_unhinted_recall = true\n"
             )
             asyncio.run(lessons.generate_and_post(channel, "yuki"))
             self.assertIn("レッスン 1", channel.sent[-1][0])
             record = feedback.Ledger(cfg.user_dir("yuki")).load(None)
             args = record.manifest["generate_args"]
-            self.assertEqual(args.count("--max-same-situation"), 1)
-            self.assertEqual(args[args.index("--max-same-situation") + 1], "1")
+            self.assertEqual(args.count("--pause-multiplier"), 1)
+            self.assertEqual(args[args.index("--pause-multiplier") + 1], "1.2")
             self.assertIn("--late-unhinted-recall", args)
-            self.assertEqual(
-                record.plan["config"]["levers"],
-                {"max_same_situation": 1, "late_unhinted_recall": True},
-            )
+            self.assertTrue(record.plan["config"]["levers"]["late_unhinted_recall"])
 
     def test_reading_deck_includes_own_places_only_when_allowed(self):
         with tempfile.TemporaryDirectory() as td:

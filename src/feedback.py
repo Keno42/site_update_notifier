@@ -273,14 +273,12 @@ class Record:
         return list(self.plan.get("new_items", []))
 
     def candidates(self) -> list[dict]:
-        """カードに出す候補. 同じ場面の繰り返しは回数の多い順に、全体で MAX_CANDIDATES 件まで."""
-        cands = list(self.plan.get("review_candidates", []))
-        repeats = sorted(
-            (c for c in cands if c.get("kind") == "repeated_situation"),
-            key=lambda c: -int(c.get("count", 0)),
-        )
-        others = [c for c in cands if c.get("kind") != "repeated_situation"]
-        return (others + repeats)[:MAX_CANDIDATES]
+        """カードに出す候補 (MAX_CANDIDATES 件まで). 同じ場面の繰り返し (古いレッスンの
+        repeated_situation) は練習なので出さない."""
+        cands = self.plan.get("review_candidates", [])
+        return [c for c in cands if c.get("kind") != "repeated_situation"][
+            :MAX_CANDIDATES
+        ]
 
     def describe(self, c: dict) -> str:
         items = self.items()
@@ -288,8 +286,6 @@ class Record:
             (items.get(i, {}).get("target") or i) for i in c.get("items", [])
         )
         kind = c.get("kind")
-        if kind == "repeated_situation":
-            return f"同じ場面が{c.get('count')}回: {target}"
         if kind == "early_last_appearance":
             last, end = c.get("last_s") or 0, c.get("end_s") or 0
             return f"最後に出たのが早い: {target}（{last / 60:.0f}分ごろ／全{end / 60:.0f}分）"

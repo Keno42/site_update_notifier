@@ -1,11 +1,10 @@
 """レバー (language-learning-audio の docs/LEVERS.md) をチャンネルのトピックで変える.
 
     [levers]
-    max_same_situation = 1       # 同じ状況文は 1 レッスンにこの回数まで (0 で制限なし)
     late_unhinted_recall = true  # 新出の最後の確認はヒントなし
     pause_multiplier = 1.2       # 答える時間の倍率
 
-1 行の ``levers = { max_same_situation = 1, late_unhinted_recall = true }`` でもよい.
+1 行の ``levers = { late_unhinted_recall = true, pause_multiplier = 1.2 }`` でもよい.
 トピックに ``[levers]`` があれば、config.py の LESSON_EXTRA_ARGS にある同じレバーより
 優先する (書かれていないレバーは既定のまま). 変えるのは生成だけで、予定は変わらない.
 """
@@ -18,26 +17,19 @@ from .topic import TopicError, channel_topic, section
 
 # レバー → generate の引数 (値を取るか)
 FLAGS = {
-    "max_same_situation": ("--max-same-situation", True),
     "late_unhinted_recall": ("--late-unhinted-recall", False),
     "pause_multiplier": ("--pause-multiplier", True),
 }
+# なくなったレバー: トピックに残っていても読み飛ばして、そう伝える
+REMOVED = {"max_same_situation": "同じ状況文の回数の上限はなくなりました"}
 
 
 def parse(raw: dict) -> list[str]:
     """``[levers]`` の節 → generate の引数."""
-    unknown = sorted(set(raw) - set(FLAGS))
+    unknown = sorted(set(raw) - set(FLAGS) - set(REMOVED))
     if unknown:
         raise TopicError(f"知らないキー {unknown}（使えるのは {list(FLAGS)}）")
     args: list[str] = []
-    n = raw.get("max_same_situation")
-    if n is not None and n is not False:
-        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
-            raise TopicError(
-                "max_same_situation は 0 以上の整数で書いてください（0 で制限なし）"
-            )
-        if n > 0:
-            args += ["--max-same-situation", str(n)]
     late = raw.get("late_unhinted_recall", False)
     if not isinstance(late, bool):
         raise TopicError("late_unhinted_recall は true か false で書いてください")
@@ -52,10 +44,19 @@ def parse(raw: dict) -> list[str]:
 
 
 def from_topic(channel: Any) -> tuple[list[str] | None, str]:
-    """(トピックのレバーの引数. ``[levers]`` がなければ None, 読めなかったときの案内)."""
+    """(トピックのレバーの引数. ``[levers]`` がなければ None, 読めなかったときや
+    なくなったレバーが残っているときの案内)."""
     try:
         raw = section(channel_topic(channel), "levers")
-        return (None, "") if raw is None else (parse(raw), "")
+        if raw is None:
+            return None, ""
+        gone = [f"{k}（{REMOVED[k]}）" for k in REMOVED if k in raw]
+        note = (
+            f"チャンネルのトピックの {'、'.join(gone)} は使わないので消してください。"
+            if gone
+            else ""
+        )
+        return parse(raw), note
     except TopicError as e:
         return None, (
             f"チャンネルのトピックのレバーの設定を読めませんでした: {e}。"
