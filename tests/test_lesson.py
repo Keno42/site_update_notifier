@@ -248,6 +248,7 @@ class ViewTests(unittest.TestCase):
                 "lesson-feedback",
                 "lesson-feedback-report",
                 "lesson-feedback-export",
+                "lesson-week",
                 "version",
             ],
         )
@@ -440,6 +441,53 @@ class EndToEndTests(unittest.TestCase):
             original_response=original_response,
             edit_original_response=edit_original_response,
         )
+
+    def test_lesson_week_lays_the_signals_side_by_side(self):
+        """/lesson-week: the week's lessons, the new items' next-day answers, the feedback and
+        the version used, for the learner only; scenario readiness follows as its own message.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td, scene_cards=2)
+            lessons = Lessons(
+                cfg
+            )  # the CLI dates lessons by the real day, so use it too
+            channel = FakeChannel()
+            asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            sent, deferred, refused = [], [], []
+
+            class Response:
+                async def defer(self, ephemeral=False, thinking=False):
+                    deferred.append(ephemeral)
+
+                async def send_message(self, content, ephemeral=False):
+                    refused.append(content)
+
+            class Followup:
+                async def send(self, content, ephemeral=False):
+                    sent.append((content, ephemeral))
+
+            def interaction(user_id):
+                return SimpleNamespace(
+                    user=SimpleNamespace(id=user_id),
+                    channel_id=5,
+                    channel=channel,
+                    response=Response(),
+                    followup=Followup(),
+                )
+
+            asyncio.run(lessons.week(interaction(1), 7))
+            self.assertEqual(deferred, [True])
+            self.assertIn("直近 7 日のまとめ", sent[0][0])
+            self.assertIn("レッスン 1〜1（1回）", sent[0][0])
+            self.assertTrue(
+                all(ephemeral for _, ephemeral in sent), "only the learner sees it"
+            )
+            self.assertIn(
+                "旅行の準備", sent[-1][0], "readiness comes as a second message"
+            )
+            asyncio.run(lessons.week(interaction(99), 7))
+            self.assertEqual(len(sent), 2, "an unregistered user gets no report")
+            self.assertIn("登録されたユーザーだけ", refused[0])
 
     def test_review_report_and_next_lesson_through_discord(self):
         with tempfile.TemporaryDirectory() as td:

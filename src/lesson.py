@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import discord
 from discord import app_commands
 
-from . import feedback, levers, reading, scenes, speech, trip, version
+from . import feedback, levers, reading, scenes, speech, trip, version, weekly
 from .cards import CardQueue
 from .review import ReviewSession, ReviewView, review_note
 from .review_queue import ReviewQueue
@@ -687,15 +687,41 @@ class Lessons:
             last = None
         if last is not None and (today - last).days < self.cfg.readiness_days:
             return ""
+        text = await self.readiness_text(name, source)
+        if text:
+            path.write_text(json.dumps({"last": today.isoformat()}), "utf-8")
+        return text
+
+    async def readiness_text(self, name: str, source: trip.TripSource | None) -> str:
+        """場面ごとの準備状況 (日数の制限なし). カードを読めなければ空."""
         every = await self._scene_deck(name, source, learner=False)
         if not every:
             return ""
         met = await self._scene_deck(name, source, learner=True)
         queue = CardQueue.load(self.cfg.scene_path(name))
-        text = scenes.readiness(every, {c["id"] for c in met}, queue)
-        if text:
-            path.write_text(json.dumps({"last": today.isoformat()}), "utf-8")
-        return text
+        return scenes.readiness(every, {c["id"] for c in met}, queue)
+
+    async def week(self, interaction: discord.Interaction, days: int = 7) -> None:
+        """/lesson-week: 直近の信号を並べたレポート (src/weekly.py). 本人にだけ見える."""
+        name = self.cfg.users.get(interaction.user.id)
+        if name is None:
+            await interaction.response.send_message(
+                "このコマンドは登録されたユーザーだけが使えます。", ephemeral=True
+            )
+            return
+        if self.cfg.channel_id and interaction.channel_id != self.cfg.channel_id:
+            await interaction.response.send_message(
+                f"<#{self.cfg.channel_id}> で実行してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        days = min(max(days, 1), 60)
+        text = weekly.build(self.cfg.user_dir(name), self.today(), days)
+        await interaction.followup.send(text, ephemeral=True)
+        with trip.resolve(self.cfg.trip_path(name), interaction.channel) as (source, _):
+            readiness = await self.readiness_text(name, source)
+        if readiness:
+            await interaction.followup.send(readiness, ephemeral=True)
 
     def save_manifest(
         self,
@@ -826,6 +852,9 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
     ) -> None:
         await fb.report(interaction, lesson)
 
+    async def lesson_week(interaction: discord.Interaction, days: int = 7) -> None:
+        await lessons.week(interaction, days)
+
     @lesson_option
     async def feedback_export(
         interaction: discord.Interaction, lesson: str | None = None
@@ -857,6 +886,13 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
             name="lesson-feedback-export",
             description="レッスンのフィードバックと記録一式を zip で添付します",
             callback=feedback_export,
+        ),
+        app_commands.Command(
+            name="lesson-week",
+            description="直近の振り返り・フィードバック・場面の準備状況を並べて表示します",
+            callback=app_commands.describe(days="何日分か（既定 7、最大 60）")(
+                lesson_week
+            ),
         ),
         version.command(),
     ):
