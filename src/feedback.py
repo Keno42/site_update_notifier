@@ -46,11 +46,17 @@ MANIFEST_RE = re.compile(r"lesson-(\d+)(?:\.(\d+))?$")
 REF_RE = re.compile(r"(?:lesson-)?0*(\d+)(?:\.(\d+))?")
 
 LOADS = {"light": "軽い", "right": "ちょうどいい", "heavy": "重い"}
+# フォームの選択肢の文言. 保存するのは左のキーだけなので、言い回しは変えても記録は壊れない
+LOAD_HINTS = {
+    "light": "量が少なめ・易しめ",
+    "right": "",
+    "heavy": "量が多め・難しめ",
+}
 FRICTIONS = {
-    "repetitive": "繰り返しが多い",
-    "unclear": "何を答えればいいか分かりにくい",
-    "pacing": "テンポ（速い・遅い・待ち時間）",
-    "other": "その他（メモに）",
+    "repetitive": "同じ表現がくり返し出すぎた",
+    "unclear": "何を答えればいいか分からない問いがあった",
+    "pacing": "テンポが合わない（答える時間・話す速さ）",
+    "other": "その他（「メモを書く」で）",
 }
 MAX_CANDIDATES = 15  # 候補 + FRICTIONS が Discord の選択肢の上限 25 に収まるように
 MESSAGE_MAX = 1900  # Discord の本文は 2000 字まで
@@ -288,9 +294,12 @@ class Record:
         kind = c.get("kind")
         if kind == "early_last_appearance":
             last, end = c.get("last_s") or 0, c.get("end_s") or 0
-            return f"最後に出たのが早い: {target}（{last / 60:.0f}分ごろ／全{end / 60:.0f}分）"
+            return (
+                f"後半に出てこなかった気がする: {target}"
+                f"（最後に出たのは約{last / 60:.0f}分ごろ。全{end / 60:.0f}分中）"
+            )
         if kind == "no_late_recall":
-            return f"終盤にヒントなしで言う機会がない: {target}"
+            return f"終わり近くに、ヒントなしで言う場面がなかった: {target}"
         return f"{kind}: {target}"
 
     def digests(self) -> dict[str, str | None]:
@@ -345,18 +354,21 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
 
 
 def form_text(record: Record, answers: Answers | None = None) -> str:
-    lines = [f"**{record.title} のフィードバック**（30秒ほど。負荷だけは必須）"]
+    lines = [
+        f"**{record.title} のフィードバック**（30秒ほど。必須なのは「今日の量・難しさ」だけです）",
+        "下の欄で当てはまるものを選んで、「送信」を押してください（選ばなくていい欄は飛ばして構いません）。",
+    ]
     new = record.new_items()
     if new:
-        lines.append(
-            "新出: "
-            + "、".join(
-                f"{i.get('target') or i['id']}（{i.get('meaning') or ''}）" for i in new
-            )
-        )
+        lines.append("今日の新しい表現:")
+        lines += [
+            f"・{i.get('target') or i['id']}（{i.get('meaning') or ''}）" for i in new
+        ]
     cands = record.candidates()
     if cands:
-        lines.append("レッスンから見つかった候補（当てはまったら下で選んでください）:")
+        lines.append(
+            "レッスンの記録から機械が気づいたこと（当てはまるかどうかだけ、いちばん下の欄で教えてください）:"
+        )
         lines += [f"・{record.describe(c)}" for c in cands]
     if answers and answers.note:
         lines.append(f"メモ: {_clip(answers.note, 200)}")
@@ -425,7 +437,7 @@ class NoteModal(discord.ui.Modal, title="メモ（任意）"):
 
 
 class FeedbackView(discord.ui.View):
-    """新出の複数選択 2 つ・負荷・当てはまった候補と気になった点・メモ・送信."""
+    """新出の複数選択 2 つ・今日の量と難しさ・当てはまることと気になった点・メモ・送信."""
 
     def __init__(
         self,
@@ -441,8 +453,11 @@ class FeedbackView(discord.ui.View):
         new = record.new_items()[:25]
         if new:
             for attr, placeholder in (
-                ("usable", "今使えそうな新出（複数可・なしでも可）"),
-                ("sooner", "早めにもう一度聞きたい新出（複数可・なしでも可）"),
+                ("usable", "いま言えそうな表現（複数可・選ばなくてもOK）"),
+                (
+                    "sooner",
+                    "まだ自信がない・もう一度やりたい表現（複数可・選ばなくてもOK）",
+                ),
             ):
                 self._select(
                     attr,
@@ -459,8 +474,13 @@ class FeedbackView(discord.ui.View):
                 )
         self._select(
             "load",
-            "全体の負荷（必須）",
-            [discord.SelectOption(label=v, value=k) for k, v in LOADS.items()],
+            "今日のレッスンの量・難しさ（必須）",
+            [
+                discord.SelectOption(
+                    label=v, value=k, description=LOAD_HINTS.get(k) or None
+                )
+                for k, v in LOADS.items()
+            ],
             min_values=1,
             max_values=1,
         )
@@ -471,7 +491,10 @@ class FeedbackView(discord.ui.View):
             discord.SelectOption(label=v, value=f"f:{k}") for k, v in FRICTIONS.items()
         ]
         self._select(
-            "concerns", "当てはまったこと・気になった点（任意）", concerns, min_values=0
+            "concerns",
+            "当てはまること・気になった点（複数可・選ばなくてもOK）",
+            concerns,
+            min_values=0,
         )
         note: discord.ui.Button = discord.ui.Button(label="メモを書く", row=4)
         note.callback = self._note  # type: ignore[method-assign]
@@ -521,7 +544,7 @@ class FeedbackView(discord.ui.View):
     async def _send(self, interaction: discord.Interaction) -> None:
         if self.answers.load is None:
             await interaction.response.send_message(
-                "全体の負荷を選んでから送信してください。", ephemeral=True
+                "「今日の量・難しさ」を選んでから送信してください。", ephemeral=True
             )
             return
         await self.submit(self.answers)

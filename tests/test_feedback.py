@@ -172,8 +172,8 @@ class FormTests(unittest.TestCase):
             self.assertEqual(
                 described,
                 [
-                    "最後に出たのが早い: Takk fyrir {thing}.（10分ごろ／全30分）",
-                    "終盤にヒントなしで言う機会がない: Ég var að {inf}.",
+                    "後半に出てこなかった気がする: Takk fyrir {thing}.（最後に出たのは約10分ごろ。全30分中）",
+                    "終わり近くに、ヒントなしで言う場面がなかった: Ég var að {inf}.",
                 ],
             )
             text = form_text(record)
@@ -205,10 +205,10 @@ class FormTests(unittest.TestCase):
             self.assertIn("負荷: ちょうどいい", text)
             self.assertIn("使えそう: Takk fyrir {thing}.", text)
             self.assertIn(
-                "当てはまった候補: 終盤にヒントなしで言う機会がない: Ég var að {inf}.",
+                "当てはまった候補: 終わり近くに、ヒントなしで言う場面がなかった: Ég var að {inf}.",
                 text,
             )
-            self.assertIn("気になった点: 繰り返しが多い", text)
+            self.assertIn("気になった点: 同じ表現がくり返し出すぎた", text)
             self.assertIn("メモ: 後半が速い", text)
             self.assertIn("bot `aaaaaaa`", text)
 
@@ -462,7 +462,7 @@ class GenerationTests(unittest.TestCase):
             self.assertIn("lesson-002.script.json", second.manifest["files"])
             # language-learning-audio #130: the form's candidates come from the plan
             self.assertIsInstance(second.plan["review_candidates"], list)
-            known = ("最後に出たのが早い", "終盤にヒントなしで")
+            known = ("後半に出てこなかった気がする", "終わり近くに、ヒントなしで")
             for c in second.candidates():
                 self.assertTrue(second.describe(c).startswith(known), c)
             self.assertIn("generate", second.manifest["generate_args"])
