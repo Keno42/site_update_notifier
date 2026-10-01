@@ -60,6 +60,9 @@ class Entry:
     streak: int = 0  # 同じ結果が続いた回数
     last_reviewed: str | None = None
     due: str = ""
+    # 音声レッスン側が未解決 (open) とした項目を含む問い (language-learning-audio #149).
+    # 言えなかったと同じ優先度で出し、答えたら外す
+    open: bool = False
 
     def tier(self, today: date) -> int:
         """小さいほど先に出す. 期限前は 5.
@@ -71,7 +74,7 @@ class Entry:
             return 5
         if self.new and self.state == "unseen":
             return 0
-        if self.state == "failed":
+        if self.state == "failed" or self.open:
             return 1
         tier = {"shaky": 2, "ok": 4}.get(self.state, 3)
         if tier > 1 and (today - due).days >= PROMOTE_AFTER_DAYS:
@@ -150,6 +153,7 @@ class ReviewQueue:
             raise ValueError(result)
         e = self.entries[key]
         e.streak = e.streak + 1 if e.state == result else 1
+        e.open = False
         e.state = result
         e.reviews += 1
         e.last_reviewed = today.isoformat()
@@ -209,6 +213,7 @@ class ReviewQueue:
                 source_lesson=plan["lesson_number"],
                 new=is_new,
                 due=due,
+                open=is_open,
             )
             queued.update(items)
             added += 1
@@ -219,10 +224,12 @@ class ReviewQueue:
         """未解決の項目 (音声レッスン側の open_items) を含む問いは、期限を明日に戻す.
         音声レッスン側は「言えた」と確かめられるまで項目を閉じない (language-learning-audio
         #149) ので、``ok`` の間隔 (7日、14日…) を待たせると何週間も開いたままになる.
-        結果の履歴 (state・streak) はそのまま、次の確認の日だけ早める."""
+        結果の履歴 (state・streak) はそのまま、次の確認の日だけ早め、優先度も上げる
+        (``open``: 期限前でなくなれば ``failed`` と同じ tier. ``ok`` のままだと上限で最初に外される)."""
         tomorrow = (today + timedelta(days=1)).isoformat()
         if entry.due > tomorrow:
             entry.due = tomorrow
+        entry.open = True
 
     # ---- 読み書き -------------------------------------------------------
 

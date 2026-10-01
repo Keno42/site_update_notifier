@@ -884,6 +884,35 @@ class OpenItemQueueTests(unittest.TestCase):
         self.assertEqual(q.entries["takk"].state, "ok", "its history stays")
         self.assertEqual(q.select(later + timedelta(days=1)), ["takk"])
 
+    def test_a_full_review_still_asks_the_open_item(self):
+        """Pulled forward, an ``ok`` question must not stay at the lowest priority: with the
+        review limit full of other due questions it is still selected, and answering clears it.
+        """
+        q = self.queue_with_ok_takk()
+        later = D + timedelta(days=2)
+        fillers = [
+            {"items": [f"f{n}"], "prompt": f"p{n}", "answer": f"a{n}"} for n in range(6)
+        ]
+        q.add_from_plan(
+            {"lesson_number": 2, "new_items": [], "review": fillers},
+            later - timedelta(days=1),
+        )
+        for n in range(6):
+            q.entries[f"f{n}"].state = "shaky" if n % 2 else "ok"
+        q.add_from_plan(
+            {
+                "lesson_number": 3,
+                "new_items": [],
+                "open_items": ["takk"],
+                "review": QUESTIONS[:1],
+            },
+            later,
+        )
+        day = later + timedelta(days=1)
+        self.assertIn("takk", q.select(day, 3))
+        q.record("takk", "ok", day)
+        self.assertFalse(q.entries["takk"].open)
+
     def test_without_open_items_a_queued_question_keeps_its_date(self):
         q = self.queue_with_ok_takk()
         due = q.entries["takk"].due
