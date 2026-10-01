@@ -913,6 +913,37 @@ class OpenItemQueueTests(unittest.TestCase):
         q.record("takk", "ok", day)
         self.assertFalse(q.entries["takk"].open)
 
+    def test_waiting_open_items_are_confirmed_a_few_per_plan(self):
+        """Open items that didn't fit the lesson (``open_not_fitted``) are asked in the review
+        too, at most OPEN_CONFIRM_PER_PLAN per plan, in the plan's order; one without a question
+        is skipped, and one already pulled forward isn't counted again."""
+        q = ReviewQueue()
+        ids = [f"w{n}" for n in range(6)]
+        qs = [{"items": [i], "prompt": f"p{i}", "answer": f"a{i}"} for i in ids]
+        q.add_from_plan({"lesson_number": 1, "new_items": [], "review": qs}, D)
+        for e in q.entries.values():
+            e.state, e.due = "ok", (D + timedelta(days=14)).isoformat()
+        waiting = ["nothing_queued", "w0", "w1", "w2", "w3", "w4"]
+        plan = {
+            "lesson_number": 2,
+            "new_items": [],
+            "open_items": [],
+            "open_not_fitted": waiting,
+            "review": [],
+        }
+        q.add_from_plan(plan, D + timedelta(days=1))
+        tomorrow = (D + timedelta(days=2)).isoformat()
+        pulled = [i for i in ids if q.entries[i].due == tomorrow]
+        self.assertEqual(pulled, ["w0", "w1", "w2"])
+        self.assertTrue(all(q.entries[i].open for i in pulled))
+        self.assertFalse(q.entries["w3"].open)
+        # the next plan takes the next ones; the first three aren't counted again
+        q.add_from_plan({**plan, "lesson_number": 3}, D + timedelta(days=1))
+        self.assertEqual(
+            [i for i in ids if q.entries[i].open], ["w0", "w1", "w2", "w3", "w4"]
+        )
+        self.assertEqual(q.entries["w5"].due, (D + timedelta(days=14)).isoformat())
+
     def test_without_open_items_a_queued_question_keeps_its_date(self):
         q = self.queue_with_ok_takk()
         due = q.entries["takk"].due

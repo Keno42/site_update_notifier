@@ -38,6 +38,9 @@ INTERVALS: dict[str, tuple[int, ...]] = {
     "shaky": (1, 3, 7),
     "ok": (1, 3, 7, 14, 30),
 }
+# 音声レッスンに入りきらなかった未解決項目 (plan.open_not_fitted) の問いを、1 回のレッスン生成ごとに
+# 何件まで翌日に出すか。レッスンの時間は使わず、言えたら閉じ、言えなければ新しい失敗として練習に入る
+OPEN_CONFIRM_PER_PLAN = 3
 # これだけ期限を過ぎた問いは「言えなかった」と同じ優先度に上げる (新出が毎回あっても埋もれない)
 PROMOTE_AFTER_DAYS = 7
 
@@ -217,7 +220,33 @@ class ReviewQueue:
             )
             queued.update(items)
             added += 1
+        self._confirm_waiting_open(plan.get("open_not_fitted") or [], today)
         return added
+
+    def _confirm_waiting_open(self, waiting: list[str], today: date) -> None:
+        """レッスンに入りきらなかった未解決項目も、振り返りで一度確かめる (language-learning-audio
+        #149). 言えれば音声レッスン側で閉じ、レッスンの時間はかからない. 言えなければ新しい
+        失敗になる. plan の順 (最後に練習してから長いものが先) に、項目ごとに既存の問いを 1 件
+        (項目の少ないものを優先)、1 回の生成で ``OPEN_CONFIRM_PER_PLAN`` 件まで. 問いがまだない
+        項目は聞けないので飛ばす. すでに明日に引き寄せ済みの問いは数えない."""
+        tomorrow = (today + timedelta(days=1)).isoformat()
+        taken: set[str] = set()
+        for item in waiting:
+            if len(taken) >= OPEN_CONFIRM_PER_PLAN:
+                break
+            cands = [
+                (len(e.items), -e.source_lesson, k)
+                for k, e in self.entries.items()
+                if item in e.items
+            ]
+            if not cands:
+                continue
+            key = min(cands)[2]
+            e = self.entries[key]
+            if key in taken or (e.open and e.due <= tomorrow):
+                continue
+            self._bring_forward(e, today)
+            taken.add(key)
 
     @staticmethod
     def _bring_forward(entry: Entry, today: date) -> None:
