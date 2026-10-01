@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .feedback import FRICTIONS, LOADS, MANIFESTS, Ledger
+from .review import read_review_log
 
 MESSAGE_MAX = 1900
 LONG_PHRASE_WORDS = 3  # 3 語以上の表現が失敗しやすい (docs/LEARNING-DESIGN.md §5.2)
@@ -168,6 +169,32 @@ def lever_flags(args: list[str]) -> str:
     return " ".join(out) or "なし"
 
 
+KIND_LABEL = (("question", "問い"), ("scene", "場面"), ("card", "読み"))
+
+
+def review_time_lines(records: list[dict]) -> list[str]:
+    """振り返り (/lesson の問い・場面・読みカード) の所要時間: 1 回あたりと、1 問あたりの秒."""
+    if not records:
+        return []
+    totals = sorted(int(r.get("total_s", 0)) for r in records)
+    mean = sum(totals) / len(totals) / 60
+    per: list[str] = []
+    for kind, label in KIND_LABEL:
+        n = sum(int((r.get("answered") or {}).get(kind, 0)) for r in records)
+        sec = sum(int((r.get("seconds") or {}).get(kind, 0)) for r in records)
+        if n:
+            per.append(f"{label} {sec / n:.0f}秒")
+    stopped = sum(not r.get("finished") for r in records)
+    capped = sum(int(r.get("capped", 0)) for r in records)
+    return [
+        f"**振り返りの所要時間**: {len(records)} 回、平均 {mean:.1f} 分"
+        f"（最長 {totals[-1] / 60:.1f} 分）、1 つあたり "
+        + "・".join(per)
+        + (f"、途中で終えた {stopped} 回" if stopped else "")
+        + (f"、離席とみなして切った {capped} 件" if capped else "")
+    ]
+
+
 def build(user_dir: Path, today: date, days: int = 7) -> str:
     learner = read_json(user_dir / "learner.json")
     if not isinstance(learner, dict) or not learner.get("lessons"):
@@ -272,6 +299,11 @@ def build(user_dir: Path, today: date, days: int = 7) -> str:
             if e.get("note"):
                 note = e["note"].replace("\n", " ")
                 lines.append(f"　メモ（レッスン {e.get('lesson')}）: {note[:80]}")
+
+    # 4b. 振り返りの所要時間 (src/review.py の review_log.jsonl)
+    lines += review_time_lines(
+        [r for r in read_review_log(user_dir) if in_window(r.get("ts"), today, days)]
+    )
 
     # 5. レッスンの中身 (記録のあるレッスン)
     shapes = []

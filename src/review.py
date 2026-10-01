@@ -7,9 +7,11 @@ reading_queue.json (src/cards.py) に、答えるたびに書き込む.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -19,6 +21,9 @@ from . import reading, scenes
 from .cards import CardQueue
 from .review_queue import Entry, ReviewQueue
 
+REVIEW_LOG = "review_log.jsonl"
+# 1 つの問い・カードにかかった時間の上限 (秒). 席を外したぶんを所要時間に数えない
+IDLE_CAP_S = 120
 RESULTS = {"ok": "言えた", "shaky": "迷った", "failed": "言えなかった"}
 REVIEW_INTRO = (
     "これから定着度チェックです（前回までの表現、全{n}問）。問いを見て声に出して答えてから"
@@ -46,6 +51,12 @@ class ReviewSession:
     scenes: list[dict] = field(default_factory=list)
     scene_queue: CardQueue | None = None
     scene_path: Path | None = None
+    clock: Callable[[], float] = time.monotonic
+    timings: list[tuple[str, float]] = field(default_factory=list)  # (種類, 秒)
+    _shown_at: float | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._shown_at = self.clock()
 
     @property
     def total(self) -> int:
@@ -87,6 +98,10 @@ class ReviewSession:
         if self.done:
             return
         kind, n = self._step()
+        now = self.clock()
+        if self._shown_at is not None:
+            self.timings.append((kind, max(0.0, now - self._shown_at)))
+        self._shown_at = now
         if kind == "question":
             self.queue.record(self.keys[n], result, self.today)
             self.queue.save(self.path)
@@ -100,6 +115,29 @@ class ReviewSession:
                 queue.record(cards[n]["id"], result, self.today)
                 queue.save(path)
         self.results.append(result)
+
+    def timing_record(self, now: datetime, finished: bool) -> dict:
+        """所要時間の記録 (答えた分だけ). 1 つに IDLE_CAP_S を超えた分は数えない (capped は
+        その件数). 中身は件数と秒だけで、何を聞かれたかは入れない."""
+        seconds: dict[str, float] = {}
+        capped = 0
+        for kind, s in self.timings:
+            capped += s > IDLE_CAP_S
+            seconds[kind] = seconds.get(kind, 0.0) + min(s, IDLE_CAP_S)
+        counts = {k: [t[0] for t in self.timings].count(k) for k in seconds}
+        return {
+            "ts": now.isoformat(timespec="seconds"),
+            "finished": finished,
+            "planned": {
+                "question": len(self.keys),
+                "scene": len(self.scenes),
+                "card": len(self.cards),
+            },
+            "answered": counts,
+            "seconds": {k: round(v) for k, v in seconds.items()},
+            "total_s": round(sum(seconds.values())),
+            "capped": capped,
+        }
 
     @property
     def question_results(self) -> list[str]:
@@ -189,6 +227,35 @@ class ReviewSession:
                 )
                 lines.append(f"**{label}**: {len(done)}/{total}枚（{counts}）")
         return "\n".join(lines)
+
+
+def log_review(user_dir: Path, record: dict) -> None:
+    """振り返りの所要時間を review_log.jsonl に 1 行足す. 書けなくても振り返りは止めない."""
+    if not record.get("answered"):
+        return
+    try:
+        with (user_dir / REVIEW_LOG).open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as e:
+        logging.warning(
+            f"振り返りの所要時間を記録できませんでした ({type(e).__name__})"
+        )
+
+
+def read_review_log(user_dir: Path) -> list[dict]:
+    out: list[dict] = []
+    try:
+        lines = (user_dir / REVIEW_LOG).read_text("utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
 
 
 def review_note(queue: ReviewQueue, day: date, limit: int) -> str:
