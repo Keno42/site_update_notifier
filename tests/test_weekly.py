@@ -224,6 +224,27 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn("/x/learner.json", text, "paths stay out")
         self.assertNotIn("heavy", text)
 
+    def test_the_review_time_comes_from_the_review_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            user = Path(td) / "yuki"
+            write(user, LEARNER)
+            (user / "review_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-09-30T21:00:00+09:00",
+                        "finished": True,
+                        "answered": {"question": 6},
+                        "seconds": {"question": 360},
+                        "total_s": 360,
+                        "capped": 0,
+                    }
+                )
+                + "\n",
+                "utf-8",
+            )
+            text = build(user, TODAY, 7)
+        self.assertIn("**振り返りの所要時間**: 1 回、平均 6.0 分", text)
+
     def test_the_latest_lessons_unanswered_items_wait_for_the_next_review(self):
         with tempfile.TemporaryDirectory() as td:
             user = Path(td) / "yuki"

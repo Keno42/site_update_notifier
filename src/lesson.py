@@ -34,7 +34,7 @@ from discord import app_commands
 
 from . import feedback, levers, reading, scenes, speech, trip, version, weekly
 from .cards import CardQueue
-from .review import ReviewSession, ReviewView, review_note
+from .review import ReviewSession, ReviewView, log_review, review_note
 from .review_queue import ReviewQueue
 
 LLA_DIR = (
@@ -430,6 +430,13 @@ class Lessons:
             )
 
             async def finish(generate: bool) -> None:
+                log_review(
+                    self.cfg.user_dir(name),
+                    session.timing_record(
+                        datetime.now().astimezone(), finished=session.done
+                    ),
+                )
+
                 async def run() -> None:
                     if not await self.flush_reports(channel, name, queue, path):
                         return
