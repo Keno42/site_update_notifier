@@ -122,3 +122,36 @@ class ReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BonusSessionTests(unittest.TestCase):
+    """#183: the card says it is a bonus before the answer; the weekly line counts asked / said."""
+
+    def test_the_card_says_so_and_the_log_and_weekly_count_bonus_questions(self):
+        from datetime import date
+
+        from src.review import BONUS_NOTE, ReviewSession
+        from src.review_queue import ReviewQueue
+
+        D = date(2026, 10, 2)
+        queue = ReviewQueue()
+        queue.add_from_plan(
+            {"lesson_number": 5, "new_items": [], "review": [
+                {"items": ["a", "b"], "prompt": "cue", "answer": "Það.", "bonus": True},
+                {"items": ["c"], "prompt": "cue2", "answer": "Já.", "bonus": True}]},
+            D,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.json"
+            keys = queue.select(D.replace(day=3))
+            s = ReviewSession(queue, keys, path, D.replace(day=3))
+            self.assertIn(BONUS_NOTE, s.render())
+            self.assertNotIn("Það.", s.render())
+            s.rate("ok")
+            s.rate("failed")
+            self.assertEqual(queue.entries, {}, "asked once")
+            self.assertEqual(queue.reports(), [(5, {"failed": [], "shaky": [], "ok": ["a", "b"]})])
+            self.assertEqual(s.failed_ids(), [], "a miss on a bonus question changes nothing")
+            record = s.timing_record(NOW, True)
+            self.assertEqual(record["bonus"], {"asked": 2, "said": 1})
+        self.assertTrue(any("1 問言えた" in line for line in review_time_lines([record])))

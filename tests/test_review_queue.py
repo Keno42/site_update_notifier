@@ -358,3 +358,73 @@ class StorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def bonus_plan(n, bonus, review=()):
+    p = plan(n, [], review)
+    p["review"] += [
+        {"items": items, "prompt": f"cue {'+'.join(items)}", "answer": "A.", "bonus": True} for items in bonus
+    ]
+    return p
+
+
+class BonusTests(unittest.TestCase):
+    """language-learning-audio #183: a line the learner only tried is a bonus question: a 言えた gains,
+    a miss costs nothing, asked once, never blocks the next lesson."""
+
+    def test_a_bonus_question_is_its_own_entry_due_tomorrow_and_never_blocks(self):
+        q = ReviewQueue()
+        q.add_from_plan(plan(1, [], [["a"]]), D)
+        added = q.add_from_plan(bonus_plan(2, [["a", "b"]]), D)
+        self.assertEqual(added, 1)
+        (key,) = [k for k, e in q.entries.items() if e.bonus]
+        e = q.entries[key]
+        self.assertEqual((e.items, e.due, e.new), (["a", "b"], (D + timedelta(days=1)).isoformat(), False))
+        self.assertEqual(q.must_answer(), [], "the next lesson doesn't wait for it")
+        self.assertIn("a", q.entries, "the ordinary entry for «a» is untouched")
+
+    def test_at_most_two_per_review_and_after_the_due_failed_ones_before_plain_ok(self):
+        q = ReviewQueue()
+        q.add_from_plan(bonus_plan(1, [["a"], ["b"], ["c"]]), D)
+        self.assertEqual(sum(e.bonus for e in q.entries.values()), 2, "at most two are added")
+        q.entries["f"] = entry("failed", due=D, items=["f"])
+        q.entries["k"] = entry("ok", due=D, items=["k"])
+        keys = q.select(D + timedelta(days=1))
+        bonus = [k for k in keys if q.entries[k].bonus]
+        self.assertEqual(keys[0], "f")
+        self.assertLess(keys.index(bonus[0]), keys.index("k"))
+        self.assertLessEqual(len(bonus), 2)
+        for e in q.entries.values():
+            if e.bonus:
+                self.assertEqual(e.tier(D + timedelta(days=1)), 3)
+
+    def test_said_is_reported_and_a_miss_is_not_and_the_entry_goes_either_way(self):
+        q = ReviewQueue()
+        q.add_from_plan(bonus_plan(3, [["a", "b"], ["c"]]), D)
+        k_said, k_miss = sorted(k for k, e in q.entries.items() if e.bonus)
+        q.record_bonus(k_said, "ok")
+        q.record_bonus(k_miss, "failed")
+        self.assertEqual(q.entries, {})
+        self.assertEqual(q.reports(), [(3, {"failed": [], "shaky": [], "ok": ["a", "b"]})])
+        q2 = ReviewQueue()
+        q2.add_from_plan(bonus_plan(3, [["c"]]), D)
+        (k,) = q2.entries
+        q2.record_bonus(k, "shaky")
+        self.assertEqual((q2.entries, q2.reports()), ({}, []), "a 迷った is not reported either")
+
+    def test_an_unanswered_bonus_question_is_dropped_when_a_new_plan_arrives(self):
+        q = ReviewQueue()
+        q.add_from_plan(bonus_plan(1, [["a"]]), D)
+        q.add_from_plan(bonus_plan(2, [["b"]]), D + timedelta(days=1))
+        self.assertEqual([e.items for e in q.entries.values() if e.bonus], [["b"]])
+
+    def test_plans_without_bonus_behave_as_before_and_the_entry_round_trips(self):
+        q = ReviewQueue()
+        q.add_from_plan(plan(1, ["a"], [["a"]]), D)
+        self.assertFalse(any(e.bonus for e in q.entries.values()))
+        q.add_from_plan(bonus_plan(2, [["x"]]), D)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "q.json"
+            q.save(p)
+            again = ReviewQueue.load(p, D)
+        self.assertEqual({k: e.bonus for k, e in again.entries.items()}, {k: e.bonus for k, e in q.entries.items()})
