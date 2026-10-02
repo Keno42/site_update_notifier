@@ -30,6 +30,7 @@ REVIEW_INTRO = (
     "「答えを見る」で確かめ、言えた／迷った／言えなかったを選んでください。"
 )
 SCENE_INTRO = "続けて場面カードが{n}枚"
+BONUS_NOTE = "聞いただけの文です。言えたらボーナス（言えなくて大丈夫）"
 READING_INTRO = "続けて読みカードが{n}枚あります（書いてあるものを声に出して読む）。"
 
 
@@ -54,9 +55,14 @@ class ReviewSession:
     clock: Callable[[], float] = time.monotonic
     timings: list[tuple[str, float]] = field(default_factory=list)  # (種類, 秒)
     _shown_at: float | None = field(default=None, repr=False)
+    _snapshot: dict[str, Entry] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         self._shown_at = self.clock()
+        # bonus の問いは答えたら外すので、この回の表示用に控えておく
+        self._snapshot = {
+            k: self.queue.entries[k] for k in self.keys if k in self.queue.entries
+        }
 
     @property
     def total(self) -> int:
@@ -67,7 +73,8 @@ class ReviewSession:
         return len(self.results) >= self.total
 
     def entry(self, n: int) -> Entry:
-        return self.queue.entries[self.keys[n]]
+        key = self.keys[n]
+        return self.queue.entries.get(key) or self._snapshot[key]
 
     def _step(self) -> tuple[str, int]:
         """今の位置: ("question" | "scene" | "card" | "done", その中での番号)."""
@@ -103,7 +110,11 @@ class ReviewSession:
             self.timings.append((kind, max(0.0, now - self._shown_at)))
         self._shown_at = now
         if kind == "question":
-            self.queue.record(self.keys[n], result, self.today)
+            if self.entry(n).bonus:
+                # 言えたときだけ報告、どちらでも外す
+                self.queue.record_bonus(self.keys[n], result)
+            else:
+                self.queue.record(self.keys[n], result, self.today)
             self.queue.save(self.path)
         else:
             cards, queue, path = (
@@ -125,7 +136,7 @@ class ReviewSession:
             capped += s > IDLE_CAP_S
             seconds[kind] = seconds.get(kind, 0.0) + min(s, IDLE_CAP_S)
         counts = {k: [t[0] for t in self.timings].count(k) for k in seconds}
-        return {
+        record = {
             "ts": now.isoformat(timespec="seconds"),
             "finished": finished,
             "planned": {
@@ -138,6 +149,14 @@ class ReviewSession:
             "total_s": round(sum(seconds.values())),
             "capped": capped,
         }
+        # 聞いただけの文の bonus の問い: 出した数と言えた数 (/lesson-week で見る). なければ載せない
+        asked = [n for n in range(len(self.question_results)) if self.entry(n).bonus]
+        if asked:
+            record["bonus"] = {
+                "asked": len(asked),
+                "said": sum(1 for n in asked if self.question_results[n] == "ok"),
+            }
+        return record
 
     @property
     def question_results(self) -> list[str]:
@@ -154,7 +173,9 @@ class ReviewSession:
     def _ids(self, result: str) -> list[str]:
         ids: list[str] = []
         for n, r in enumerate(self.question_results):
-            if r == result:
+            if (
+                r == result and not self.entry(n).bonus
+            ):  # bonus: 言えなかった・迷ったは何も起こさない (#183)
                 ids += [i for i in self.entry(n).items if i not in ids]
         return ids
 
@@ -178,9 +199,13 @@ class ReviewSession:
         else:
             e = self.entry(len(self.results))
             text = (
-                f"**振り返り {len(self.results) + 1}/{len(self.keys)}**"
-                f"（レッスン{e.source_lesson}）\n{e.prompt}"
-            ) + (f"\n答え: **{e.answer}**" if revealed else "")
+                (
+                    f"**振り返り {len(self.results) + 1}/{len(self.keys)}**"
+                    f"（レッスン{e.source_lesson}）\n{e.prompt}"
+                )
+                + (f"\n{BONUS_NOTE}" if e.bonus else "")
+                + (f"\n答え: **{e.answer}**" if revealed else "")
+            )
         if not self.results:
             intro = REVIEW_INTRO.format(n=len(self.keys))
             if self.scenes and self.cards:
@@ -204,7 +229,9 @@ class ReviewSession:
         lines = [f"**振り返り**: {len(answered)}/{len(self.keys)}問に回答"]
         for result in ("failed", "shaky"):
             answers = [
-                self.entry(n).answer for n, r in enumerate(answered) if r == result
+                self.entry(n).answer
+                for n, r in enumerate(answered)
+                if r == result and not self.entry(n).bonus
             ]
             if answers:
                 lines.append(f"{RESULTS[result]}: {'、'.join(dict.fromkeys(answers))}")

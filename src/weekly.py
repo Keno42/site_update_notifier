@@ -186,13 +186,18 @@ def review_time_lines(records: list[dict]) -> list[str]:
             per.append(f"{label} {sec / n:.0f}秒")
     stopped = sum(not r.get("finished") for r in records)
     capped = sum(int(r.get("capped", 0)) for r in records)
+    bonus_asked = sum(int((r.get("bonus") or {}).get("asked", 0)) for r in records)
+    bonus_said = sum(int((r.get("bonus") or {}).get("said", 0)) for r in records)
+    bonus_head = "**ボーナスの問い**（聞いただけの文）: "
+    bonus_line = bonus_head + f"{bonus_asked} 問出して {bonus_said} 問言えた"
+    bonus = [bonus_line] if bonus_asked else []
     return [
         f"**振り返りの所要時間**: {len(records)} 回、平均 {mean:.1f} 分"
         f"（最長 {totals[-1] / 60:.1f} 分）、1 つあたり "
         + "・".join(per)
         + (f"、途中で終えた {stopped} 回" if stopped else "")
         + (f"、離席とみなして切った {capped} 件" if capped else "")
-    ]
+    ] + bonus
 
 
 def build(user_dir: Path, today: date, days: int = 7) -> str:

@@ -41,6 +41,8 @@ INTERVALS: dict[str, tuple[int, ...]] = {
 # 音声レッスンに入りきらなかった未解決項目 (plan.open_not_fitted) の問いを、1 回のレッスン生成ごとに
 # 何件まで翌日に出すか。レッスンの時間は使わず、言えたら閉じ、言えなければ新しい失敗として練習に入る
 OPEN_CONFIRM_PER_PLAN = 3
+# 聞いただけの文 (language-learning-audio #183 の bonus) の問いを、1 回の振り返りに何件まで出すか
+MAX_BONUS_PER_REVIEW = 2
 # これだけ期限を過ぎた問いは「言えなかった」と同じ優先度に上げる (新出が毎回あっても埋もれない)
 PROMOTE_AFTER_DAYS = 7
 
@@ -66,6 +68,9 @@ class Entry:
     # 音声レッスン側が未解決 (open) とした項目を含む問い (language-learning-audio #149).
     # 言えなかったと同じ優先度で出し、答えたら外す
     open: bool = False
+    # 音声レッスン側で「試しに言ってもらっただけ」の文 (bonus). 言えたら加点、言えなくても何も起きない.
+    # 一度だけ聞き、答えたら外す. 必ず答える問い (must_answer) にはしない
+    bonus: bool = False
 
     def tier(self, today: date) -> int:
         """小さいほど先に出す. 期限前は 5.
@@ -75,6 +80,8 @@ class Entry:
         due = date.fromisoformat(self.due)
         if due > today:
             return 5
+        if self.bonus:
+            return 3  # 期限の来た 言えなかった / 未解決 / 新出のあと、普通の ok の復習より前
         if self.new and self.state == "unseen":
             return 0
         if self.state == "failed" or self.open:
@@ -137,10 +144,25 @@ class ReviewQueue:
             tier = e.tier(today)
             # 新出どうしは新しいレッスンから (前回の新出が上限で押し出されない)
             latest_first = -e.source_lesson if tier == 0 else 0
-            return (tier, latest_first, e.due, e.last_reviewed or "")
+            return (
+                tier,
+                e.bonus,
+                latest_first,
+                e.due,
+                e.last_reviewed or "",
+            )  # 同じ tier では bonus が最後 (満席なら最初に外れる)
 
         required = sorted(self.must_answer(), key=order)
         rest = [k for k in sorted(self.entries, key=order) if k not in required]
+        bonus_seen = 0
+        kept = []
+        for k in rest:  # bonus は 1 回に MAX_BONUS_PER_REVIEW 件まで
+            if self.entries[k].bonus and self.entries[k].tier(today) < 5:
+                bonus_seen += 1
+                if bonus_seen > MAX_BONUS_PER_REVIEW:
+                    continue
+            kept.append(k)
+        rest = kept
         if limit <= 0:
             return required + [k for k in rest if self.entries[k].tier(today) < 5]
         return required + rest[: max(0, limit - len(required))]
@@ -163,6 +185,26 @@ class ReviewQueue:
         e.due = (today + timedelta(days=next_interval(result, e.streak))).isoformat()
         ids = self.pending_reports.setdefault(e.source_lesson, empty_report())[result]
         ids += [i for i in e.items if i not in ids]
+
+    def record_bonus(self, key: str, result: str) -> None:
+        """bonus の問いの結果 (#183). 言えた (ok) だけを音声レッスン側へ報告する: その項目は
+        「言えた」で、音声レッスン側が 1 回の成功として数える. 迷った / 言えなかったは何も報告せず
+        (音声レッスン側には何も起きない). どちらでも問いは外す: 一度だけ聞く."""
+        if result not in INTERVALS:
+            raise ValueError(result)
+        e = self.entries.pop(key)
+        if result == "ok":
+            ids = self.pending_reports.setdefault(e.source_lesson, empty_report())["ok"]
+            ids += [i for i in e.items if i not in ids]
+
+    def drop_stale_bonus(self, latest: int) -> list[str]:
+        """答えないまま次の plan が来た bonus の問いを外す (積み上がらない)."""
+        stale = [
+            k for k, e in self.entries.items() if e.bonus and e.source_lesson < latest
+        ]
+        for k in stale:
+            del self.entries[k]
+        return stale
 
     # ---- 音声レッスン側への報告 -------------------------------------------
 
@@ -193,13 +235,30 @@ class ReviewQueue:
         足した数を返す."""
         new_ids = {i["id"] for i in plan.get("new_items", [])}
         open_ids = set(plan.get("open_items") or [])
-        queued = {i for e in self.entries.values() for i in e.items}
+        self.drop_stale_bonus(plan["lesson_number"])
+        queued = {i for e in self.entries.values() if not e.bonus for i in e.items}
         added = 0
+        bonus_added = 0
         for q in plan.get("review", []):
             items = list(q.get("items") or [])
-            key = key_for(items)
             if not items:
                 continue
+            if q.get("bonus"):
+                # 聞いただけの文 (#183): 別の問いに同じ項目があっても独立した問いとして足し、明日出す
+                key = f"bonus:{plan['lesson_number']}:{key_for(items)}"
+                if key not in self.entries and bonus_added < MAX_BONUS_PER_REVIEW:
+                    self.entries[key] = Entry(
+                        items=items,
+                        prompt=q["prompt"],
+                        answer=q["answer"],
+                        source_lesson=plan["lesson_number"],
+                        due=(today + timedelta(days=1)).isoformat(),
+                        bonus=True,
+                    )
+                    bonus_added += 1
+                    added += 1
+                continue
+            key = key_for(items)
             is_open = bool(open_ids & set(items))
             if key in self.entries:
                 if is_open:
