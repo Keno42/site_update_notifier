@@ -144,7 +144,13 @@ class ReviewQueue:
             tier = e.tier(today)
             # 新出どうしは新しいレッスンから (前回の新出が上限で押し出されない)
             latest_first = -e.source_lesson if tier == 0 else 0
-            return (tier, e.bonus, latest_first, e.due, e.last_reviewed or "")  # 同じ tier では bonus が最後 (満席なら最初に外れる)
+            return (
+                tier,
+                e.bonus,
+                latest_first,
+                e.due,
+                e.last_reviewed or "",
+            )  # 同じ tier では bonus が最後 (満席なら最初に外れる)
 
         required = sorted(self.must_answer(), key=order)
         rest = [k for k in sorted(self.entries, key=order) if k not in required]
@@ -193,7 +199,9 @@ class ReviewQueue:
 
     def drop_stale_bonus(self, latest: int) -> list[str]:
         """答えないまま次の plan が来た bonus の問いを外す (積み上がらない)."""
-        stale = [k for k, e in self.entries.items() if e.bonus and e.source_lesson < latest]
+        stale = [
+            k for k, e in self.entries.items() if e.bonus and e.source_lesson < latest
+        ]
         for k in stale:
             del self.entries[k]
         return stale

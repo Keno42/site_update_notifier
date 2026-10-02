@@ -136,9 +136,19 @@ class BonusSessionTests(unittest.TestCase):
         D = date(2026, 10, 2)
         queue = ReviewQueue()
         queue.add_from_plan(
-            {"lesson_number": 5, "new_items": [], "review": [
-                {"items": ["a", "b"], "prompt": "cue", "answer": "Það.", "bonus": True},
-                {"items": ["c"], "prompt": "cue2", "answer": "Já.", "bonus": True}]},
+            {
+                "lesson_number": 5,
+                "new_items": [],
+                "review": [
+                    {
+                        "items": ["a", "b"],
+                        "prompt": "cue",
+                        "answer": "Það.",
+                        "bonus": True,
+                    },
+                    {"items": ["c"], "prompt": "cue2", "answer": "Já.", "bonus": True},
+                ],
+            },
             D,
         )
         with tempfile.TemporaryDirectory() as td:
@@ -150,8 +160,14 @@ class BonusSessionTests(unittest.TestCase):
             s.rate("ok")
             s.rate("failed")
             self.assertEqual(queue.entries, {}, "asked once")
-            self.assertEqual(queue.reports(), [(5, {"failed": [], "shaky": [], "ok": ["a", "b"]})])
-            self.assertEqual(s.failed_ids(), [], "a miss on a bonus question changes nothing")
+            self.assertEqual(
+                queue.reports(), [(5, {"failed": [], "shaky": [], "ok": ["a", "b"]})]
+            )
+            self.assertEqual(
+                s.failed_ids(), [], "a miss on a bonus question changes nothing"
+            )
             record = s.timing_record(NOW, True)
             self.assertEqual(record["bonus"], {"asked": 2, "said": 1})
-        self.assertTrue(any("1 問言えた" in line for line in review_time_lines([record])))
+        self.assertTrue(
+            any("1 問言えた" in line for line in review_time_lines([record]))
+        )

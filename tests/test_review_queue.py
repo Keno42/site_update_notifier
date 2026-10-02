@@ -363,7 +363,13 @@ if __name__ == "__main__":
 def bonus_plan(n, bonus, review=()):
     p = plan(n, [], review)
     p["review"] += [
-        {"items": items, "prompt": f"cue {'+'.join(items)}", "answer": "A.", "bonus": True} for items in bonus
+        {
+            "items": items,
+            "prompt": f"cue {'+'.join(items)}",
+            "answer": "A.",
+            "bonus": True,
+        }
+        for items in bonus
     ]
     return p
 
@@ -379,14 +385,19 @@ class BonusTests(unittest.TestCase):
         self.assertEqual(added, 1)
         (key,) = [k for k, e in q.entries.items() if e.bonus]
         e = q.entries[key]
-        self.assertEqual((e.items, e.due, e.new), (["a", "b"], (D + timedelta(days=1)).isoformat(), False))
+        self.assertEqual(
+            (e.items, e.due, e.new),
+            (["a", "b"], (D + timedelta(days=1)).isoformat(), False),
+        )
         self.assertEqual(q.must_answer(), [], "the next lesson doesn't wait for it")
         self.assertIn("a", q.entries, "the ordinary entry for «a» is untouched")
 
     def test_at_most_two_per_review_and_after_the_due_failed_ones_before_plain_ok(self):
         q = ReviewQueue()
         q.add_from_plan(bonus_plan(1, [["a"], ["b"], ["c"]]), D)
-        self.assertEqual(sum(e.bonus for e in q.entries.values()), 2, "at most two are added")
+        self.assertEqual(
+            sum(e.bonus for e in q.entries.values()), 2, "at most two are added"
+        )
         q.entries["f"] = entry("failed", due=D, items=["f"])
         q.entries["k"] = entry("ok", due=D, items=["k"])
         keys = q.select(D + timedelta(days=1))
@@ -405,12 +416,16 @@ class BonusTests(unittest.TestCase):
         q.record_bonus(k_said, "ok")
         q.record_bonus(k_miss, "failed")
         self.assertEqual(q.entries, {})
-        self.assertEqual(q.reports(), [(3, {"failed": [], "shaky": [], "ok": ["a", "b"]})])
+        self.assertEqual(
+            q.reports(), [(3, {"failed": [], "shaky": [], "ok": ["a", "b"]})]
+        )
         q2 = ReviewQueue()
         q2.add_from_plan(bonus_plan(3, [["c"]]), D)
         (k,) = q2.entries
         q2.record_bonus(k, "shaky")
-        self.assertEqual((q2.entries, q2.reports()), ({}, []), "a 迷った is not reported either")
+        self.assertEqual(
+            (q2.entries, q2.reports()), ({}, []), "a 迷った is not reported either"
+        )
 
     def test_an_unanswered_bonus_question_is_dropped_when_a_new_plan_arrives(self):
         q = ReviewQueue()
@@ -427,4 +442,7 @@ class BonusTests(unittest.TestCase):
             p = Path(td) / "q.json"
             q.save(p)
             again = ReviewQueue.load(p, D)
-        self.assertEqual({k: e.bonus for k, e in again.entries.items()}, {k: e.bonus for k, e in q.entries.items()})
+        self.assertEqual(
+            {k: e.bonus for k, e in again.entries.items()},
+            {k: e.bonus for k, e in q.entries.items()},
+        )

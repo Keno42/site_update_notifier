@@ -189,7 +189,9 @@ def review_time_lines(records: list[dict]) -> list[str]:
     bonus_asked = sum(int((r.get("bonus") or {}).get("asked", 0)) for r in records)
     bonus_said = sum(int((r.get("bonus") or {}).get("said", 0)) for r in records)
     bonus = (
-        [f"**ボーナスの問い**（聞いただけの文）: {bonus_asked} 問出して {bonus_said} 問言えた"]
+        [
+            f"**ボーナスの問い**（聞いただけの文）: {bonus_asked} 問出して {bonus_said} 問言えた"
+        ]
         if bonus_asked
         else []
     )
