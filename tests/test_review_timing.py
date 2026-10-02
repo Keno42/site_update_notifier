@@ -168,6 +168,5 @@ class BonusSessionTests(unittest.TestCase):
             )
             record = s.timing_record(NOW, True)
             self.assertEqual(record["bonus"], {"asked": 2, "said": 1})
-        self.assertTrue(
-            any("1 問言えた" in line for line in review_time_lines([record]))
-        )
+        lines = review_time_lines([record])
+        self.assertTrue(any("1 問言えた" in line for line in lines))

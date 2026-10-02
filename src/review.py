@@ -111,9 +111,8 @@ class ReviewSession:
         self._shown_at = now
         if kind == "question":
             if self.entry(n).bonus:
-                self.queue.record_bonus(
-                    self.keys[n], result
-                )  # 言えたときだけ報告、どちらでも外す
+                # 言えたときだけ報告、どちらでも外す
+                self.queue.record_bonus(self.keys[n], result)
             else:
                 self.queue.record(self.keys[n], result, self.today)
             self.queue.save(self.path)

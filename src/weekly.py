@@ -188,13 +188,11 @@ def review_time_lines(records: list[dict]) -> list[str]:
     capped = sum(int(r.get("capped", 0)) for r in records)
     bonus_asked = sum(int((r.get("bonus") or {}).get("asked", 0)) for r in records)
     bonus_said = sum(int((r.get("bonus") or {}).get("said", 0)) for r in records)
-    bonus = (
-        [
-            f"**ボーナスの問い**（聞いただけの文）: {bonus_asked} 問出して {bonus_said} 問言えた"
-        ]
-        if bonus_asked
-        else []
+    bonus_line = (
+        f"**ボーナスの問い**（聞いただけの文）: "
+        f"{bonus_asked} 問出して {bonus_said} 問言えた"
     )
+    bonus = [bonus_line] if bonus_asked else []
     return [
         f"**振り返りの所要時間**: {len(records)} 回、平均 {mean:.1f} 分"
         f"（最長 {totals[-1] / 60:.1f} 分）、1 つあたり "
