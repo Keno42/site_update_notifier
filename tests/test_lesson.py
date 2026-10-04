@@ -915,7 +915,8 @@ class OpenItemQueueTests(unittest.TestCase):
 
     def test_every_open_item_of_a_plan_is_brought_forward(self):
         """language-learning-audio #199: the plan carries ``open_items`` (it did not before), and every one of them
-        is asked tomorrow, each with its own question, however far its entry had been pushed."""
+        is asked tomorrow, each with its own question, however far its entry had been pushed.
+        """
         q = ReviewQueue()
         ids = [f"o{n}" for n in range(5)]
         qs = [{"items": [i], "prompt": f"p{i}", "answer": f"a{i}"} for i in ids]
@@ -923,9 +924,20 @@ class OpenItemQueueTests(unittest.TestCase):
         for e in q.entries.values():
             e.state, e.due = "ok", (D + timedelta(days=30)).isoformat()
         today = D + timedelta(days=2)
-        q.add_from_plan({"lesson_number": 2, "new_items": [], "open_items": ids, "open_not_fitted": [], "review": qs}, today)
+        q.add_from_plan(
+            {
+                "lesson_number": 2,
+                "new_items": [],
+                "open_items": ids,
+                "open_not_fitted": [],
+                "review": qs,
+            },
+            today,
+        )
         tomorrow = (today + timedelta(days=1)).isoformat()
-        self.assertEqual([i for i in ids if q.entries[i].due == tomorrow and q.entries[i].open], ids)
+        self.assertEqual(
+            [i for i in ids if q.entries[i].due == tomorrow and q.entries[i].open], ids
+        )
         self.assertEqual(sorted(q.select(today + timedelta(days=1), 10)), sorted(ids))
 
     def test_waiting_open_items_are_confirmed_a_few_per_plan(self):
