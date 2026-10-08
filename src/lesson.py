@@ -783,6 +783,7 @@ class Lessons:
                 getattr(channel, "id", 0),
                 message_id,
                 newlist.list_text(plan["lesson_number"], plan.get("new_items", [])),
+                plan["lesson_number"],
             )
         except OSError:
             logging.exception("新出表現の一覧を保存できませんでした")

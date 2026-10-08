@@ -859,7 +859,12 @@ class EndToEndTests(unittest.TestCase):
             channel.sent.clear()
             asyncio.run(lessons.generate_and_post(channel, "yuki"))
             # the previous lesson's new-expression list (#79) comes first; the warning is among the messages
-            self.assertTrue(any("トピックの旅程の設定を読めませんでした" in t for t, _ in channel.sent))
+            self.assertTrue(
+                any(
+                    "トピックの旅程の設定を読めませんでした" in t
+                    for t, _ in channel.sent
+                )
+            )
             for text, _ in channel.sent:
                 self.assertNotIn("Testv", text)
             self.assertIn("レッスン 2", channel.sent[-1][0])

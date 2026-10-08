@@ -63,9 +63,20 @@ class PendingLists:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
 
-    def add(self, record: str, channel_id: int, message_id: int, text: str) -> None:
+    def add(
+        self, record: str, channel_id: int, message_id: int, text: str, lesson: int = 0
+    ) -> None:
+        """一覧を置く. 同じ番号のレッスンを生成し直したときは、前の版 (lesson-019 に対する lesson-019.2) の
+        一覧は捨てる: 聞くのは新しい版で、前の投稿の一覧は別の新出かもしれない (#83 review)."""
         data = self._load()
-        data[record] = {"channel": channel_id, "message": message_id, "text": text}
+        if lesson:
+            data = {k: v for k, v in data.items() if v.get("lesson") != lesson}
+        data[record] = {
+            "channel": channel_id,
+            "message": message_id,
+            "text": text,
+            "lesson": lesson,
+        }
         self._save(data)
 
     def take(self, record: str) -> dict | None:

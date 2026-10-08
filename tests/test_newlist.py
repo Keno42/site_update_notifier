@@ -133,7 +133,9 @@ class NewListTests(unittest.TestCase):
             self.assertEqual(
                 len(Ledger(env.cfg.user_dir("yuki")).events(env.manifest)), 1
             )
-            self.assertIn("記録しました", log[-1][1], "the learner is told it was recorded")
+            self.assertIn(
+                "記録しました", log[-1][1], "the learner is told it was recorded"
+            )
 
     def test_without_feedback_the_list_comes_when_the_next_lesson_starts_generating(
         self,
@@ -150,6 +152,51 @@ class NewListTests(unittest.TestCase):
             with mock.patch.object(Lessons, "_generate_and_post", mock.AsyncMock()):
                 asyncio.run(env.lessons.generate_and_post(env.channel, "yuki"))
             self.assertEqual(len(env.channel.sent), before + 1, "never twice")
+
+    def test_a_regenerated_lesson_replaces_the_list_of_the_version_it_supersedes(self):
+        """#83 review: lesson 19 generated twice is kept as lesson-019 and lesson-019.2. The feedback for the one heard takes
+        its own list; the next generation must not post the superseded version's list as a second «レッスン 19».
+        """
+        with tempfile.TemporaryDirectory() as td:
+            env = Env(td)
+            env.post()  # lesson-019
+            first = env.manifest
+            plan2 = dict(
+                PLAN, new_items=[{"id": "other", "target": "annað", "meaning": "other"}]
+            )
+            write_lesson(env.work, plan2)
+            user = env.cfg.user_dir("yuki")
+            second = Ledger(user).save_manifest(
+                env.work, plan2, b"{}", user / "learner.json", {"bot": "a" * 40, "lla": "b" * 40}, ["generate"], NOW
+            ).name  # fmt: skip
+            self.assertNotEqual(first, second)
+            asyncio.run(
+                env.lessons.post(env.channel, env.work, plan2, "", 1, second, [])
+            )
+            self.assertEqual(
+                list(env.pending()), [second], "the superseded list went with its post"
+            )
+            fb = Feedback({1: "yuki"}, env.cfg.user_dir, 0, lambda: NOW)
+
+            async def run():
+                log = []
+                i = SimpleNamespace(
+                    user=SimpleNamespace(id=1), channel_id=5, channel=env.channel,
+                    response=FakeResponse(log),
+                )  # fmt: skip
+                await fb.open_form(i, second)
+                await submit_form(self, log, log[-1][2])
+
+            asyncio.run(run())
+            before = len(env.channel.sent)
+            with mock.patch.object(Lessons, "_generate_and_post", mock.AsyncMock()):
+                asyncio.run(env.lessons.generate_and_post(env.channel, "yuki"))
+            self.assertEqual(
+                len(env.channel.sent), before, "no second list for lesson 19"
+            )
+            lists = [t for t, _ in env.channel.sent if "新出表現" in t]
+            self.assertEqual(len(lists), 1)
+            self.assertIn("annað", lists[0])
 
     def test_a_list_already_shown_with_the_feedback_is_not_posted_again_later(self):
         with tempfile.TemporaryDirectory() as td:
