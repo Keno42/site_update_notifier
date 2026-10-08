@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import subprocess
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -1061,36 +1062,111 @@ class OpenItemQueueTests(unittest.TestCase):
         )
         self.assertEqual(sorted(q.select(today + timedelta(days=1), 10)), sorted(ids))
 
-    def test_waiting_open_items_are_confirmed_a_few_per_plan(self):
-        """Open items that didn't fit the lesson (``open_not_fitted``) are asked in the review
-        too, at most OPEN_CONFIRM_PER_PLAN per plan, in the plan's order; one without a question
-        is skipped, and one already pulled forward isn't counted again."""
+    def test_every_waiting_open_item_is_asked(self):
+        """#220 (owner, 2026-10-08): items that didn't fit the lesson (``open_not_fitted``) are all asked in
+        the review, in no smaller number than the practised ones. An item with no queued question gets the plan's
+        own (the audio side writes one for each); one the plan brings no question for can't be asked."""
         q = ReviewQueue()
         ids = [f"w{n}" for n in range(6)]
         qs = [{"items": [i], "prompt": f"p{i}", "answer": f"a{i}"} for i in ids]
         q.add_from_plan({"lesson_number": 1, "new_items": [], "review": qs}, D)
         for e in q.entries.values():
             e.state, e.due = "ok", (D + timedelta(days=14)).isoformat()
-        waiting = ["nothing_queued", "w0", "w1", "w2", "w3", "w4"]
+        day = D + timedelta(days=1)
+        waiting = ["nothing_queued", "w0", "w1", "w2", "w3", "w4", "no_question_here"]
         plan = {
             "lesson_number": 2,
             "new_items": [],
             "open_items": [],
             "open_not_fitted": waiting,
-            "review": [],
+            "review": [
+                {"items": ["nothing_queued"], "prompt": "pn", "answer": "an", "stage": "open"}
+            ],
         }
-        q.add_from_plan(plan, D + timedelta(days=1))
-        tomorrow = (D + timedelta(days=2)).isoformat()
-        pulled = [i for i in ids if q.entries[i].due == tomorrow]
-        self.assertEqual(pulled, ["w0", "w1", "w2"])
-        self.assertTrue(all(q.entries[i].open for i in pulled))
-        self.assertFalse(q.entries["w3"].open)
-        # the next plan takes the next ones; the first three aren't counted again
-        q.add_from_plan({**plan, "lesson_number": 3}, D + timedelta(days=1))
+        q.add_from_plan(plan, day)
+        tomorrow = (day + timedelta(days=1)).isoformat()
         self.assertEqual(
-            [i for i in ids if q.entries[i].open], ["w0", "w1", "w2", "w3", "w4"]
+            [k for k, e in q.entries.items() if e.open],
+            ["w0", "w1", "w2", "w3", "w4", "nothing_queued"],
         )
+        self.assertTrue(all(q.entries[k].due == tomorrow for k in ("w0", "w4", "nothing_queued")))
         self.assertEqual(q.entries["w5"].due, (D + timedelta(days=14)).isoformat())
+        self.assertFalse(q.entries["w5"].open)
+        # all six are required at the next review, whatever the limit
+        later = day + timedelta(days=1)
+        self.assertEqual(
+            sorted(q.select(later, limit=2)),
+            sorted(["w0", "w1", "w2", "w3", "w4", "nothing_queued"]),
+        )
+
+    def test_an_item_that_closed_is_no_longer_asked(self):
+        q = ReviewQueue()
+        q.add_from_plan(
+            {"lesson_number": 1, "new_items": [], "open_items": ["a", "b"],
+             "review": [{"items": [i], "prompt": f"p{i}", "answer": f"a{i}"} for i in "ab"]},
+            D,
+        )
+        self.assertEqual([k for k, e in q.entries.items() if e.open], ["a", "b"])
+        q.add_from_plan(
+            {"lesson_number": 2, "new_items": [], "open_items": ["b"], "open_not_fitted": [], "review": []},
+            D,
+        )
+        self.assertEqual([k for k, e in q.entries.items() if e.open], ["b"])
+
+    def test_only_one_question_per_open_item_is_required(self):
+        """The one with the fewest items (then the newest lesson) is chosen; the other questions
+        that contain the item stay ordinary."""
+        q = ReviewQueue()
+        q.add_from_plan(
+            {"lesson_number": 1, "new_items": [], "review": [QUESTIONS[1]]},
+            D,
+        )
+        q.add_from_plan(
+            {"lesson_number": 2, "new_items": [], "open_items": ["fara_heim"],
+             "review": [{"items": ["fara_heim"], "prompt": "p", "answer": "a", "stage": "open"}]},
+            D,
+        )
+        self.assertEqual([k for k, e in q.entries.items() if e.open], ["fara_heim"])
+        self.assertEqual(q.must_answer(D + timedelta(days=1)), ["fara_heim"])
+        q.record("fara_heim", "failed", D + timedelta(days=1))
+        self.assertEqual(q.must_answer(D + timedelta(days=1)), [], "a retry the same day isn't asked twice")
+
+    def test_with_ten_old_questions_waiting_every_open_item_is_still_asked_once(self):
+        """#220 T2: tier-1 entries overdue by weeks used to take every slot."""
+        q = ReviewQueue()
+        old = {f"old{n}": Entry([f"old{n}"], "p", "a", 1, state="failed", due=(D - timedelta(days=30 + n)).isoformat()) for n in range(10)}
+        q.entries.update(old)
+        opens = ["x", "y"]
+        q.add_from_plan(
+            {"lesson_number": 5, "new_items": [], "open_items": ["x"], "open_not_fitted": ["y"],
+             "review": [{"items": [i], "prompt": f"p{i}", "answer": f"a{i}"} for i in opens]},
+            D,
+        )
+        picked = q.select(D + timedelta(days=1), limit=3)
+        self.assertEqual(sorted(picked[:2]), ["x", "y"])
+        self.assertEqual(len(picked), len(set(picked)))
+        self.assertEqual(len(picked), 3, "the limit still holds for the rest")
+
+    def test_a_re_asked_question_gets_the_plans_wording_and_keeps_its_schedule(self):
+        """#73 point 1: the stored wording follows the plan; due, state, streak, reviews and
+        source_lesson stay, so the report still goes to the lesson that asked it."""
+        q = ReviewQueue()
+        q.add_from_plan({"lesson_number": 3, "new_items": [], "review": [{"items": ["sofa"], "prompt": "How do you say: Sleep.", "answer": "sofa"}]}, D)
+        q.record("sofa", "ok", D)
+        before = (q.entries["sofa"].due, q.entries["sofa"].state, q.entries["sofa"].streak, q.entries["sofa"].reviews)
+        q.add_from_plan({"lesson_number": 9, "new_items": [], "review": [{"items": ["sofa"], "prompt": "Say: To sleep.", "answer": "sofa"}]}, D + timedelta(days=2))
+        e = q.entries["sofa"]
+        self.assertEqual(e.prompt, "Say: To sleep.")
+        self.assertEqual((e.due, e.state, e.streak, e.reviews), before)
+        self.assertEqual(e.source_lesson, 3)
+
+    def test_a_question_with_an_unfilled_template_is_not_shown(self):
+        """#73 point 2 / B5: «{hour}» left in a stored prompt is skipped (and not counted as waiting)."""
+        q = ReviewQueue()
+        q.entries["klukkan_er"] = Entry(["klukkan_er"], "Klukkan er {hour}.", "Klukkan er tvö.", 1, due=D.isoformat())
+        q.entries["ok"] = Entry(["ok"], "p", "a", 1, due=D.isoformat())
+        self.assertEqual(q.select(D, limit=5), ["ok"])
+        self.assertEqual(q.due_count(D), 1)
 
     def test_without_open_items_a_queued_question_keeps_its_date(self):
         q = self.queue_with_ok_takk()
@@ -1120,6 +1196,213 @@ class OpenItemQueueTests(unittest.TestCase):
         self.assertEqual(
             q.entries["fara_heim"].due, (D + timedelta(days=1)).isoformat()
         )
+
+
+class OpenItemWordingTests(unittest.TestCase):
+    """#73 / #220 B4: a one-item question is worded again from the course just before it is shown."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.cfg = LessonConfig(root=Path(self.td.name), users={1: "yuki"})
+        self.path = self.cfg.pending_path("yuki")
+        self.path.parent.mkdir(parents=True)
+        self.queue = ReviewQueue(
+            {
+                "sofa": Entry(["sofa"], "How do you say: Sleep.", "sofa", 4, due=D.isoformat(), reviews=2, state="ok"),
+                "eg_vil+fara_heim": Entry(["eg_vil", "fara_heim"], "帰りたい", "Ég vil fara heim.", 4, due=D.isoformat()),
+                "later": Entry(["later"], "p", "a", 4, due=(D + timedelta(days=9)).isoformat()),
+            }
+        )
+
+    def refresh(self, fake_cli):
+        with mock.patch("src.lesson.run_cli", fake_cli):
+            asyncio.run(Lessons(self.cfg).refresh_wording(self.queue, D, self.path))
+
+    def test_the_stored_wording_is_replaced_by_the_courses_current_cue(self):
+        calls = []
+
+        async def fake_cli(cfg, args, on_progress=None):
+            calls.append(args)
+            return 0, json.dumps({"sofa": {"prompt": "「寝る」と言ってください。", "answer": "sofa", "cues": ["「寝る」と言ってください。"]}}), ""
+
+        self.refresh(fake_cli)
+        e = self.queue.entries["sofa"]
+        self.assertEqual((e.prompt, e.answer), ("「寝る」と言ってください。", "sofa"))
+        self.assertEqual((e.due, e.state, e.reviews, e.source_lesson), (D.isoformat(), "ok", 2, 4))
+        self.assertEqual(self.queue.entries["eg_vil+fara_heim"].prompt, "帰りたい", "a two-item question is left alone")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][calls[0].index("--ids") + 1], "sofa", "only the due single-item questions are asked for")
+        self.assertEqual(ReviewQueue.load(self.path, D).entries["sofa"].prompt, "「寝る」と言ってください。", "saved")
+
+    def test_a_sentence_question_keyed_by_one_item_keeps_its_answer(self):
+        """The review of #88: «tvo» asked as a sentence stays a sentence; a bare entry whose prompt is another current cue stays too."""
+        self.queue.entries["tvo"] = Entry(["tvo"], "「2000クローナです」と言ってください。", "Það kostar tvö þúsund krónur.", 4, due=D.isoformat())
+        self.queue.entries["gott"] = Entry(["gott"], "「良い」と言ってください。", "gott", 4, due=D.isoformat())
+
+        async def fake_cli(cfg, args, on_progress=None):
+            return 0, json.dumps({
+                "tvo": {"prompt": "「2」と言ってください。", "answer": "tvö", "cues": ["「2」と言ってください。"]},
+                "gott": {"prompt": "「良い」(状況0)", "answer": "gott", "cues": ["「良い」(状況0)", "「良い」と言ってください。"]},
+                "sofa": {"prompt": "「寝る」", "answer": "sofa", "cues": ["「寝る」"]},
+            }), ""
+
+        self.refresh(fake_cli)
+        self.assertEqual(self.queue.entries["tvo"].answer, "Það kostar tvö þúsund krónur.")
+        self.assertEqual(self.queue.entries["tvo"].prompt, "「2000クローナです」と言ってください。")
+        self.assertEqual(self.queue.entries["gott"].prompt, "「良い」と言ってください。", "another current cue: variety kept")
+        self.assertEqual(self.queue.entries["sofa"].prompt, "「寝る」", "a stale bare question is reworded")
+
+    def test_without_cues_only_an_unaskable_question_is_reworded(self):
+        """An older audiolesson prints no «cues»: nothing current is overwritten, only what cannot be asked."""
+        self.queue.entries["gott"] = Entry(["gott"], "「良い」と言ってください。", "gott", 4, due=D.isoformat())
+        self.queue.entries["klukkan_er"] = Entry(["klukkan_er"], "Klukkan er {hour}.", "Klukkan er tvö.", 4, due=D.isoformat())
+
+        async def fake_cli(cfg, args, on_progress=None):
+            return 0, json.dumps({
+                "gott": {"prompt": "「良い」(状況0)", "answer": "gott"},
+                "sofa": {"prompt": "「寝る」", "answer": "sofa"},
+                "klukkan_er": {"prompt": "「2時です」", "answer": "Klukkan er tvö."},
+            }), ""
+
+        self.refresh(fake_cli)
+        self.assertEqual(self.queue.entries["gott"].prompt, "「良い」と言ってください。")
+        self.assertEqual(self.queue.entries["sofa"].prompt, "How do you say: Sleep.", "a stale bare question waits for cues")
+        self.assertEqual(self.queue.entries["klukkan_er"].prompt, "「2時です」")
+
+    def test_the_stored_wording_stays_when_the_cli_fails(self):
+        async def failing(cfg, args, on_progress=None):
+            return 2, "", "error: invalid choice: 'questions'"
+
+        async def garbage(cfg, args, on_progress=None):
+            return 0, "not json", ""
+
+        for fake in (failing, garbage):
+            self.refresh(fake)
+            self.assertEqual(self.queue.entries["sofa"].prompt, "How do you say: Sleep.")
+
+    def test_a_stored_template_is_fixed_by_the_refresh(self):
+        self.queue.entries["klukkan_er"] = Entry(["klukkan_er"], "Klukkan er {hour}.", "Klukkan er tvö.", 4, due=D.isoformat())
+        self.assertNotIn("klukkan_er", self.queue.select(D, 10))
+
+        async def fake_cli(cfg, args, on_progress=None):
+            return 0, json.dumps({"klukkan_er": {"prompt": "「今は2時です」と言ってください。", "answer": "Klukkan er tvö."}}), ""
+
+        self.refresh(fake_cli)
+        self.assertIn("klukkan_er", self.queue.select(D, 10))
+
+
+PLAN_CODE = """
+import json, sys
+from datetime import date
+from audiolesson.content import load_curriculum
+from audiolesson.cli import _plan
+from audiolesson.learner import ItemState, LearnerState
+from audiolesson.script import Script
+
+cur = load_curriculum(sys.argv[1], known_lang="ja")
+lesson, learner_path = int(sys.argv[2]), sys.argv[3]
+open_items, not_fitted = sys.argv[4].split(","), sys.argv[5].split(",")
+open_items, not_fitted = [i for i in open_items if i], [i for i in not_fitted if i]
+learner = LearnerState.load(learner_path) if len(sys.argv) > 6 else LearnerState("is", "ja", "A1")
+if len(sys.argv) <= 6:
+    for i in open_items + not_fitted:
+        learner.items[i] = ItemState(due="2026-09-20", successes=2, last_outcome="not_recalled", failures=1)
+    learner.save(learner_path)
+sc = Script(lesson, "t", "is", "ja")
+sc.meta.update(new_items=["godan_daginn"] if lesson == 2 else [], open_items=open_items, open_not_fitted=not_fitted)
+print(json.dumps(_plan(sc, cur), ensure_ascii=False))
+"""
+
+
+class OpenItemsEndToEndTests(unittest.TestCase):
+    """#76: the plan the audio side writes, the queue the bot builds from it, the review and the report back,
+    through the pinned audiolesson (no Discord, no paid service): every open item is asked, a failure stays open, a recall closes it."""
+
+    def plan(self, cfg, lesson, open_items, not_fitted, first=False):
+        args = [cfg.python, "-c", PLAN_CODE, cfg.curriculum, str(lesson), str(cfg.learner_path("yuki")), ",".join(open_items), ",".join(not_fitted)]
+        if not first:
+            args.append("again")
+        out = subprocess.run(args, cwd=cfg.lla_dir, capture_output=True, text=True, check=True)
+        plan = json.loads(out.stdout)  # what plan.json holds, as the bot reads it
+        if lesson == 2:  # the lesson's own question for its new item
+            plan["review"].append({"items": ["godan_daginn"], "prompt": "「こんにちは」と言って", "answer": "Góðan daginn."})
+        return plan
+
+    def outcome(self, cfg, item):
+        raw = json.loads(cfg.learner_path("yuki").read_text("utf-8"))
+        return raw["items"][item]["last_outcome"]
+
+    def test_open_items_are_asked_reported_to_their_lesson_and_closed_by_a_recall(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(root=Path(td), users={1: "yuki"})
+            cfg.user_dir("yuki").mkdir(parents=True)
+            lessons = Lessons(cfg)
+            # lesson 1 asked «takk» and «fara_heim» a while ago; their dates are far ahead and «takk» has no written question now
+            queue = ReviewQueue()
+            old = (D + timedelta(days=30)).isoformat()
+            queue.entries["takk"] = Entry(["takk"], "old wording", "Takk.", 1, state="ok", due=old, reviews=3)
+            queue.entries["fara_heim"] = Entry(["fara_heim"], "家へ", "Heim.", 1, state="ok", due=old, reviews=3)
+            plan = self.plan(cfg, 2, ["takk"], ["fara_heim"], first=True)
+            self.assertEqual((plan["open_items"], plan["open_not_fitted"]), (["takk"], ["fara_heim"]))
+            queue.add_from_plan(json.loads(json.dumps(plan)), D)
+            self.assertNotEqual(queue.entries["takk"].prompt, "old wording", "the serializer's question for «takk» rewords it")
+            self.assertEqual(queue.entries["takk"].source_lesson, 1)
+            path = cfg.pending_path("yuki")
+            queue.save(path)
+
+            day = D + timedelta(days=1)
+            queue = ReviewQueue.load(path, day)
+            keys = queue.select(day, limit=1)  # a small limit does not drop the required questions
+            self.assertEqual(sorted(keys), ["fara_heim", "godan_daginn", "takk"])
+            session = ReviewSession(queue, keys, path, day)
+            for key in keys:
+                session.rate("failed" if key == "takk" else "ok")
+            sent = []
+
+            async def real_cli(cfg_, args, on_progress=None):
+                sent.append(args)
+                return await run_cli(cfg_, args, on_progress)
+
+            with mock.patch("src.lesson.run_cli", real_cli):
+                self.assertTrue(asyncio.run(lessons.flush_reports(FakeChannel(), "yuki", queue, path)))
+            lesson_flags = sorted(a[a.index("--lesson") + 1] for a in sent)
+            self.assertEqual(lesson_flags, ["1", "2"], "a report goes to the lesson that asked the question")
+            takk_report = next(a for a in sent if "--failed" in a)
+            self.assertEqual((takk_report[takk_report.index("--lesson") + 1], takk_report[takk_report.index("--failed") + 1]), ("1", "takk"))
+            self.assertEqual(self.outcome(cfg, "takk"), "not_recalled", "a failure stays open")
+            self.assertEqual(self.outcome(cfg, "fara_heim"), "recalled", "a recall closes it")
+
+            # the next plan still lists «takk»; it is asked again, and a recall closes it
+            plan = self.plan(cfg, 3, ["takk"], [])
+            queue.add_from_plan(json.loads(json.dumps(plan)), day)
+            queue.save(path)
+            third = day + timedelta(days=1)
+            keys = queue.select(third, limit=1)
+            self.assertEqual(keys, ["takk"])
+            ReviewSession(queue, keys, path, third).rate("ok")
+            with mock.patch("src.lesson.run_cli", real_cli):
+                self.assertTrue(asyncio.run(lessons.flush_reports(FakeChannel(), "yuki", queue, path)))
+            self.assertEqual(self.outcome(cfg, "takk"), "recalled")
+            plan = self.plan(cfg, 4, [], [])
+            queue.add_from_plan(json.loads(json.dumps(plan)), third)
+            self.assertFalse(any(e.open for e in queue.entries.values()), "a closed item is not asked again")
+
+    def test_without_the_open_lists_the_small_limit_drops_them(self):
+        """The test fails if either field is removed from the plan: the guard on the guard."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(root=Path(td), users={1: "yuki"})
+            cfg.user_dir("yuki").mkdir(parents=True)
+            plan = self.plan(cfg, 2, ["takk"], ["fara_heim"], first=True)
+            for field in ("open_items", "open_not_fitted"):
+                queue = ReviewQueue()
+                old = (D + timedelta(days=30)).isoformat()
+                for k in ("takk", "fara_heim"):
+                    queue.entries[k] = Entry([k], "p", "a", 1, state="ok", due=old)
+                stripped = {**plan, field: []}
+                queue.add_from_plan(stripped, D)
+                keys = queue.select(D + timedelta(days=1), limit=1)
+                self.assertNotEqual(sorted(keys), ["fara_heim", "godan_daginn", "takk"], field)
 
 
 class GuidanceTests(unittest.TestCase):

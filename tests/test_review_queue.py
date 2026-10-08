@@ -121,14 +121,14 @@ class SelectionTests(unittest.TestCase):
         answered, so a session holds all of them even beyond the limit."""
         q = ReviewQueue({"f": entry("failed")})
         q.add_from_plan(plan(7, list("abcde"), [[i] for i in "abcde"]), D)
-        self.assertEqual(sorted(q.must_answer()), list("abcde"))
+        self.assertEqual(sorted(q.must_answer(D)), list("abcde"))
         self.assertEqual(
             sorted(q.select(D, limit=3)), list("abcde"), "all five, no room"
         )
         self.assertEqual(q.select(D, limit=6)[-1], "f", "the rest fill what is left")
         for k in "abcde":
             q.record(k, "ok", D)
-        self.assertEqual(q.must_answer(), [])
+        self.assertEqual(q.must_answer(D), [])
 
     def test_an_older_lessons_unanswered_new_items_leave_the_queue(self):
         """#38 review: a new item left unanswered when the next lesson was generated (a
@@ -389,7 +389,7 @@ class BonusTests(unittest.TestCase):
             (e.items, e.due, e.new),
             (["a", "b"], (D + timedelta(days=1)).isoformat(), False),
         )
-        self.assertEqual(q.must_answer(), [], "the next lesson doesn't wait for it")
+        self.assertEqual(q.must_answer(D), [], "the next lesson doesn't wait for it")
         self.assertIn("a", q.entries, "the ordinary entry for «a» is untouched")
 
     def test_at_most_two_per_review_and_after_the_due_failed_ones_before_plain_ok(self):

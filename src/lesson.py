@@ -387,6 +387,8 @@ class Lessons:
             queue = ReviewQueue.load(path, today)
             if not auto and queue.drop_stale_new():
                 queue.save(path)
+            if not auto:
+                await self.refresh_wording(queue, today, path)
             keys = [] if auto else queue.select(today, self.cfg.review_limit)
             if not keys:
                 note = "（自動モード: 振り返りなし）" if auto else ""
@@ -474,12 +476,14 @@ class Lessons:
             if not handed_to_view:
                 self.busy.discard(name)
 
-    def _card_room(self, queue: ReviewQueue, wanted: int, reserved: int = 0) -> int:
-        """カードに使える枚数: wanted までで、直前のレッスンの新出の問い (必ず出す. なくても
-        1 問は残す) と先に決まったカード (reserved) と合わせて review_limit を超えない分."""
+    def _card_room(
+        self, queue: ReviewQueue, today: date, wanted: int, reserved: int = 0
+    ) -> int:
+        """カードに使える枚数: wanted までで、必ず出す問い (直前のレッスンの新出と期限の来た未解決項目.
+        なくても 1 問は残す) と先に決まったカード (reserved) と合わせて review_limit を超えない分."""
         if self.cfg.review_limit <= 0:
             return wanted
-        room = self.cfg.review_limit - max(len(queue.must_answer()), 1) - reserved
+        room = self.cfg.review_limit - max(len(queue.must_answer(today)), 1) - reserved
         return max(min(wanted, room), 0)
 
     async def pick_scenes(
@@ -487,7 +491,7 @@ class Lessons:
     ) -> tuple[CardQueue, list[dict]]:
         """今回の場面カード (scene_cards 枚まで). 読みカードより先に枠を取る."""
         sq = CardQueue.load(self.cfg.scene_path(name))
-        n = self._card_room(queue, self.cfg.scene_cards)
+        n = self._card_room(queue, today, self.cfg.scene_cards)
         if n <= 0:
             return sq, []
         deck = await self.scene_deck(name, channel)
@@ -502,7 +506,7 @@ class Lessons:
         reserved: int = 0,
     ) -> tuple[CardQueue, list[dict]]:
         """今回の読みカード (reading_cards 枚まで、場面カードの残りの枠で)."""
-        n = self._card_room(queue, self.cfg.reading_cards, reserved)
+        n = self._card_room(queue, today, self.cfg.reading_cards, reserved)
         rq = CardQueue.load(self.cfg.reading_path(name))
         if n <= 0:
             return rq, []
@@ -536,6 +540,32 @@ class Lessons:
         if source is not None:
             args += ["--trip", str(source.path)]
         return await self._deck(args, scenes.parse_scenes, "場面カード")
+
+    async def refresh_wording(
+        self, queue: ReviewQueue, today: date, path: Path
+    ) -> None:
+        """出す前に、1 項目だけの問いの問い方を今のコースの言い方に直す (language-learning-audio #73,
+        #220): 保存した問い方は plan を作った時点のもので、その後コースが直っても古いままだった
+        («Sleep.» → «to sleep»). ``audiolesson questions`` が読めなければ保存したままにする."""
+        ids = [
+            k
+            for k, e in queue.entries.items()
+            if not e.bonus and e.items == [k] and e.tier(today) < 5
+        ]
+        if not ids:
+            return
+        args = ["questions", self.cfg.curriculum, "--known", self.cfg.known, "--ids", ",".join(ids)]
+        try:
+            rc, out, _ = await asyncio.wait_for(run_cli(self.cfg, args), timeout=60)
+            if rc != 0:
+                logging.warning(f"問い方を読めませんでした (rc={rc})")
+                return
+            fresh = json.loads(out)
+        except Exception as e:
+            logging.warning(f"問い方を読めませんでした ({type(e).__name__})")
+            return
+        if queue.refresh_wording(fresh if isinstance(fresh, dict) else {}):
+            queue.save(path)
 
     async def _deck(
         self, args: list[str], parse: Callable[[str], list[dict]], label: str

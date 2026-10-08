@@ -38,9 +38,6 @@ INTERVALS: dict[str, tuple[int, ...]] = {
     "shaky": (1, 3, 7),
     "ok": (1, 3, 7, 14, 30),
 }
-# 音声レッスンに入りきらなかった未解決項目 (plan.open_not_fitted) の問いを、1 回のレッスン生成ごとに
-# 何件まで翌日に出すか。レッスンの時間は使わず、言えたら閉じ、言えなければ新しい失敗として練習に入る
-OPEN_CONFIRM_PER_PLAN = 3
 # 聞いただけの文 (language-learning-audio #183 の bonus) の問いを、1 回の振り返りに何件まで出すか
 MAX_BONUS_PER_REVIEW = 2
 # これだけ期限を過ぎた問いは「言えなかった」と同じ優先度に上げる (新出が毎回あっても埋もれない)
@@ -92,6 +89,12 @@ class Entry:
         return tier
 
 
+def unaskable(entry: Entry) -> bool:
+    """問いに埋まっていないテンプレートの «{» «}» が残っている (language-learning-audio #73: «{hour}»).
+    次の plan か表示時の更新で言い直されるまで出さない."""
+    return any(c in text for text in (entry.prompt, entry.answer) for c in "{}")
+
+
 def key_for(items: list[str]) -> str:
     return "+".join(items)
 
@@ -109,15 +112,23 @@ class ReviewQueue:
         """キューに問いを足した最新のレッスン (直前に生成したレッスン)."""
         return max((e.source_lesson for e in self.entries.values()), default=0)
 
-    def must_answer(self) -> list[str]:
-        """直前のレッスンの、まだ答えていない新出の問い. 通常の /lesson ではこれに全部
-        答えるまで次のレッスンを生成しない (答えがなければ音声レッスン側は成功とみなすので、
-        新出だけは必ず確かめる)."""
+    def must_answer(self, today: date) -> list[str]:
+        """必ず出す問い: 直前のレッスンの、まだ答えていない新出の問いと、期限の来た未解決
+        (open) 項目の問い (language-learning-audio #220). 通常の /lesson ではこれに全部答えるまで
+        次のレッスンを生成しない (答えがなければ音声レッスン側は成功とみなすので、新出は必ず
+        確かめる. 未解決の項目は言えたと確かめるまで閉じないので、毎回確かめる).
+
+        未解決項目の問いは項目ごとに 1 件 (add_from_plan が open を付けた問い). 同じ日にもう一度
+        失敗した問いは期限が明日になるので、二度は出ない. 波括弧の残った問いは出せない (``unaskable``)."""
         latest = self.latest_lesson()
         return [
             k
             for k, e in self.entries.items()
-            if e.new and e.state == "unseen" and e.source_lesson == latest
+            if not unaskable(e)
+            and (
+                (e.new and e.state == "unseen" and e.source_lesson == latest)
+                or (e.open and e.tier(today) < 5)
+            )
         ]
 
     def drop_stale_new(self) -> list[str]:
@@ -135,7 +146,7 @@ class ReviewQueue:
         return stale
 
     def select(self, today: date, limit: int = 0) -> list[str]:
-        """今回の振り返りで出す問いのキー. 直前のレッスンの未回答の新出 (must_answer) は
+        """今回の振り返りで出す問いのキー. 必ず出す問い (must_answer: 直前のレッスンの未回答の新出と、期限の来た未解決項目) は
         limit を超えても全部、先頭に. limit > 0 なら残りを最大 limit 問まで、期限の来ている
         問いが足りなければ期限前の問いで埋める. limit = 0 なら期限の来ている問いすべて."""
 
@@ -152,8 +163,12 @@ class ReviewQueue:
                 e.last_reviewed or "",
             )  # 同じ tier では bonus が最後 (満席なら最初に外れる)
 
-        required = sorted(self.must_answer(), key=order)
+        required = sorted(self.must_answer(today), key=order)
         rest = [k for k in sorted(self.entries, key=order) if k not in required]
+        for k in rest:
+            if unaskable(self.entries[k]) and self.entries[k].tier(today) < 5:
+                logging.warning(f"振り返りの問いに {{…}} が残っているので出しません: {k}")
+        rest = [k for k in rest if not unaskable(self.entries[k])]
         bonus_seen = 0
         kept = []
         for k in rest:  # bonus は 1 回に MAX_BONUS_PER_REVIEW 件まで
@@ -168,7 +183,9 @@ class ReviewQueue:
         return required + rest[: max(0, limit - len(required))]
 
     def due_count(self, today: date) -> int:
-        return sum(1 for e in self.entries.values() if e.tier(today) < 5)
+        return sum(
+            1 for e in self.entries.values() if e.tier(today) < 5 and not unaskable(e)
+        )
 
     # ---- 更新する -------------------------------------------------------
 
@@ -228,13 +245,18 @@ class ReviewQueue:
             self.pending_reports.pop(lesson, None)
 
     def add_from_plan(self, plan: dict, today: date) -> int:
-        """生成したレッスンの問いを足す. 既存の問いは置き換えも削除もしない.
+        """生成したレッスンの問いを足す. 既存の問いは削除しない.
 
         新出項目の問いはすぐ (同じ日の次の /lesson でも) 出す. 復習した項目の問いは、その項目がまだ一度も
         キューに入っていない (Discord で確かめる機会がなかった) ときだけ足す.
-        足した数を返す."""
+        既存の問いを plan がもう一度出してきたら、問い方 (prompt / answer) だけ新しい方に直す
+        (期限・結果・source_lesson はそのまま: language-learning-audio #73).
+        未解決 (open) の項目 (plan の open_items と open_not_fitted) は、すべて振り返りで確かめる
+        (``_ask_open_items``). 足した数を返す."""
         new_ids = {i["id"] for i in plan.get("new_items", [])}
-        open_ids = set(plan.get("open_items") or [])
+        open_ids = set(plan.get("open_items") or []) | set(
+            plan.get("open_not_fitted") or []
+        )
         self.drop_stale_bonus(plan["lesson_number"])
         queued = {i for e in self.entries.values() if not e.bonus for i in e.items}
         added = 0
@@ -261,8 +283,9 @@ class ReviewQueue:
             key = key_for(items)
             is_open = bool(open_ids & set(items))
             if key in self.entries:
-                if is_open:
-                    self._bring_forward(self.entries[key], today)
+                entry = self.entries[key]
+                entry.prompt = q.get("prompt") or entry.prompt
+                entry.answer = q.get("answer") or entry.answer
                 continue
             is_new = bool(new_ids & set(items))
             if not is_new and not is_open and set(items) <= queued:
@@ -275,37 +298,59 @@ class ReviewQueue:
                 source_lesson=plan["lesson_number"],
                 new=is_new,
                 due=due,
-                open=is_open,
             )
             queued.update(items)
             added += 1
-        self._confirm_waiting_open(plan.get("open_not_fitted") or [], today)
+        if "open_items" in plan or "open_not_fitted" in plan:
+            self._ask_open_items(open_ids, today)
         return added
 
-    def _confirm_waiting_open(self, waiting: list[str], today: date) -> None:
-        """レッスンに入りきらなかった未解決項目も、振り返りで一度確かめる (language-learning-audio
-        #149). 言えれば音声レッスン側で閉じ、レッスンの時間はかからない. 言えなければ新しい
-        失敗になる. plan の順 (最後に練習してから長いものが先) に、項目ごとに既存の問いを 1 件
-        (項目の少ないものを優先)、1 回の生成で ``OPEN_CONFIRM_PER_PLAN`` 件まで. 問いがまだない
-        項目は聞けないので飛ばす. すでに明日に引き寄せ済みの問いは数えない."""
-        tomorrow = (today + timedelta(days=1)).isoformat()
-        taken: set[str] = set()
-        for item in waiting:
-            if len(taken) >= OPEN_CONFIRM_PER_PLAN:
-                break
+    def refresh_wording(self, fresh: dict[str, dict]) -> int:
+        """1 項目だけの問い (キーが項目 ID) のうち、古くなったものだけ今の言い方 (``fresh`` = {ID: {"prompt",
+        "answer", "cues"}}, audiolesson questions の出力) に置き換える. 古いのは (1) 聞けない問い (波括弧が残る)、
+        (2) 答えが今の答えと同じ (= 単語だけを聞く問い) で、問い方が今の言い方 (cues) のどれでもないもの.
+        1 項目をキーにした文の問い (答えが文) は、文で復習する原則 (§9) と plan の言い方 (#73) のまま残す.
+        期限・結果・source_lesson・open はそのまま. 直した数を返す."""
+        changed = 0
+        for key, now in fresh.items():
+            e = self.entries.get(key)
+            if e is None or e.bonus or e.items != [key] or not isinstance(now, dict):
+                continue
+            prompt, answer = now.get("prompt"), now.get("answer")
+            if not (isinstance(prompt, str) and isinstance(answer, str) and prompt and answer):
+                continue
+            cues = now.get("cues")
+            cues = [c for c in cues if isinstance(c, str)] if isinstance(cues, list) else []
+            # 聞けない問いは文の答えでも言い直す (そのままでは出せない. 普通は次の plan の B3 が先に直す).
+            # cues が無い (古い LLA) ときは、今の問い方を知らないので、聞けない問いだけ直す
+            stale_bare = bool(cues) and e.answer == answer and e.prompt not in cues
+            if not (unaskable(e) or stale_bare):
+                continue
+            if (e.prompt, e.answer) != (prompt, answer):
+                e.prompt, e.answer = prompt, answer
+                changed += 1
+        return changed
+
+    def _ask_open_items(self, open_ids: set[str], today: date) -> None:
+        """未解決の項目は、レッスンで練習したものも入りきらなかったものも、次の振り返りで一度確かめる
+        (language-learning-audio #149, #220). 言えれば音声レッスン側で閉じ、レッスンの時間はかからない.
+        言えなければ新しい失敗になる. 項目ごとに既存の問いを 1 件 (項目の少ないものを優先、同じなら新しい
+        レッスンのもの) 選んで open にし、期限を明日に引き寄せる. 閉じた項目の問いは open を外す.
+        問いがまだない項目は聞けない (plan が問いを持ってくるので、普通は足りている)."""
+        chosen: set[str] = set()
+        for item in sorted(open_ids):
             cands = [
                 (len(e.items), -e.source_lesson, k)
                 for k, e in self.entries.items()
-                if item in e.items
+                if item in e.items and not e.bonus
             ]
-            if not cands:
-                continue
-            key = min(cands)[2]
-            e = self.entries[key]
-            if key in taken or (e.open and e.due <= tomorrow):
-                continue
-            self._bring_forward(e, today)
-            taken.add(key)
+            if cands:
+                chosen.add(min(cands)[2])
+        for k, e in self.entries.items():
+            if k in chosen:
+                self._bring_forward(e, today)
+            else:
+                e.open = False  # 選ばれなかった問いと、閉じた項目の問いは open を外す (項目ごとに 1 件だけが open)
 
     @staticmethod
     def _bring_forward(entry: Entry, today: date) -> None:

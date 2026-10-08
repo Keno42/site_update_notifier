@@ -298,7 +298,7 @@ def review_note(queue: ReviewQueue, day: date, limit: int) -> str:
     if not pending:
         return ""
     # 直前のレッスンの新出は上限を超えても全部出る (ReviewQueue.select)
-    asked = max(len(queue.must_answer()), min(pending, limit)) if limit > 0 else pending
+    asked = max(len(queue.must_answer(day)), min(pending, limit)) if limit > 0 else pending
     return f"Discord 振り返り: 次回 {asked}問（確認待ち {pending}件）"
 
 
