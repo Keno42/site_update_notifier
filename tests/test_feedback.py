@@ -437,9 +437,7 @@ class FailureTests(unittest.TestCase):
             async def run():
                 view = FeedbackView(record, 1, submit)
                 view.answers.load = "right"
-                send = next(
-                    c for c in view.children if getattr(c, "label", "") == "送信"
-                )
+                send = next(c for c in view.children if getattr(c, "label", "") == "送信")
                 log = []
                 with self.assertLogs(level="ERROR"):
                     await send.callback(interaction(log))
