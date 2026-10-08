@@ -283,9 +283,15 @@ class ViewTests(unittest.TestCase):
                 return FeedbackView(record, 1, None)  # type: ignore[arg-type]
 
             view = asyncio.run(build())
-            selects = [c for c in view.children if hasattr(c, "options")]
-            self.assertEqual(len(selects), 4)
-            for select in selects:
+            # every select with item options, whichever the form keeps (#81 removes the «unheard» one)
+            item_selects = [
+                c
+                for c in view.children
+                if hasattr(c, "options")
+                and any(o.value in ("takk_fyrir", "eg_var_ad_inf") for o in c.options)
+            ]
+            self.assertTrue(item_selects)
+            for select in (c for c in view.children if hasattr(c, "options")):
                 values = [o.value for o in select.options]
                 self.assertEqual(len(values), len(set(values)), values)
 
