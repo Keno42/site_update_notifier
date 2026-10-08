@@ -196,6 +196,7 @@ class LessonConfig:
         hesitated: list[str] | None = None,
         recalled: list[str] | None = None,
         sooner: list[str] | None = None,
+        load: str | None = None,
     ) -> list[str]:
         """lesson を省くと最新のレッスンへの報告になる. 振り返りでは出題元のレッスンを
         必ず渡す (flush_reports). 迷った / 言えたも送る: 音声レッスン側は言えなかった・
@@ -211,6 +212,8 @@ class LessonConfig:
         ):
             if ids:
                 args += [flag, ",".join(ids)]
+        if load:
+            args += ["--load", load]
         return args
 
 
@@ -356,6 +359,9 @@ class Lessons:
         # 進行中の /lesson: 名前 → 始めた時刻 (time.monotonic()). 解放し損ねても、上限を過ぎたら
         # 止まった記録として捨てる (#82)
         self.busy: dict[str, float] = {}
+        # 進行中に届いたフィードバックの報告 (名前 → [(レッスン, 項目, 負荷)]). learner.json には鍵がないので、
+        # 生成と並べて走らせず、/lesson が終わってから送る (language-learning-audio #218)
+        self.deferred: dict[str, list[tuple[int, list[str], str | None]]] = {}
 
     def busy_limit(self) -> float:
         """/lesson の進行中でいられる上限 (秒): 振り返りの画面の待ち + 報告と生成 (それぞれ cfg.timeout_min が上限)."""
@@ -370,6 +376,34 @@ class Lessons:
             self.busy.pop(name, None)
             return False
         return True
+
+    async def release(self, name: str, channel: discord.abc.Messageable | None = None) -> None:
+        """/lesson の進行中を外す. 先に、進行中に届いたフィードバックの報告を送る (busy のまま送るので、
+        次の /lesson と並ばない. 正常な経路では run() が生成の前に送り済みで、ここは期限切れ・エラーの経路の
+        後始末). 送れなかった分は残し、次の機会に送り直す."""
+        try:
+            await self.flush_deferred(name, channel)
+        except Exception:
+            logging.exception("先送りしたフィードバックの報告に失敗しました")
+        finally:
+            self.busy.pop(name, None)
+
+    async def flush_deferred(self, name: str, channel: discord.abc.Messageable | None = None) -> None:
+        """進行中に届いたフィードバックの報告を送る. 送れなければ残し (次の機会に送り直す)、channel があれば知らせる:
+        即時の失敗と同じく、/lesson-feedback から送り直せば反映される."""
+        pending = self.deferred.pop(name, [])
+        for k, (lesson, ids, load) in enumerate(pending):
+            if not await self._send_feedback(name, lesson, ids, load):
+                self.deferred[name] = pending[k:] + self.deferred.get(name, [])
+                if channel is not None:
+                    try:
+                        await channel.send(
+                            "先送りしたフィードバックの報告が学習状態へまだ反映できていません"
+                            "（次の /lesson で送り直します。もう一度 /lesson-feedback から送っても反映されます）。"
+                        )
+                    except Exception:
+                        logging.exception("先送りの報告失敗の通知も送れませんでした")
+                return
 
     async def start(self, interaction: discord.Interaction, auto: bool = False) -> None:
         name = self.cfg.users.get(interaction.user.id)
@@ -397,6 +431,7 @@ class Lessons:
         self.busy[name] = time.monotonic()
         handed_to_view = False
         try:
+            await self.flush_deferred(name)  # 進行中の記録が捨てられて残った報告 (is_busy)
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
             today = self.today()
             path = self.cfg.pending_path(name)
@@ -413,7 +448,8 @@ class Lessons:
                 )
 
                 async def report_then_generate() -> None:
-                    # 前回届かなかった報告があれば、生成の前に送る
+                    # 進行中に届いたフィードバックと、前回届かなかった報告があれば、生成の前に送る
+                    await self.flush_deferred(name, channel)
                     if await self.flush_reports(channel, name, queue, path):
                         await self.generate_and_post(channel, name, auto=auto)
 
@@ -451,6 +487,8 @@ class Lessons:
 
             async def finish(generate: bool) -> None:
                 async def run() -> None:
+                    # 振り返りの間に届いたフィードバックの報告は、この生成に間に合うよう、busy のまま先に送る
+                    await self.flush_deferred(name, channel)
                     if not await self.flush_reports(channel, name, queue, path):
                         return
                     if generate:
@@ -471,7 +509,7 @@ class Lessons:
                         )
                     await self.guarded(channel, run())
                 finally:
-                    self.busy.pop(name, None)
+                    await self.release(name, channel)
 
             async def expire() -> None:
                 await finish(False)  # 答えた分だけ報告し、生成はしない
@@ -497,7 +535,7 @@ class Lessons:
             await self.guarded(channel, self.flush_reports(channel, name, queue, path))
         finally:
             if not handed_to_view:
-                self.busy.pop(name, None)
+                await self.release(name, channel)
 
     def _card_room(
         self, queue: ReviewQueue, today: date, wanted: int, reserved: int = 0
@@ -664,15 +702,37 @@ class Lessons:
             queue.save(path)
         return True
 
-    async def report_sooner(self, name: str, lesson: int, ids: list[str]) -> bool:
-        """フィードバックで「練習が足りなかった・覚えていない」と選んだ項目を、早めにもう一度出す依頼として
-        報告する (#81): 音声レッスン側で、間隔の半分以内にもう一度出る. 結果 (迷った・言えなかった) としては
-        数えない: 直後の自己申告は翌日の振り返りの結果ではなく、埋め込みの項目の判定や「報告済み」にも
-        触れない (language-learning-audio #222). 届いたか."""
-        args = self.cfg.report_args(name, [], lesson=lesson, sooner=ids)
+    async def report_feedback(
+        self, name: str, lesson: int, ids: list[str], load: str | None
+    ) -> bool:
+        """フィードバックの送信で選んだことを、1 回の report で音声レッスンへ報告する (language-learning-audio #218):
+        「練習が足りなかった・覚えていない」の項目は早めにもう一度出す依頼 (--sooner, #81. 結果 (迷った・言えなかった)
+        としては数えず、埋め込みの項目の判定や「報告済み」にも触れない. #222) で、負荷 (--load) はペースの入力.
+        負荷だけの報告も「報告済み」にしない. flush_reports には載せない: 自動モードや、振り返りがそのレッスンから
+        何も問わないときは、その道はそのレッスンを一度も報告しない.
+
+        /lesson が進行中なら送らずに取っておき、終わってから送る (learner.json に鍵はなく、生成と並べて走らせると
+        書き込みが食い違う). 受け付けたか (取っておいた分も True)."""
+        if not ids and not load:
+            return True
+        if self.is_busy(name):
+            self.deferred.setdefault(name, []).append((lesson, list(ids), load))
+            return True
+        # 送っている間も busy にする: その間に始まった /lesson (自動モードは振り返りなしで生成に進む) が、
+        # 送信中の report と並ばないように. 送信中に届いた分は release() が続けて送る
+        self.busy[name] = time.monotonic()
+        try:
+            return await self._send_feedback(name, lesson, ids, load)
+        finally:
+            await self.release(name)
+
+    async def _send_feedback(
+        self, name: str, lesson: int, ids: list[str], load: str | None
+    ) -> bool:
+        args = self.cfg.report_args(name, [], lesson=lesson, sooner=ids, load=load)
         rc, out, err = await run_cli(self.cfg, args)
         if rc != 0:
-            logging.error("report --sooner に失敗しました: %s", _tail(err or out))
+            logging.error("フィードバックの report に失敗しました: %s", _tail(err or out))
         return rc == 0
 
     async def generate_and_post(
@@ -922,7 +982,7 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
         return None
     lessons = Lessons(cfg)
     fb = feedback.Feedback(
-        cfg.users, cfg.user_dir, cfg.channel_id, report_sooner=lessons.report_sooner
+        cfg.users, cfg.user_dir, cfg.channel_id, report_feedback=lessons.report_feedback
     )
     feedback.FeedbackButton.handler = fb
     client.add_dynamic_items(feedback.FeedbackButton)
