@@ -889,6 +889,25 @@ class GenerationTests(unittest.TestCase):
             ):
                 self.assertEqual(a[key], b[key], key)
 
+    def test_report_feedback_stores_the_load_through_the_real_cli_without_marking_the_lesson_reported(self):
+        """language-learning-audio #218 (part a): ``report --load`` rates the lesson; a load alone does not mark it reported."""
+        from tests.test_lesson import FakeChannel
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(
+                root=Path(td), users={1: "yuki"}, minutes=3,
+                extra_args=["--provider", "stub"],
+            )  # fmt: skip
+            lessons = Lessons(cfg)
+            asyncio.run(lessons.generate_and_post(FakeChannel(), "yuki"))
+            path = cfg.learner_path("yuki")
+            before = json.loads(path.read_text("utf-8"))
+            self.assertTrue(asyncio.run(lessons.report_feedback("yuki", 1, [], "heavy")))
+            after = json.loads(path.read_text("utf-8"))
+            self.assertEqual(after["lessons"][0]["load"], "heavy")
+            self.assertEqual(after["reported"], before["reported"], "the lesson is not marked reported")
+            self.assertEqual(after["items"], before["items"], "no item changed")
+
 
 if __name__ == "__main__":
     unittest.main()
