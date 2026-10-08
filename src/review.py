@@ -18,6 +18,13 @@ from typing import Awaitable, Callable
 import discord
 
 from . import reading, scenes
+from .interaction import (
+    RATE_FAILED,
+    SHOW_FAILED,
+    STALE_RATING,
+    answers_on_failure,
+    screen_step,
+)
 from .cards import CardQueue
 from .review_queue import Entry, ReviewQueue
 
@@ -347,7 +354,11 @@ class ReviewView(discord.ui.View):
                 button: discord.ui.Button = discord.ui.Button(
                     label=RESULTS[result], style=style
                 )
-                button.callback = self._rate_callback(result)  # type: ignore[method-assign]
+                # 評価ボタンは、見せた問いに結びつける: 画面の更新に失敗して問いを別のメッセージで出し直すと
+                # 古いメッセージのボタンも動くので、進んだ後の問いを古いボタンで評価しないため (#80 review)
+                button.callback = self._rate_callback(  # type: ignore[method-assign]
+                    result, len(self.session.results)
+                )
                 self.add_item(button)
         else:
             reveal: discord.ui.Button = discord.ui.Button(
@@ -362,6 +373,7 @@ class ReviewView(discord.ui.View):
             listen.callback = self._speak  # type: ignore[method-assign]
             self.add_item(listen)
 
+    @answers_on_failure(SHOW_FAILED)
     async def _reveal(self, interaction: discord.Interaction) -> None:
         if self.is_finished() or self.session.done:
             return
@@ -371,6 +383,7 @@ class ReviewView(discord.ui.View):
             view=self,
         )
 
+    @answers_on_failure(SHOW_FAILED)
     async def _speak(self, interaction: discord.Interaction) -> None:
         """今のカードの音声を、押した本人にだけ mp3 で送る. 振り返りは進めない."""
         card = self._speak_target()
@@ -395,25 +408,44 @@ class ReviewView(discord.ui.View):
         return True
 
     def _rate_callback(
-        self, result: str
+        self, result: str, step: int
     ) -> Callable[[discord.Interaction], Awaitable[None]]:
+        @answers_on_failure(RATE_FAILED)
         async def callback(interaction: discord.Interaction) -> None:
             if self.is_finished():
                 return
+            if len(self.session.results) != step:
+                # この問いはもう評価済み (古いメッセージのボタン): 今の問いを評価してしまわない
+                await interaction.response.send_message(STALE_RATING, ephemeral=True)
+                return
+            # 記録 (失敗なら RATE_FAILED: ボタンはそのまま押し直せる)
             self.session.rate(result)
+            # ここから先は画面だけ: 失敗しても評価は記録済み
             if not self.session.done:
                 self._show(revealed=False)
-                await interaction.response.edit_message(
-                    content=self.session.render(speak=self.speak is not None),
-                    view=self,
+                content = self.session.render(speak=self.speak is not None)
+
+                async def again() -> None:
+                    # 古いメッセージのボタンは残る (評価ボタンは見せた問いに結びついているので、押しても評価しない):
+                    # 今の問いを新しいメッセージで出し直し、続きはそこから
+                    self.message = await interaction.followup.send(  # type: ignore[assignment]
+                        content=content, view=self, wait=True
+                    )
+
+                await screen_step(
+                    lambda: interaction.response.edit_message(
+                        content=content, view=self
+                    ),
+                    again,
                 )
                 return
             self.stop()
-            await interaction.response.edit_message(
-                content=self.session.summary() + "\n\n次のレッスンを生成しています…",
-                view=None,
+            summary = self.session.summary() + "\n\n次のレッスンを生成しています…"
+            await screen_step(
+                lambda: interaction.response.edit_message(content=summary, view=None),
+                lambda: interaction.followup.send(summary),
             )
-            await self.finish(True)
+            await self.finish(True)  # 画面の更新が失敗しても、報告と生成は止めない
 
         return callback
 

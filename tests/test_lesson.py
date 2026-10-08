@@ -24,6 +24,7 @@ from src.lesson import (
     run_cli,
     setup,
 )
+from src.interaction import STALE_RATING
 from src.review import ReviewSession, ReviewView
 from src.review_queue import Entry
 from src.review_queue import ReviewQueue
@@ -213,6 +214,107 @@ class ViewTests(unittest.TestCase):
         self.assertIn("3/3問に回答", its[5].edits[0][0])
         self.assertIsNone(its[5].edits[0][1], "buttons removed at the end")
         self.assertEqual(its[6].edits, [], "a tap after the end is ignored")
+
+    def test_a_failed_screen_update_after_a_rating_keeps_the_review_going(self):
+        """#80 review: the rating is recorded before the screen is updated. If the update fails (an expired token) the next
+        question is sent again as a new message with working buttons, and on the last one the report and the lesson still run.
+        """
+
+        async def scenario(td):
+            finished, sent = [], []
+
+            async def finish(generate):
+                finished.append(generate)
+
+            async def expire():
+                finished.append("expired")
+
+            session = session_on(td)
+            view = ReviewView(session, 1, finish, expire)
+
+            def broken(it):
+                async def edit_message(**kw):
+                    raise RuntimeError("Unknown interaction")
+
+                it.response.edit_message = edit_message
+
+                class Followup:
+                    async def send(self, content=None, view=None, wait=False, **kw):
+                        sent.append((content, view))
+                        return SimpleNamespace(edit=None)
+
+                it.followup = Followup()
+                return it
+
+            async def tap(label):
+                it = broken(FakeInteraction(1))
+                buttons = {b.label: b for b in view.children}
+                await buttons[label].callback(it)
+
+            with self.assertLogs(level="ERROR"):
+                for label in [
+                    "答えを見る",
+                    "言えた",
+                    "答えを見る",
+                    "言えた",
+                    "答えを見る",
+                    "言えた",
+                ]:
+                    await tap(label)
+            return finished, sent, view, session
+
+        with tempfile.TemporaryDirectory() as td:
+            finished, sent, view, session = asyncio.run(scenario(td))
+        self.assertEqual(
+            finished, [True], "the last answer still reports and generates"
+        )
+        self.assertTrue(
+            any(v is view and "2/3" in c for c, v in sent),
+            "the next question comes again, with buttons",
+        )
+        self.assertEqual(len(session.results), 3, "every rating was recorded")
+        self.assertIsNotNone(view.message)
+
+    def test_an_old_messages_rating_button_does_not_rate_the_next_question(self):
+        """#80 review: after a failed screen update the question is sent again as a
+        new message, and the old message's buttons still dispatch. A tap on the old
+        rating button must not record the question the learner has not seen."""
+
+        async def scenario(td):
+            async def noop(generate=None):
+                return None
+
+            session = session_on(td)
+            view = ReviewView(session, 1, noop, noop)
+
+            def broken(it):
+                async def edit_message(**kw):
+                    raise RuntimeError("Unknown interaction")
+
+                it.response.edit_message = edit_message
+
+                class Followup:
+                    async def send(self, content=None, view=None, wait=False, **kw):
+                        return SimpleNamespace(edit=None)
+
+                it.followup = Followup()
+                return it
+
+            reveal = next(b for b in view.children if b.label == "答えを見る")
+            await reveal.callback(FakeInteraction(1))
+            # the rating buttons of question 1
+            old = {b.label: b for b in view.children}
+            with self.assertLogs(level="ERROR"):
+                await old["言えた"].callback(broken(FakeInteraction(1)))
+            self.assertEqual(len(session.results), 1)
+            again = FakeInteraction(1)
+            await old["言えなかった"].callback(again)  # the old message, now stale
+            return session, again
+
+        with tempfile.TemporaryDirectory() as td:
+            session, again = asyncio.run(scenario(td))
+        self.assertEqual(len(session.results), 1, "the stale tap rated nothing")
+        self.assertEqual(again.messages, [(STALE_RATING, True)])
 
     def test_only_the_owner_can_answer(self):
         finished, its, session = self.run_view([(2, "言えた")])

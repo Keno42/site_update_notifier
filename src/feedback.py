@@ -36,6 +36,15 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
+from .interaction import (
+    CHOOSE_FAILED,
+    NOTE_FAILED,
+    SEND_FAILED,
+    SEND_SCREEN_FAILED,
+    answers_on_failure,
+    screen_step,
+)
+
 SCHEMA = 1
 FEEDBACK_FILE = "lesson_feedback.jsonl"
 MANIFESTS = "lesson_manifests"
@@ -276,7 +285,15 @@ class Record:
         }
 
     def new_items(self) -> list[dict]:
-        return list(self.plan.get("new_items", []))
+        """今日の新出. 同じ id は 1 つ (埋め込みで聞いた後に新出としても導入された表現が 2 回載る
+        ことがある). 選択肢は value が重複すると Discord が拒否し、フォームが開かない (#78)."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for i in self.plan.get("new_items", []):
+            if i["id"] not in seen:
+                seen.add(i["id"])
+                out.append(i)
+        return out
 
     def candidates(self) -> list[dict]:
         """カードに出す候補 (MAX_CANDIDATES 件まで). 同じ場面の繰り返し (古いレッスンの
@@ -528,6 +545,7 @@ class FeedbackView(discord.ui.View):
             max_values=max_values or len(options),
         )
 
+        @answers_on_failure(CHOOSE_FAILED)
         async def callback(interaction: discord.Interaction) -> None:
             value: Any = list(select.values)
             if attr == "load":
@@ -546,20 +564,26 @@ class FeedbackView(discord.ui.View):
             return False
         return True
 
+    @answers_on_failure(NOTE_FAILED)
     async def _note(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(NoteModal(self))
 
+    @answers_on_failure(SEND_FAILED)
     async def _send(self, interaction: discord.Interaction) -> None:
         if self.answers.load is None:
             await interaction.response.send_message(
                 "「今日の量・難しさ」を選んでから送信してください。", ephemeral=True
             )
             return
-        await self.submit(self.answers)
+        await self.submit(self.answers)  # 記録 (失敗なら SEND_FAILED: まだ押し直せる)
         self.stop()
-        await interaction.response.edit_message(
-            content=f"{self.record.title} のフィードバックを記録しました。ありがとうございます。",
-            view=None,
+        # ここから先は画面だけ: 失敗しても記録は済んでいる
+        await screen_step(
+            lambda: interaction.response.edit_message(
+                content=f"{self.record.title} のフィードバックを記録しました。ありがとうございます。",
+                view=None,
+            ),
+            lambda: interaction.followup.send(SEND_SCREEN_FAILED, ephemeral=True),
         )
 
 
@@ -622,6 +646,7 @@ class Feedback:
             return None
         return name, ledger, record
 
+    @answers_on_failure()
     async def open_form(
         self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
@@ -639,6 +664,7 @@ class Feedback:
             ephemeral=True,
         )
 
+    @answers_on_failure()
     async def report(
         self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
@@ -650,6 +676,7 @@ class Feedback:
             report_text(record, ledger.events(record.id), ledger.siblings(record))
         )
 
+    @answers_on_failure()
     async def export(
         self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
@@ -699,6 +726,7 @@ class FeedbackButton(
     ) -> "FeedbackButton":
         return cls(int(match["owner"]), match["manifest"])
 
+    @answers_on_failure()
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.owner:
             await interaction.response.send_message(
