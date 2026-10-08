@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import discord
 from discord import app_commands
 
-from . import feedback, levers, reading, scenes, speech, trip, version, weekly
+from . import feedback, levers, newlist, reading, scenes, speech, trip, version, weekly
 from .cards import CardQueue
 from .review import ReviewSession, ReviewView, log_review, review_note
 from .review_queue import ReviewQueue
@@ -612,6 +612,10 @@ class Lessons:
     async def generate_and_post(
         self, channel: discord.abc.Messageable, name: str, auto: bool = False
     ) -> None:
+        # 前のレッスンの新出表現の一覧を、フィードバックが来ないまま次の生成が始まるなら、ここで出す (#79)
+        await newlist.release(
+            channel, newlist.PendingLists(self.cfg.user_dir(name)).take_all()
+        )
         lever_args, lever_warning = levers.from_topic(channel)
         if lever_warning:
             await channel.send(lever_warning)
@@ -764,6 +768,26 @@ class Lessons:
             return None
         return d.name
 
+    def _keep_new_list(
+        self, owner: int, manifest: str, plan: dict, channel: Any, sent: Any
+    ) -> None:
+        """新出表現の一覧 (#79) は、フィードバックを送ったとき (送らなければ次の生成の始まり) に、この投稿への
+        返信として出す: 聞く前に読まないため. 出すまで、ユーザーのディレクトリに置いておく."""
+        name = self.cfg.users.get(owner)
+        message_id = getattr(sent, "id", None)
+        if name is None or message_id is None:
+            return
+        try:
+            newlist.PendingLists(self.cfg.user_dir(name)).add(
+                manifest,
+                getattr(channel, "id", 0),
+                message_id,
+                newlist.list_text(plan["lesson_number"], plan.get("new_items", [])),
+                plan["lesson_number"],
+            )
+        except OSError:
+            logging.exception("新出表現の一覧を保存できませんでした")
+
     async def post(
         self,
         channel: discord.abc.Messageable,
@@ -802,11 +826,10 @@ class Lessons:
         transcript = stem.with_suffix(".transcript.md")
         if transcript.exists():
             files.append(discord.File(transcript))
-        new = "、".join(i["target"] or i["id"] for i in plan.get("new_items", []))
         reviewed = len(plan.get("reviewed_items", []))
         minutes = plan.get("summary", {}).get("duration_s", 0) / 60
         text = (
-            f"**レッスン {n}**（約{minutes:.0f}分）\n新出: {new or 'なし'}\n"
+            f"**レッスン {n}**（約{minutes:.0f}分）\n{newlist.count_text(plan)}\n"
             f"復習: {reviewed}項目" + (f"\n{review}" if review else "") + audio_note
         )
         if guide:
@@ -814,7 +837,8 @@ class Lessons:
         try:
             if manifest:
                 view = feedback.feedback_view(owner, manifest)
-                await channel.send(text, files=files, view=view)
+                sent = await channel.send(text, files=files, view=view)
+                self._keep_new_list(owner, manifest, plan, channel, sent)
             else:
                 await channel.send(text, files=files)
         finally:
