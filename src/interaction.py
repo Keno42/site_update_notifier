@@ -13,10 +13,20 @@ import discord
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
-FAILED = "操作を完了できませんでした（記録は残っています）。もう一度押すか、コマンドをもう一度使ってください。"
+# 失敗の通知は、その場で本当のことだけを言う: 記録に触れない操作 (フォームを開く・表示する) と、
+# 記録を書く操作 (評価・送信) では言えることが違う (#80 review).
+FAILED = "操作を完了できませんでした（レッスンの記録は残っています）。もう一度押すか、コマンドをもう一度使ってください。"
+SHOW_FAILED = "表示できませんでした。もう一度押してください。"
+RATE_FAILED = (
+    "この問いの評価を記録できなかった可能性があります。もう一度押してください。"
+)
+SEND_FAILED = "フィードバックを記録できませんでした。もう一度「送信」を押してください。"
+CHOOSE_FAILED = "選択を受け付けられませんでした。もう一度選んでください。"
 
 
 def _interaction(args: tuple, kwargs: dict) -> discord.Interaction | None:
+    # テスト用の代役 (SimpleNamespace) も受けるので、型ではなく response を持つかで見る. 包んでいるメソッドの
+    # self (View, Feedback) は response を持たない: View に response という属性を足さないこと.
     for a in (*args, *kwargs.values()):
         if isinstance(a, discord.Interaction) or hasattr(a, "response"):
             return a

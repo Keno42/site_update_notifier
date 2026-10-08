@@ -18,7 +18,7 @@ from typing import Awaitable, Callable
 import discord
 
 from . import reading, scenes
-from .interaction import answers_on_failure
+from .interaction import RATE_FAILED, SHOW_FAILED, answers_on_failure
 from .cards import CardQueue
 from .review_queue import Entry, ReviewQueue
 
@@ -363,7 +363,7 @@ class ReviewView(discord.ui.View):
             listen.callback = self._speak  # type: ignore[method-assign]
             self.add_item(listen)
 
-    @answers_on_failure()
+    @answers_on_failure(SHOW_FAILED)
     async def _reveal(self, interaction: discord.Interaction) -> None:
         if self.is_finished() or self.session.done:
             return
@@ -373,7 +373,7 @@ class ReviewView(discord.ui.View):
             view=self,
         )
 
-    @answers_on_failure()
+    @answers_on_failure(SHOW_FAILED)
     async def _speak(self, interaction: discord.Interaction) -> None:
         """今のカードの音声を、押した本人にだけ mp3 で送る. 振り返りは進めない."""
         card = self._speak_target()
@@ -400,7 +400,7 @@ class ReviewView(discord.ui.View):
     def _rate_callback(
         self, result: str
     ) -> Callable[[discord.Interaction], Awaitable[None]]:
-        @answers_on_failure()
+        @answers_on_failure(RATE_FAILED)
         async def callback(interaction: discord.Interaction) -> None:
             if self.is_finished():
                 return

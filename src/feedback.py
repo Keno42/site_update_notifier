@@ -36,7 +36,11 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
-from .interaction import answers_on_failure
+from .interaction import (
+    CHOOSE_FAILED,
+    SEND_FAILED,
+    answers_on_failure,
+)
 
 SCHEMA = 1
 FEEDBACK_FILE = "lesson_feedback.jsonl"
@@ -538,6 +542,7 @@ class FeedbackView(discord.ui.View):
             max_values=max_values or len(options),
         )
 
+        @answers_on_failure(CHOOSE_FAILED)
         async def callback(interaction: discord.Interaction) -> None:
             value: Any = list(select.values)
             if attr == "load":
@@ -556,9 +561,11 @@ class FeedbackView(discord.ui.View):
             return False
         return True
 
+    @answers_on_failure(CHOOSE_FAILED)
     async def _note(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(NoteModal(self))
 
+    @answers_on_failure(SEND_FAILED)
     async def _send(self, interaction: discord.Interaction) -> None:
         if self.answers.load is None:
             await interaction.response.send_message(
