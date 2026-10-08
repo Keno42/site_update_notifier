@@ -133,9 +133,7 @@ class NewListTests(unittest.TestCase):
             self.assertEqual(
                 len(Ledger(env.cfg.user_dir("yuki")).events(env.manifest)), 1
             )
-            self.assertIn(
-                "記録しました", log[-1][1], "the learner is told it was recorded"
-            )
+            self.assertIn("記録しました", log[-1][1], "the learner is told it was recorded")
 
     def test_without_feedback_the_list_comes_when_the_next_lesson_starts_generating(
         self,
