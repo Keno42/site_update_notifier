@@ -437,7 +437,7 @@ class StrugglingItemsTests(unittest.TestCase):
                 "nothing selected is no complaint, not «enough»",
             )
 
-    def test_selected_items_are_reported_as_hesitated_and_a_failure_is_said(self):
+    def test_selected_items_are_requested_sooner_and_a_failure_is_said(self):
         reported = []
 
         for ok in (True, False):
@@ -509,13 +509,14 @@ class StrugglingItemsTests(unittest.TestCase):
             asyncio.run(run())
             self.assertEqual(calls, [])
 
-    def test_the_bot_reports_the_selected_items_with_the_lesson_and_hesitated(self):
+    def test_the_bot_asks_for_the_selected_items_sooner_not_as_an_outcome(self):
         cfg = LessonConfig(root=Path("/nonexistent"), users={1: "yuki"})
-        args = cfg.report_args("yuki", [], lesson=12, hesitated=["a", "b"])
+        args = cfg.report_args("yuki", [], lesson=12, sooner=["a", "b"])
         self.assertEqual(args[0], "report")
         self.assertEqual(args[args.index("--lesson") + 1], "12")
-        self.assertEqual(args[args.index("--hesitated") + 1], "a,b")
-        self.assertNotIn("--failed", args)
+        self.assertEqual(args[args.index("--sooner") + 1], "a,b")
+        for outcome in ("--failed", "--hesitated", "--recalled"):
+            self.assertNotIn(outcome, args, "a request, not an outcome (#222)")
 
 
 class FailureTests(unittest.TestCase):

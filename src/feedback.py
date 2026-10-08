@@ -614,8 +614,8 @@ class Feedback:
         self.user_dir = user_dir
         self.channel_id = channel_id
         self.now = now
-        # 「練習が足りなかった・覚えていない」と選んだ項目を、迷った扱いで音声レッスンへ報告する
-        # (早めに、半分の間隔でもう一度. 降格はしない, language-learning-audio #212). (名前, レッスン番号, 項目) → 届いたか
+        # 「練習が足りなかった・覚えていない」と選んだ項目を、早めにもう一度出す依頼として音声レッスンへ報告する
+        # (`report --sooner`: 間隔の半分以内に。結果としては数えない, language-learning-audio #222). (名前, レッスン番号, 項目) → 届いたか
         self.report_sooner = report_sooner
 
     def ledger(self, name: str) -> Ledger:
@@ -663,7 +663,7 @@ class Feedback:
         record: Record,
         answers: Answers,
     ) -> None:
-        """記録できた後で、選んだ項目を迷った扱いで報告する. 失敗してもフィードバックの記録は成功のまま:
+        """記録できた後で、選んだ項目を「早めにもう一度」の依頼として報告する. 失敗してもフィードバックの記録は成功のまま:
         失敗は黙らずチャンネルに知らせる (選んだ項目は記録に残っているので、あとから送り直せる)."""
         if not answers.sooner or self.report_sooner is None:
             return

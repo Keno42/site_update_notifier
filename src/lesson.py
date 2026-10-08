@@ -195,6 +195,7 @@ class LessonConfig:
         lesson: int | None = None,
         hesitated: list[str] | None = None,
         recalled: list[str] | None = None,
+        sooner: list[str] | None = None,
     ) -> list[str]:
         """lesson を省くと最新のレッスンへの報告になる. 振り返りでは出題元のレッスンを
         必ず渡す (flush_reports). 迷った / 言えたも送る: 音声レッスン側は言えなかった・
@@ -206,6 +207,7 @@ class LessonConfig:
             ("--failed", failed),
             ("--hesitated", hesitated),
             ("--recalled", recalled),
+            ("--sooner", sooner),
         ):
             if ids:
                 args += [flag, ",".join(ids)]
@@ -610,12 +612,14 @@ class Lessons:
         return True
 
     async def report_sooner(self, name: str, lesson: int, ids: list[str]) -> bool:
-        """フィードバックで「練習が足りなかった・覚えていない」と選んだ項目を、迷った扱いで報告する (#81):
-        音声レッスン側で早めに (半分の間隔で) もう一度出る. 届いたか."""
-        args = self.cfg.report_args(name, [], lesson=lesson, hesitated=ids)
+        """フィードバックで「練習が足りなかった・覚えていない」と選んだ項目を、早めにもう一度出す依頼として
+        報告する (#81): 音声レッスン側で、間隔の半分以内にもう一度出る. 結果 (迷った・言えなかった) としては
+        数えない: 直後の自己申告は翌日の振り返りの結果ではなく、埋め込みの項目の判定や「報告済み」にも
+        触れない (language-learning-audio #222). 届いたか."""
+        args = self.cfg.report_args(name, [], lesson=lesson, sooner=ids)
         rc, out, err = await run_cli(self.cfg, args)
         if rc != 0:
-            logging.error("report --hesitated に失敗しました: %s", _tail(err or out))
+            logging.error("report --sooner に失敗しました: %s", _tail(err or out))
         return rc == 0
 
     async def generate_and_post(
