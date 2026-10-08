@@ -654,7 +654,7 @@ class EndToEndTests(unittest.TestCase):
 
             asyncio.run(review())
             self.assertIn("レッスン 2", channel.sent[-1][0])
-            self.assertEqual(lessons.busy, set())
+            self.assertEqual(lessons.busy, {})
             queue = ReviewQueue.load(cfg.pending_path("yuki"), day["today"])
             failed = [e for e in queue.entries.values() if e.state == "failed"]
             self.assertEqual(len(failed), 1)
@@ -921,6 +921,62 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(sorted((Path(td) / "tts-cache").iterdir()), clips)
             self.assertEqual(list(cfg.work_dir("a").iterdir()), [])
 
+    def _review_started(self, td, lessons_cls=Lessons):
+        """Lesson 1 posted, the next day's /lesson started: the review is on screen, busy is held."""
+        cfg = self.config(td, review_limit=2)
+        day = {"today": D}
+        lessons = lessons_cls(cfg, today=lambda: day["today"])
+        channel = FakeChannel()
+        asyncio.run(lessons.generate_and_post(channel, "yuki"))
+        day["today"] = D + timedelta(days=1)
+        replies = []
+        asyncio.run(lessons.start(self.interaction(channel, replies)))
+        self.assertEqual(set(lessons.busy), {"yuki"})
+        return lessons, channel, replies[0][1]
+
+    def test_finish_releases_busy_even_when_the_timing_record_raises(self):
+        """#82: the log is an aid. A failure in it must not stop the report and the next lesson, nor keep «in progress»."""
+        from src.review import ReviewSession
+
+        with tempfile.TemporaryDirectory() as td:
+            lessons, channel, view = self._review_started(td)
+            before = len(channel.sent)
+            with mock.patch.object(ReviewSession, "timing_record", side_effect=ValueError("boom")):
+                asyncio.run(view.finish(True))
+            self.assertEqual(lessons.busy, {})
+            self.assertGreater(len(channel.sent), before, "the next lesson is still generated")
+
+    def test_a_stale_busy_entry_does_not_block_lesson_but_a_fresh_one_does(self):
+        import time as _time
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td, review_limit=2)
+            lessons = Lessons(cfg)
+            channel = FakeChannel()
+            replies = []
+            refused = []
+
+            class Response:
+                async def send_message(self, content, ephemeral=False, view=None):
+                    refused.append(content)
+
+            def interaction():
+                it = self.interaction(channel, replies)
+                it.response = Response()
+                return it
+
+            lessons.busy["yuki"] = _time.monotonic()
+            asyncio.run(lessons.start(interaction()))
+            self.assertEqual(refused, ["前の /lesson がまだ進行中です。"])
+            self.assertIn("yuki", lessons.busy)
+
+            lessons.busy["yuki"] = _time.monotonic() - lessons.busy_limit() - 1
+            with self.assertLogs(level="WARNING") as logs:
+                asyncio.run(lessons.start(interaction()))
+            self.assertEqual(len(refused), 2, "the stale entry let /lesson go on")
+            self.assertNotEqual(refused[1], refused[0])
+            self.assertTrue(any("進行中の記録を捨てます" in m for m in logs.output))
+
     def test_auto_skips_review_and_self_report(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = LessonConfig(
@@ -964,7 +1020,7 @@ class EndToEndTests(unittest.TestCase):
                 .with_name("pending_review.json.v1.bak")
                 .exists()
             )
-            self.assertEqual(lessons.busy, set())
+            self.assertEqual(lessons.busy, {})
 
 
 if __name__ == "__main__":

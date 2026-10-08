@@ -34,7 +34,7 @@ from discord import app_commands
 
 from . import feedback, levers, newlist, reading, scenes, speech, trip, version, weekly
 from .cards import CardQueue
-from .review import ReviewSession, ReviewView, log_review, review_note
+from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, review_note
 from .review_queue import ReviewQueue
 
 LLA_DIR = (
@@ -353,7 +353,23 @@ class Lessons:
     ) -> None:
         self.cfg = cfg
         self.today = today
-        self.busy: set[str] = set()
+        # 進行中の /lesson: 名前 → 始めた時刻 (time.monotonic()). 解放し損ねても、上限を過ぎたら
+        # 止まった記録として捨てる (#82)
+        self.busy: dict[str, float] = {}
+
+    def busy_limit(self) -> float:
+        """/lesson の進行中でいられる上限 (秒): 振り返りの画面の待ち + 報告と生成 (それぞれ cfg.timeout_min が上限)."""
+        return VIEW_TIMEOUT + 2 * self.cfg.timeout_min * 60
+
+    def is_busy(self, name: str) -> bool:
+        started = self.busy.get(name)
+        if started is None:
+            return False
+        if time.monotonic() - started > self.busy_limit():
+            logging.warning(f"{name} の /lesson が上限を過ぎても終わっていないので、進行中の記録を捨てます")
+            self.busy.pop(name, None)
+            return False
+        return True
 
     async def start(self, interaction: discord.Interaction, auto: bool = False) -> None:
         name = self.cfg.users.get(interaction.user.id)
@@ -367,7 +383,7 @@ class Lessons:
                 f"<#{self.cfg.channel_id}> で実行してください。", ephemeral=True
             )
             return
-        if name in self.busy:
+        if self.is_busy(name):
             await interaction.response.send_message(
                 "前の /lesson がまだ進行中です。", ephemeral=True
             )
@@ -378,7 +394,7 @@ class Lessons:
                 "このチャンネルには投稿できません。", ephemeral=True
             )
             return
-        self.busy.add(name)
+        self.busy[name] = time.monotonic()
         handed_to_view = False
         try:
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
@@ -434,13 +450,6 @@ class Lessons:
             )
 
             async def finish(generate: bool) -> None:
-                log_review(
-                    self.cfg.user_dir(name),
-                    session.timing_record(
-                        datetime.now().astimezone(), finished=session.done
-                    ),
-                )
-
                 async def run() -> None:
                     if not await self.flush_reports(channel, name, queue, path):
                         return
@@ -448,9 +457,21 @@ class Lessons:
                         await self.generate_and_post(channel, name)
 
                 try:
+                    try:
+                        # 所要時間の記録は補助: 失敗しても報告と生成は続け、busy は必ず外す (#82)
+                        log_review(
+                            self.cfg.user_dir(name),
+                            session.timing_record(
+                                datetime.now().astimezone(), finished=session.done
+                            ),
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            f"振り返りの所要時間を記録できませんでした ({type(e).__name__})"
+                        )
                     await self.guarded(channel, run())
                 finally:
-                    self.busy.discard(name)
+                    self.busy.pop(name, None)
 
             async def expire() -> None:
                 await finish(False)  # 答えた分だけ報告し、生成はしない
@@ -468,13 +489,15 @@ class Lessons:
                     session.render(speak=True), view=view
                 )
                 handed_to_view = True
+                # ここで例外なら view が busy を持ったまま (画面は出ている): view の timeout
+                # (expire → finish) か busy の上限が外す (#82)
                 view.message = await interaction.original_response()
             # 前回届かなかった報告があれば、振り返りの間に送り直す (同じ queue を使うので、
             # その間に答えた分と食い違わない)
             await self.guarded(channel, self.flush_reports(channel, name, queue, path))
         finally:
             if not handed_to_view:
-                self.busy.discard(name)
+                self.busy.pop(name, None)
 
     def _card_room(
         self, queue: ReviewQueue, today: date, wanted: int, reserved: int = 0
