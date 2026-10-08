@@ -185,7 +185,6 @@ class FormTests(unittest.TestCase):
             record = saved(Path(td)).load()
             assert record is not None
             answers = Answers(
-                unheard=["takk_fyrir"],
                 sooner=["eg_var_ad_inf"],
                 load="right",
                 concerns=["c1", "f:repetitive"],
@@ -203,7 +202,18 @@ class FormTests(unittest.TestCase):
             self.assertEqual(len(e["candidates_shown"]), 2)
             text = report_text(record, [e], ["lesson-012"])
             self.assertIn("負荷: ちょうどいい", text)
-            self.assertIn("出てこなかった・聞こえなかった: Takk fyrir {thing}.", text)
+            self.assertIn("練習が足りなかった・覚えていない: Ég var að {inf}.", text)
+            self.assertNotIn(
+                "出てこなかった",
+                text,
+                "the field is gone (#81) and the new events carry none",
+            )
+            # an event written by the old form still shows what it holds
+            old = dict(e, unheard=["takk_fyrir"])
+            self.assertIn(
+                "出てこなかった・聞こえなかった: Takk fyrir {thing}.",
+                report_text(record, [old], ["lesson-012"]),
+            )
             self.assertNotIn("使えそう", text)
             self.assertIn(
                 "当てはまった候補: 終わり近くに、ヒントなしで言う場面がなかった: Ég var að {inf}.",
@@ -308,15 +318,22 @@ class ViewTests(unittest.TestCase):
             async def run():
                 view = FeedbackView(record, 1, submit)
                 selects = [c for c in view.children if hasattr(c, "options")]
-                self.assertEqual(len(selects), 4)
+                self.assertEqual(
+                    len(selects), 3, "the item select, the load, the concerns"
+                )
+                self.assertFalse(
+                    [c for c in selects if "見かけなかった" in (c.placeholder or "")],
+                    "#81",
+                )
                 buttons = {c.label: c for c in view.children if hasattr(c, "label")}
                 log = []
                 self.assertFalse(await view.interaction_check(interaction(log, user=2)))
                 await buttons["送信"].callback(interaction(log))
                 self.assertEqual(submitted, [], "the load is required")
-                unheard, sooner, load, concerns = selects
-                unheard._values = ["takk_fyrir"]
-                await unheard.callback(interaction(log))
+                sooner, load, concerns = selects
+                self.assertIn("練習が足りなかった・覚えていない", sooner.placeholder)
+                sooner._values = ["takk_fyrir"]
+                await sooner.callback(interaction(log))
                 load._values = ["heavy"]
                 await load.callback(interaction(log))
                 concerns._values = ["c0", "f:pacing"]
@@ -332,8 +349,8 @@ class ViewTests(unittest.TestCase):
             view = asyncio.run(run())
             self.assertTrue(view.is_finished())
             (answers,) = submitted
-            self.assertEqual(answers.unheard, ["takk_fyrir"])
-            self.assertEqual(answers.sooner, [])
+            self.assertEqual(answers.unheard, [])
+            self.assertEqual(answers.sooner, ["takk_fyrir"])
             self.assertEqual(answers.load, "heavy")
             self.assertEqual(answers.concerns, ["c0", "f:pacing"])
             self.assertEqual(answers.note, "例文がほしい")
@@ -372,13 +389,133 @@ def submit_form(test, log, kw, load="right"):
 
     async def run():
         view = kw["view"]
-        select = [c for c in view.children if hasattr(c, "options")][2]
+        select = [c for c in view.children if hasattr(c, "options")][
+            1
+        ]  # sooner, load, concerns
         select._values = [load]
         await select.callback(interaction(log))
         send = [c for c in view.children if getattr(c, "label", "") == "送信"]
         await send[0].callback(interaction(log))
 
     return run()
+
+
+class StrugglingItemsTests(unittest.TestCase):
+    """#81: one item select that asks the negative side only («練習が足りなかった・覚えていない»); the answer is acted on."""
+
+    def test_the_event_keeps_the_old_schema_and_counts_a_mostly_selected_lesson_as_heavy(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            record = saved(Path(td)).load()
+            assert record is not None
+            self.assertEqual(len(record.new_items()), 2)
+            e = build_event(
+                record, Answers(sooner=["takk_fyrir"], load="right"), "yuki", NOW
+            )
+            self.assertEqual(e["unheard"], [], "one schema for the readers")
+            self.assertEqual(
+                (e["load"], e["load_effective"]),
+                ("right", "right"),
+                "1 of 2 is below the share (0.6)",
+            )
+            e = build_event(
+                record,
+                Answers(sooner=["takk_fyrir", "eg_var_ad_inf"], load="light"),
+                "yuki",
+                NOW,
+            )
+            self.assertEqual(
+                (e["load"], e["load_effective"]),
+                ("light", "heavy"),
+                "what the learner chose is kept",
+            )
+            e = build_event(record, Answers(load="light"), "yuki", NOW)
+            self.assertEqual(
+                e["load_effective"],
+                "light",
+                "nothing selected is no complaint, not «enough»",
+            )
+
+    def test_selected_items_are_reported_as_hesitated_and_a_failure_is_said(self):
+        reported = []
+
+        for ok in (True, False):
+            with tempfile.TemporaryDirectory() as td:
+                saved(Path(td))
+
+                async def report(name, lesson, ids):
+                    reported.append((name, lesson, ids))
+                    return ok
+
+                fb = Feedback(
+                    {1: "yuki"},
+                    lambda n: Path(td) / n,
+                    0,
+                    lambda: NOW,
+                    report_sooner=report,
+                )
+
+                async def run():
+                    log, said = [], []
+
+                    class Channel:
+                        async def send(self, content, **kw):
+                            said.append(content)
+
+                    i = interaction(log)
+                    i.channel = Channel()
+                    await fb.open_form(i)
+                    kw = log[-1][2]
+                    selects = [c for c in kw["view"].children if hasattr(c, "options")]
+                    selects[0]._values = ["eg_var_ad_inf", "eg_var_ad_inf"]
+                    await selects[0].callback(interaction(log))
+                    await submit_form(self, log, kw)
+                    return said
+
+                said = asyncio.run(run())
+                self.assertEqual(
+                    reported[-1], ("yuki", 12, ["eg_var_ad_inf"]), "once, no duplicates"
+                )
+                self.assertEqual(
+                    len(Ledger(Path(td) / "yuki").events("lesson-012")),
+                    1,
+                    "recorded either way",
+                )
+                self.assertEqual(bool(said), not ok, "a failed report is not silent")
+
+    def test_nothing_is_reported_when_nothing_is_selected(self):
+        with tempfile.TemporaryDirectory() as td:
+            saved(Path(td))
+            calls = []
+
+            async def report(name, lesson, ids):
+                calls.append(ids)
+                return True
+
+            fb = Feedback(
+                {1: "yuki"},
+                lambda n: Path(td) / n,
+                0,
+                lambda: NOW,
+                report_sooner=report,
+            )
+
+            async def run():
+                log = []
+                await fb.open_form(interaction(log))
+                await submit_form(self, log, log[-1][2])
+
+            asyncio.run(run())
+            self.assertEqual(calls, [])
+
+    def test_the_bot_reports_the_selected_items_with_the_lesson_and_hesitated(self):
+        cfg = LessonConfig(root=Path("/nonexistent"), users={1: "yuki"})
+        args = cfg.report_args("yuki", [], lesson=12, hesitated=["a", "b"])
+        self.assertEqual(args[0], "report")
+        self.assertEqual(args[args.index("--lesson") + 1], "12")
+        self.assertEqual(args[args.index("--hesitated") + 1], "a,b")
+        self.assertNotIn("--failed", args)
 
 
 class FailureTests(unittest.TestCase):

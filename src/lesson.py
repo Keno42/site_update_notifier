@@ -609,6 +609,15 @@ class Lessons:
             queue.save(path)
         return True
 
+    async def report_sooner(self, name: str, lesson: int, ids: list[str]) -> bool:
+        """フィードバックで「練習が足りなかった・覚えていない」と選んだ項目を、迷った扱いで報告する (#81):
+        音声レッスン側で早めに (半分の間隔で) もう一度出る. 届いたか."""
+        args = self.cfg.report_args(name, [], lesson=lesson, hesitated=ids)
+        rc, out, err = await run_cli(self.cfg, args)
+        if rc != 0:
+            logging.error("report --hesitated に失敗しました: %s", _tail(err or out))
+        return rc == 0
+
     async def generate_and_post(
         self, channel: discord.abc.Messageable, name: str, auto: bool = False
     ) -> None:
@@ -855,7 +864,9 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
         logging.info("LESSON_ROOT / LESSON_USERS が未設定のため /lesson は無効です。")
         return None
     lessons = Lessons(cfg)
-    fb = feedback.Feedback(cfg.users, cfg.user_dir, cfg.channel_id)
+    fb = feedback.Feedback(
+        cfg.users, cfg.user_dir, cfg.channel_id, report_sooner=lessons.report_sooner
+    )
     feedback.FeedbackButton.handler = fb
     client.add_dynamic_items(feedback.FeedbackButton)
     tree = app_commands.CommandTree(client)
