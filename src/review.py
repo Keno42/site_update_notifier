@@ -263,6 +263,9 @@ class ReviewSession:
         return "\n".join(lines)
 
 
+VIEW_TIMEOUT = 1800  # 秒: 振り返りの画面が操作を待つ上限. 過ぎると expire()
+
+
 def log_review(user_dir: Path, record: dict) -> None:
     """振り返りの所要時間を review_log.jsonl に 1 行足す. 書けなくても振り返りは止めない."""
     if not record.get("answered"):
@@ -320,7 +323,7 @@ class ReviewView(discord.ui.View):
             Callable[[dict], contextlib.AbstractAsyncContextManager[Path]] | None
         ) = None,
     ) -> None:
-        super().__init__(timeout=1800)
+        super().__init__(timeout=VIEW_TIMEOUT)
         self.session = session
         self.owner_id = owner_id
         self.finish = finish
