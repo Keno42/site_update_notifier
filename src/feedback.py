@@ -36,6 +36,7 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
+from . import newlist
 from .interaction import (
     CHOOSE_FAILED,
     NOTE_FAILED,
@@ -285,15 +286,8 @@ class Record:
         }
 
     def new_items(self) -> list[dict]:
-        """今日の新出. 同じ id は 1 つ (埋め込みで聞いた後に新出としても導入された表現が 2 回載る
-        ことがある). 選択肢は value が重複すると Discord が拒否し、フォームが開かない (#78)."""
-        seen: set[str] = set()
-        out: list[dict] = []
-        for i in self.plan.get("new_items", []):
-            if i["id"] not in seen:
-                seen.add(i["id"])
-                out.append(i)
-        return out
+        """今日の新出 (同じ id は 1 つ, #78)."""
+        return newlist.unique_items(list(self.plan.get("new_items", [])))
 
     def candidates(self) -> list[dict]:
         """カードに出す候補 (MAX_CANDIDATES 件まで). 同じ場面の繰り返し (古いレッスンの
@@ -657,6 +651,10 @@ class Feedback:
 
         async def submit(answers: Answers) -> None:
             ledger.append(build_event(record, answers, name, self.now()))
+            # 記録できた後に、新出表現の一覧を出す (#79). 出せなくても記録は成功のまま
+            pending = newlist.PendingLists(ledger.user_dir).take(record.dir.name)
+            if pending is not None and interaction.channel is not None:
+                await newlist.release(interaction.channel, [pending])
 
         await interaction.response.send_message(
             form_text(record),

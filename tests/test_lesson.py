@@ -469,6 +469,19 @@ class ProgressTests(unittest.TestCase):
         self.assertTrue(edits[2].startswith("生成できませんでした"))
 
 
+class FakeMessage:
+    """What ``channel.send`` returns: an id (the lesson post is replied to) and a no-op edit."""
+
+    def __init__(self, id):
+        self.id = id
+
+    async def edit(self, **kw):
+        pass
+
+    async def delete(self):
+        pass
+
+
 class FakeChannel(discord.abc.Messageable):
     def __init__(self):
         self.sent = []
@@ -486,11 +499,15 @@ class FakeChannel(discord.abc.Messageable):
 
         return Typing()
 
-    async def send(self, content=None, files=None, view=None):
+    id = 5
+
+    async def send(self, content=None, files=None, view=None, **kw):
         self.sent.append((content, [f.filename for f in files or []]))
         self.views.append(view)
+        self.references = getattr(self, "references", []) + [kw.get("reference")]
         for f in files or []:
             f.close()  # as discord.py does after sending
+        return FakeMessage(1000 + len(self.sent))
 
 
 @unittest.skipUnless((LLA_DIR / "audiolesson").exists(), "submodule not checked out")
@@ -841,8 +858,15 @@ class EndToEndTests(unittest.TestCase):
             channel.topic = '[trip]\nhotel = "Testvík"\n'
             channel.sent.clear()
             asyncio.run(lessons.generate_and_post(channel, "yuki"))
-            self.assertIn("トピックの旅程の設定を読めませんでした", channel.sent[0][0])
-            self.assertNotIn("Testv", channel.sent[0][0])
+            # the previous lesson's new-expression list (#79) comes first; the warning is among the messages
+            self.assertTrue(
+                any(
+                    "トピックの旅程の設定を読めませんでした" in t
+                    for t, _ in channel.sent
+                )
+            )
+            for text, _ in channel.sent:
+                self.assertNotIn("Testv", text)
             self.assertIn("レッスン 2", channel.sent[-1][0])
             record = feedback.Ledger(user).load(None)
             self.assertNotIn("--trip", record.manifest["generate_args"])
