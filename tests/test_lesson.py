@@ -1224,7 +1224,7 @@ class OpenItemWordingTests(unittest.TestCase):
 
         async def fake_cli(cfg, args, on_progress=None):
             calls.append(args)
-            return 0, json.dumps({"sofa": {"prompt": "「寝る」と言ってください。", "answer": "sofa"}}), ""
+            return 0, json.dumps({"sofa": {"prompt": "「寝る」と言ってください。", "answer": "sofa", "cues": ["「寝る」と言ってください。"]}}), ""
 
         self.refresh(fake_cli)
         e = self.queue.entries["sofa"]
@@ -1234,6 +1234,24 @@ class OpenItemWordingTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][calls[0].index("--ids") + 1], "sofa", "only the due single-item questions are asked for")
         self.assertEqual(ReviewQueue.load(self.path, D).entries["sofa"].prompt, "「寝る」と言ってください。", "saved")
+
+    def test_a_sentence_question_keyed_by_one_item_keeps_its_answer(self):
+        """The review of #88: «tvo» asked as a sentence stays a sentence; a bare entry whose prompt is another current cue stays too."""
+        self.queue.entries["tvo"] = Entry(["tvo"], "「2000クローナです」と言ってください。", "Það kostar tvö þúsund krónur.", 4, due=D.isoformat())
+        self.queue.entries["gott"] = Entry(["gott"], "「良い」と言ってください。", "gott", 4, due=D.isoformat())
+
+        async def fake_cli(cfg, args, on_progress=None):
+            return 0, json.dumps({
+                "tvo": {"prompt": "「2」と言ってください。", "answer": "tvö", "cues": ["「2」と言ってください。"]},
+                "gott": {"prompt": "「良い」(状況0)", "answer": "gott", "cues": ["「良い」(状況0)", "「良い」と言ってください。"]},
+                "sofa": {"prompt": "「寝る」", "answer": "sofa", "cues": ["「寝る」"]},
+            }), ""
+
+        self.refresh(fake_cli)
+        self.assertEqual(self.queue.entries["tvo"].answer, "Það kostar tvö þúsund krónur.")
+        self.assertEqual(self.queue.entries["tvo"].prompt, "「2000クローナです」と言ってください。")
+        self.assertEqual(self.queue.entries["gott"].prompt, "「良い」と言ってください。", "another current cue: variety kept")
+        self.assertEqual(self.queue.entries["sofa"].prompt, "「寝る」", "a stale bare question is reworded")
 
     def test_the_stored_wording_stays_when_the_cli_fails(self):
         async def failing(cfg, args, on_progress=None):

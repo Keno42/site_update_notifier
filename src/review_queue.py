@@ -306,9 +306,11 @@ class ReviewQueue:
         return added
 
     def refresh_wording(self, fresh: dict[str, dict]) -> int:
-        """1 項目だけの問い (キーが項目 ID) の prompt / answer を ``fresh`` ({ID: {"prompt", "answer"}},
-        audiolesson questions の出力) の今の言い方に置き換える. 期限・結果・source_lesson・open は
-        そのまま. 直した数を返す."""
+        """1 項目だけの問い (キーが項目 ID) のうち、古くなったものだけ今の言い方 (``fresh`` = {ID: {"prompt",
+        "answer", "cues"}}, audiolesson questions の出力) に置き換える. 古いのは (1) 聞けない問い (波括弧が残る)、
+        (2) 答えが今の答えと同じ (= 単語だけを聞く問い) で、問い方が今の言い方 (cues) のどれでもないもの.
+        1 項目をキーにした文の問い (答えが文) は、文で復習する原則 (§9) と plan の言い方 (#73) のまま残す.
+        期限・結果・source_lesson・open はそのまま. 直した数を返す."""
         changed = 0
         for key, now in fresh.items():
             e = self.entries.get(key)
@@ -316,6 +318,10 @@ class ReviewQueue:
                 continue
             prompt, answer = now.get("prompt"), now.get("answer")
             if not (isinstance(prompt, str) and isinstance(answer, str) and prompt and answer):
+                continue
+            cues = now.get("cues")
+            cues = [c for c in cues if isinstance(c, str)] if isinstance(cues, list) else []
+            if not (unaskable(e) or (e.answer == answer and e.prompt not in (cues or [prompt]))):
                 continue
             if (e.prompt, e.answer) != (prompt, answer):
                 e.prompt, e.answer = prompt, answer
@@ -341,7 +347,7 @@ class ReviewQueue:
             if k in chosen:
                 self._bring_forward(e, today)
             else:
-                e.open = False
+                e.open = False  # 選ばれなかった問いと、閉じた項目の問いは open を外す (項目ごとに 1 件だけが open)
 
     @staticmethod
     def _bring_forward(entry: Entry, today: date) -> None:
