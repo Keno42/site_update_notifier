@@ -404,9 +404,8 @@ class ReviewView(discord.ui.View):
         async def callback(interaction: discord.Interaction) -> None:
             if self.is_finished():
                 return
-            self.session.rate(
-                result
-            )  # 記録 (失敗なら RATE_FAILED: ボタンはそのまま押し直せる)
+            # 記録 (失敗なら RATE_FAILED: ボタンはそのまま押し直せる)
+            self.session.rate(result)
             # ここから先は画面だけ: 失敗しても評価は記録済み
             if not self.session.done:
                 self._show(revealed=False)
