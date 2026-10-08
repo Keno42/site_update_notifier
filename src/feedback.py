@@ -38,8 +38,11 @@ import discord
 
 from .interaction import (
     CHOOSE_FAILED,
+    NOTE_FAILED,
     SEND_FAILED,
+    SEND_SCREEN_FAILED,
     answers_on_failure,
+    screen_step,
 )
 
 SCHEMA = 1
@@ -561,7 +564,7 @@ class FeedbackView(discord.ui.View):
             return False
         return True
 
-    @answers_on_failure(CHOOSE_FAILED)
+    @answers_on_failure(NOTE_FAILED)
     async def _note(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(NoteModal(self))
 
@@ -572,11 +575,15 @@ class FeedbackView(discord.ui.View):
                 "「今日の量・難しさ」を選んでから送信してください。", ephemeral=True
             )
             return
-        await self.submit(self.answers)
+        await self.submit(self.answers)  # 記録 (失敗なら SEND_FAILED: まだ押し直せる)
         self.stop()
-        await interaction.response.edit_message(
-            content=f"{self.record.title} のフィードバックを記録しました。ありがとうございます。",
-            view=None,
+        # ここから先は画面だけ: 失敗しても記録は済んでいる
+        await screen_step(
+            lambda: interaction.response.edit_message(
+                content=f"{self.record.title} のフィードバックを記録しました。ありがとうございます。",
+                view=None,
+            ),
+            lambda: interaction.followup.send(SEND_SCREEN_FAILED, ephemeral=True),
         )
 
 

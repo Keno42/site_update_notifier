@@ -18,7 +18,7 @@ from typing import Awaitable, Callable
 import discord
 
 from . import reading, scenes
-from .interaction import RATE_FAILED, SHOW_FAILED, answers_on_failure
+from .interaction import RATE_FAILED, SHOW_FAILED, answers_on_failure, screen_step
 from .cards import CardQueue
 from .review_queue import Entry, ReviewQueue
 
@@ -404,20 +404,34 @@ class ReviewView(discord.ui.View):
         async def callback(interaction: discord.Interaction) -> None:
             if self.is_finished():
                 return
-            self.session.rate(result)
+            self.session.rate(
+                result
+            )  # 記録 (失敗なら RATE_FAILED: ボタンはそのまま押し直せる)
+            # ここから先は画面だけ: 失敗しても評価は記録済み
             if not self.session.done:
                 self._show(revealed=False)
-                await interaction.response.edit_message(
-                    content=self.session.render(speak=self.speak is not None),
-                    view=self,
+                content = self.session.render(speak=self.speak is not None)
+
+                async def again() -> None:
+                    # 古いメッセージのボタンはもう効かない: 今の問いを新しいメッセージで出し直し、続きはそこから
+                    self.message = await interaction.followup.send(  # type: ignore[assignment]
+                        content=content, view=self, wait=True
+                    )
+
+                await screen_step(
+                    lambda: interaction.response.edit_message(
+                        content=content, view=self
+                    ),
+                    again,
                 )
                 return
             self.stop()
-            await interaction.response.edit_message(
-                content=self.session.summary() + "\n\n次のレッスンを生成しています…",
-                view=None,
+            summary = self.session.summary() + "\n\n次のレッスンを生成しています…"
+            await screen_step(
+                lambda: interaction.response.edit_message(content=summary, view=None),
+                lambda: interaction.followup.send(summary),
             )
-            await self.finish(True)
+            await self.finish(True)  # 画面の更新が失敗しても、報告と生成は止めない
 
         return callback
 

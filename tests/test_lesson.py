@@ -214,6 +214,66 @@ class ViewTests(unittest.TestCase):
         self.assertIsNone(its[5].edits[0][1], "buttons removed at the end")
         self.assertEqual(its[6].edits, [], "a tap after the end is ignored")
 
+    def test_a_failed_screen_update_after_a_rating_keeps_the_review_going(self):
+        """#80 review: the rating is recorded before the screen is updated. If the update fails (an expired token) the next
+        question is sent again as a new message with working buttons, and on the last one the report and the lesson still run.
+        """
+
+        async def scenario(td):
+            finished, sent = [], []
+
+            async def finish(generate):
+                finished.append(generate)
+
+            async def expire():
+                finished.append("expired")
+
+            session = session_on(td)
+            view = ReviewView(session, 1, finish, expire)
+
+            def broken(it):
+                async def edit_message(**kw):
+                    raise RuntimeError("Unknown interaction")
+
+                it.response.edit_message = edit_message
+
+                class Followup:
+                    async def send(self, content=None, view=None, wait=False, **kw):
+                        sent.append((content, view))
+                        return SimpleNamespace(edit=None)
+
+                it.followup = Followup()
+                return it
+
+            async def tap(label):
+                it = broken(FakeInteraction(1))
+                buttons = {b.label: b for b in view.children}
+                await buttons[label].callback(it)
+
+            with self.assertLogs(level="ERROR"):
+                for label in [
+                    "答えを見る",
+                    "言えた",
+                    "答えを見る",
+                    "言えた",
+                    "答えを見る",
+                    "言えた",
+                ]:
+                    await tap(label)
+            return finished, sent, view, session
+
+        with tempfile.TemporaryDirectory() as td:
+            finished, sent, view, session = asyncio.run(scenario(td))
+        self.assertEqual(
+            finished, [True], "the last answer still reports and generates"
+        )
+        self.assertTrue(
+            any(v is view and "2/3" in c for c, v in sent),
+            "the next question comes again, with buttons",
+        )
+        self.assertEqual(len(session.results), 3, "every rating was recorded")
+        self.assertIsNotNone(view.message)
+
     def test_only_the_owner_can_answer(self):
         finished, its, session = self.run_view([(2, "言えた")])
         self.assertEqual(its[0].messages, [("本人だけが回答できます。", True)])

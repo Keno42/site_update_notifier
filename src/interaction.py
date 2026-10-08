@@ -20,6 +20,8 @@ SHOW_FAILED = "表示できませんでした。もう一度押してくださ�
 RATE_FAILED = "この問いの評価を記録できなかった可能性があります。もう一度押してください。"
 SEND_FAILED = "フィードバックを記録できませんでした。もう一度「送信」を押してください。"
 CHOOSE_FAILED = "選択を受け付けられませんでした。もう一度選んでください。"
+NOTE_FAILED = "メモ欄を開けませんでした。もう一度押してください。"
+SEND_SCREEN_FAILED = "フィードバックは記録しました（画面を更新できませんでした）。"
 
 
 def _interaction(args: tuple, kwargs: dict) -> discord.Interaction | None:
@@ -57,3 +59,23 @@ def answers_on_failure(message: str = FAILED) -> Callable[[F], F]:
         return run  # type: ignore[return-value]
 
     return wrap
+
+
+async def screen_step(
+    step: Callable[[], Awaitable[Any]],
+    fallback: Callable[[], Awaitable[Any]],
+) -> bool:
+    """記録した後の画面の更新. 失敗しても記録は済んでいるので、デコレータの「記録できなかった」ではなく
+    fallback (本当のことを言う・続きの画面を出し直す) を試す. 画面の更新が失敗した理由 (操作の期限切れなど)
+    によっては fallback も失敗するので、その失敗はログに残すだけにして、呼び出し側の続き (報告・生成) は
+    止めない (#80 review, #82)."""
+    try:
+        await step()
+        return True
+    except Exception:
+        logging.exception("画面の更新に失敗しました（記録は済んでいます）")
+    try:
+        await fallback()
+    except Exception:
+        logging.exception("画面の更新の代わりの通知も送れませんでした")
+    return False

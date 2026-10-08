@@ -451,20 +451,62 @@ class FailureTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertEqual(log[-1][0], "edit")
 
+    def test_a_screen_update_that_fails_after_the_write_says_it_was_recorded(self):
+        """#80 review: the write is done when only the screen update fails (an expired token). The message must not say
+        «記録できませんでした»: the view is already stopped, so pressing again does nothing."""
+        from src.interaction import SEND_FAILED, SEND_SCREEN_FAILED
+
+        with tempfile.TemporaryDirectory() as td:
+            record = saved(Path(td)).load()
+            assert record is not None
+            calls = []
+
+            async def submit(answers):
+                calls.append(1)
+
+            async def run():
+                view = FeedbackView(record, 1, submit)
+                view.answers.load = "right"
+                send = next(c for c in view.children if getattr(c, "label", "") == "送信")
+                log, sent = [], []
+
+                async def broken_edit(**kw):
+                    raise RuntimeError("Unknown interaction")
+
+                class Followup:
+                    async def send(self, content, **kw):
+                        sent.append(content)
+
+                i = interaction(log)
+                i.response.edit_message = broken_edit
+                i.followup = Followup()
+                with self.assertLogs(level="ERROR"):
+                    await send.callback(i)
+                return view, log, sent
+
+            view, log, sent = asyncio.run(run())
+            self.assertEqual(calls, [1])
+            self.assertTrue(view.is_finished())
+            self.assertEqual(sent, [SEND_SCREEN_FAILED])
+            self.assertNotIn(SEND_FAILED, [x[1] for x in log] + sent)
+
     def test_each_kind_of_handler_says_only_what_is_true(self):
         """The message differs by what the handler touches: a rating may not have been recorded, a reveal records nothing."""
         from src.interaction import (
             CHOOSE_FAILED,
             FAILED,
+            NOTE_FAILED,
             RATE_FAILED,
             SEND_FAILED,
+            SEND_SCREEN_FAILED,
             SHOW_FAILED,
         )
 
         self.assertIn("記録は残っています", FAILED)
-        for msg in (RATE_FAILED, SEND_FAILED, SHOW_FAILED, CHOOSE_FAILED):
+        for msg in (RATE_FAILED, SEND_FAILED, SHOW_FAILED, CHOOSE_FAILED, NOTE_FAILED):
             self.assertNotIn("記録は残っています", msg)
         self.assertIn("記録できなかった可能性", RATE_FAILED)
+        self.assertIn("記録しました", SEND_SCREEN_FAILED)
 
     def test_the_button_answers_when_the_form_cannot_be_opened(self):
         class Handler:
