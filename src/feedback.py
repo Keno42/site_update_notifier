@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -334,11 +335,25 @@ def _clip(text: str, n: int = 100) -> str:
 class Answers:
     unheard: list[str] = field(
         default_factory=list
-    )  # レッスン中ほとんど出てこなかった新出
+    )  # 以前のフォームの項目. 欄は外した (#81) が、記録の形は変えない: 常に []
     sooner: list[str] = field(default_factory=list)
     load: str | None = None
     concerns: list[str] = field(default_factory=list)  # "c<番号>" / "f:<種類>"
     note: str = ""
+
+
+# 新出のこれ以上の割合を「覚えていない」と選んだら、負荷は「重い」として数える
+HEAVY_SHARE = 0.6
+
+
+def effective_load(record: "Record", answers: "Answers") -> str | None:
+    """負荷の評価. 新出の大半を「練習が足りなかった・覚えていない」と選んだなら、選んだ負荷が何であっても
+    「重い」として数える: 何も覚えていないのは、その人にとって量の合図であって、項目ごとの事実ではない
+    (#81). ペースへの入力にするのは language-learning-audio #218 で、ここでは記録するだけ."""
+    new = record.new_items()
+    if new and len(set(answers.sooner)) / len(new) >= HEAVY_SHARE:
+        return "heavy"
+    return answers.load
 
 
 def build_event(record: Record, answers: Answers, user: str, now: datetime) -> dict:
@@ -359,6 +374,7 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
         "unheard": answers.unheard,
         "sooner": answers.sooner,
         "load": answers.load,
+        "load_effective": effective_load(record, answers),
         "friction": [v[2:] for v in answers.concerns if v.startswith("f:")],
         "candidates_shown": shown,
         "candidates_confirmed": confirmed,
@@ -404,11 +420,14 @@ def report_text(record: Record, events: list[dict], siblings: list[str]) -> str:
         f"**{record.title} のフィードバック**（{len(events)}件、最新 {e.get('ts', '?')}）",
         f"負荷: {LOADS.get(e.get('load') or '', e.get('load') or '未回答')}",
     ]
-    if "unheard" in e:
+    if e.get("unheard"):  # 以前のフォームの項目 (#81 で外した)
         lines.append(f"出てこなかった・聞こえなかった: {names(e['unheard'])}")
     if e.get("usable"):  # 以前のフォームの項目 (いま言えそうな表現)
         lines.append(f"使えそう: {names(e['usable'])}")
-    lines.append(f"早めにもう一度: {names(e.get('sooner', []))}")
+    lines.append(f"練習が足りなかった・覚えていない: {names(e.get('sooner', []))}")
+    if e.get("load_effective") and e["load_effective"] != e.get("load"):
+        counted = LOADS.get(e["load_effective"], e["load_effective"])
+        lines.append(f"（選んだ表現が多いので負荷は「{counted}」として数えます）")
     if e.get("candidates_confirmed"):
         lines.append(
             "当てはまった候補: "
@@ -468,29 +487,22 @@ class FeedbackView(discord.ui.View):
         self.answers = Answers()
         new = record.new_items()[:25]
         if new:
-            for attr, placeholder in (
-                (
-                    "unheard",
-                    "レッスン中ほとんど出てこなかった・聞こえなかった表現（複数可・選ばなくてもOK）",
-                ),
-                (
-                    "sooner",
-                    "まだ自信がない・もう一度やりたい表現（複数可・選ばなくてもOK）",
-                ),
-            ):
-                self._select(
-                    attr,
-                    placeholder,
-                    [
-                        discord.SelectOption(
-                            label=_clip(i.get("target") or i["id"]),
-                            value=i["id"],
-                            description=_clip(i.get("meaning") or "") or None,
-                        )
-                        for i in new
-                    ],
-                    min_values=0,
-                )
+            # 「ほとんど見かけなかった」の欄は外した (一度も使われず、問いの意図が伝わらなかった, #81). 残るのは否定側
+            # だけ: 聞いた直後の「覚えた」はあてにならない (次の日の振り返りが確かめる) が、「思い出せない」は当てになる.
+            # 選ばなかった項目は「不満なし」で、「十分」ではない
+            self._select(
+                "sooner",
+                "練習が足りなかった・覚えていない表現（複数可・なければ選ばなくてOK）",
+                [
+                    discord.SelectOption(
+                        label=_clip(i.get("target") or i["id"]),
+                        value=i["id"],
+                        description=_clip(i.get("meaning") or "") or None,
+                    )
+                    for i in new
+                ],
+                min_values=0,
+            )
         self._select(
             "load",
             "今日のレッスンの量・難しさ（必須）",
@@ -596,11 +608,15 @@ class Feedback:
         user_dir: Callable[[str], Path],
         channel_id: int = 0,
         now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+        report_sooner: Callable[[str, int, list[str]], Awaitable[bool]] | None = None,
     ) -> None:
         self.users = users
         self.user_dir = user_dir
         self.channel_id = channel_id
         self.now = now
+        # 「練習が足りなかった・覚えていない」と選んだ項目を、早めにもう一度出す依頼として音声レッスンへ報告する
+        # (`report --sooner`: 間隔の半分以内に。結果としては数えない, language-learning-audio #222). (名前, レッスン番号, 項目) → 届いたか
+        self.report_sooner = report_sooner
 
     def ledger(self, name: str) -> Ledger:
         return Ledger(self.user_dir(name))
@@ -640,6 +656,32 @@ class Feedback:
             return None
         return name, ledger, record
 
+    async def _report_sooner(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        record: Record,
+        answers: Answers,
+    ) -> None:
+        """記録できた後で、選んだ項目を「早めにもう一度」の依頼として報告する. 失敗してもフィードバックの記録は成功のまま:
+        失敗は黙らずチャンネルに知らせる (選んだ項目は記録に残っているので、あとから送り直せる)."""
+        if not answers.sooner or self.report_sooner is None:
+            return
+        ids = list(dict.fromkeys(answers.sooner))
+        try:
+            ok = await self.report_sooner(name, record.lesson, ids)
+        except Exception:
+            logging.exception("早めにもう一度の報告に失敗しました")
+            ok = False
+        if not ok and interaction.channel is not None:
+            try:
+                await interaction.channel.send(
+                    "「練習が足りなかった」の選択は記録しましたが、学習状態へはまだ反映できていません"
+                    "（もう一度 /lesson-feedback から送ると反映されます）。"
+                )
+            except Exception:
+                logging.exception("報告失敗の通知も送れませんでした")
+
     @answers_on_failure()
     async def open_form(
         self, interaction: discord.Interaction, ref: str | int | None = None
@@ -651,6 +693,7 @@ class Feedback:
 
         async def submit(answers: Answers) -> None:
             ledger.append(build_event(record, answers, name, self.now()))
+            await self._report_sooner(interaction, name, record, answers)
             # 記録できた後に、新出表現の一覧を出す (#79). 出せなくても記録は成功のまま
             pending = newlist.PendingLists(ledger.user_dir).take(record.dir.name)
             if pending is not None and interaction.channel is not None:
