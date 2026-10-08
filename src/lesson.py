@@ -377,21 +377,32 @@ class Lessons:
             return False
         return True
 
-    async def release(self, name: str) -> None:
+    async def release(self, name: str, channel: discord.abc.Messageable | None = None) -> None:
         """/lesson の進行中を外す. 先に、進行中に届いたフィードバックの報告を送る (busy のまま送るので、
-        次の /lesson と並ばない). 送れなかった分は残し、次の機会に送り直す."""
+        次の /lesson と並ばない. 正常な経路では run() が生成の前に送り済みで、ここは期限切れ・エラーの経路の
+        後始末). 送れなかった分は残し、次の機会に送り直す."""
         try:
-            await self.flush_deferred(name)
+            await self.flush_deferred(name, channel)
         except Exception:
             logging.exception("先送りしたフィードバックの報告に失敗しました")
         finally:
             self.busy.pop(name, None)
 
-    async def flush_deferred(self, name: str) -> None:
+    async def flush_deferred(self, name: str, channel: discord.abc.Messageable | None = None) -> None:
+        """進行中に届いたフィードバックの報告を送る. 送れなければ残し (次の機会に送り直す)、channel があれば知らせる:
+        即時の失敗と同じく、/lesson-feedback から送り直せば反映される."""
         pending = self.deferred.pop(name, [])
         for k, (lesson, ids, load) in enumerate(pending):
             if not await self._send_feedback(name, lesson, ids, load):
                 self.deferred[name] = pending[k:] + self.deferred.get(name, [])
+                if channel is not None:
+                    try:
+                        await channel.send(
+                            "先送りしたフィードバックの報告が学習状態へまだ反映できていません"
+                            "（次の /lesson で送り直します。もう一度 /lesson-feedback から送っても反映されます）。"
+                        )
+                    except Exception:
+                        logging.exception("先送りの報告失敗の通知も送れませんでした")
                 return
 
     async def start(self, interaction: discord.Interaction, auto: bool = False) -> None:
@@ -437,7 +448,8 @@ class Lessons:
                 )
 
                 async def report_then_generate() -> None:
-                    # 前回届かなかった報告があれば、生成の前に送る
+                    # 進行中に届いたフィードバックと、前回届かなかった報告があれば、生成の前に送る
+                    await self.flush_deferred(name, channel)
                     if await self.flush_reports(channel, name, queue, path):
                         await self.generate_and_post(channel, name, auto=auto)
 
@@ -475,6 +487,8 @@ class Lessons:
 
             async def finish(generate: bool) -> None:
                 async def run() -> None:
+                    # 振り返りの間に届いたフィードバックの報告は、この生成に間に合うよう、busy のまま先に送る
+                    await self.flush_deferred(name, channel)
                     if not await self.flush_reports(channel, name, queue, path):
                         return
                     if generate:
@@ -495,7 +509,7 @@ class Lessons:
                         )
                     await self.guarded(channel, run())
                 finally:
-                    await self.release(name)
+                    await self.release(name, channel)
 
             async def expire() -> None:
                 await finish(False)  # 答えた分だけ報告し、生成はしない
@@ -521,7 +535,7 @@ class Lessons:
             await self.guarded(channel, self.flush_reports(channel, name, queue, path))
         finally:
             if not handed_to_view:
-                await self.release(name)
+                await self.release(name, channel)
 
     def _card_room(
         self, queue: ReviewQueue, today: date, wanted: int, reserved: int = 0
@@ -704,7 +718,13 @@ class Lessons:
         if self.is_busy(name):
             self.deferred.setdefault(name, []).append((lesson, list(ids), load))
             return True
-        return await self._send_feedback(name, lesson, ids, load)
+        # 送っている間も busy にする: その間に始まった /lesson (自動モードは振り返りなしで生成に進む) が、
+        # 送信中の report と並ばないように. 送信中に届いた分は release() が続けて送る
+        self.busy[name] = time.monotonic()
+        try:
+            return await self._send_feedback(name, lesson, ids, load)
+        finally:
+            await self.release(name)
 
     async def _send_feedback(
         self, name: str, lesson: int, ids: list[str], load: str | None

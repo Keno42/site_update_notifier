@@ -552,6 +552,62 @@ class StrugglingItemsTests(unittest.TestCase):
             ("3", "a", "heavy"),
         )
 
+    def test_a_report_deferred_during_a_lesson_is_sent_before_the_generation_and_a_failure_is_said(self):
+        """Review of #91: the flush runs inside the lesson, ahead of ``flush_reports`` and the generation, so the feedback counts for
+        this generation; a failed send says so in the channel; a send in flight keeps a new /lesson out."""
+        from unittest import mock
+
+        cfg = LessonConfig(root=Path("/nonexistent"), users={1: "yuki"})
+        lessons = Lessons(cfg)
+        calls = []
+
+        async def fake_run_cli(c, args):
+            calls.append(args[0])
+            await asyncio.sleep(0)
+            return 0, "", ""
+
+        class Channel:
+            def __init__(self):
+                self.said = []
+
+            async def send(self, content, **kw):
+                self.said.append(content)
+
+        async def run():
+            channel = Channel()
+            lessons.busy["yuki"] = time.monotonic()
+            await lessons.report_feedback("yuki", 3, ["a"], "heavy")
+            await lessons.flush_deferred("yuki", channel)  # what run() does first, while still busy
+            self.assertEqual(calls, ["report"])
+            self.assertIn("yuki", lessons.busy, "still busy: nothing ran next to it")
+            lessons.busy.pop("yuki")
+            # an idle send marks the user busy while it is in flight
+            seen = []
+
+            async def slow(c, args):
+                seen.append(lessons.is_busy("yuki"))
+                return 0, "", ""
+
+            with mock.patch("src.lesson.run_cli", slow):
+                self.assertTrue(await lessons.report_feedback("yuki", 3, [], "light"))
+            self.assertEqual(seen, [True])
+            self.assertFalse(lessons.is_busy("yuki"), "released afterwards")
+            # a failed deferred send is kept and said
+            async def failing(c, args):
+                return 1, "", "boom"
+
+            lessons.busy["yuki"] = time.monotonic()
+            await lessons.report_feedback("yuki", 4, ["b"], None)
+            with mock.patch("src.lesson.run_cli", failing):
+                await lessons.release("yuki", channel)
+            self.assertEqual(len(channel.said), 1)
+            self.assertIn("/lesson-feedback", channel.said[0])
+            self.assertEqual(len(lessons.deferred["yuki"]), 1, "kept for the next /lesson")
+            self.assertFalse(lessons.is_busy("yuki"))
+
+        with mock.patch("src.lesson.run_cli", fake_run_cli):
+            asyncio.run(run())
+
     def test_the_bot_asks_for_the_selected_items_sooner_not_as_an_outcome(self):
         cfg = LessonConfig(root=Path("/nonexistent"), users={1: "yuki"})
         args = cfg.report_args("yuki", [], lesson=12, sooner=["a", "b"], load="heavy")
