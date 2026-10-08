@@ -36,6 +36,8 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
+from .interaction import answers_on_failure
+
 SCHEMA = 1
 FEEDBACK_FILE = "lesson_feedback.jsonl"
 MANIFESTS = "lesson_manifests"
@@ -276,7 +278,15 @@ class Record:
         }
 
     def new_items(self) -> list[dict]:
-        return list(self.plan.get("new_items", []))
+        """今日の新出. 同じ id は 1 つ (埋め込みで聞いた後に新出としても導入された表現が 2 回載る
+        ことがある). 選択肢は value が重複すると Discord が拒否し、フォームが開かない (#78)."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for i in self.plan.get("new_items", []):
+            if i["id"] not in seen:
+                seen.add(i["id"])
+                out.append(i)
+        return out
 
     def candidates(self) -> list[dict]:
         """カードに出す候補 (MAX_CANDIDATES 件まで). 同じ場面の繰り返し (古いレッスンの
@@ -622,6 +632,7 @@ class Feedback:
             return None
         return name, ledger, record
 
+    @answers_on_failure()
     async def open_form(
         self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
@@ -639,6 +650,7 @@ class Feedback:
             ephemeral=True,
         )
 
+    @answers_on_failure()
     async def report(
         self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
@@ -650,6 +662,7 @@ class Feedback:
             report_text(record, ledger.events(record.id), ledger.siblings(record))
         )
 
+    @answers_on_failure()
     async def export(
         self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
@@ -699,6 +712,7 @@ class FeedbackButton(
     ) -> "FeedbackButton":
         return cls(int(match["owner"]), match["manifest"])
 
+    @answers_on_failure()
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.owner:
             await interaction.response.send_message(

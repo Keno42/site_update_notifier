@@ -231,8 +231,13 @@ class FormTests(unittest.TestCase):
 class FakeResponse:
     def __init__(self, log):
         self.log = log
+        self.done = False
+
+    def is_done(self):
+        return self.done
 
     async def send_message(self, content=None, **kw):
+        self.done = True
         self.log.append(("send", content, kw))
 
     async def edit_message(self, **kw):
@@ -252,6 +257,38 @@ def interaction(log, user=1, channel=5):
 
 
 class ViewTests(unittest.TestCase):
+    def test_a_new_item_listed_twice_gives_one_option(self):
+        """#78: «miða» was embedded and introduced in one lesson, so new_items listed it twice; Discord
+        rejects a select whose options repeat a value, and the form never opened."""
+        plan = dict(PLAN, new_items=PLAN["new_items"] + [dict(PLAN["new_items"][0])])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_lesson(root / "work", plan)
+            ledger = Ledger(root / "yuki")
+            learner = root / "yuki" / "learner.json"
+            learner.parent.mkdir(parents=True, exist_ok=True)
+            learner.write_text("{}", "utf-8")
+            ledger.save_manifest(
+                root / "work", plan, b"{}", learner,
+                {"bot": "a" * 40, "lla": "b" * 40}, ["generate"], NOW,
+            )  # fmt: skip
+            record = ledger.load()
+            assert record is not None
+            self.assertEqual(
+                [i["id"] for i in record.new_items()], ["takk_fyrir", "eg_var_ad_inf"]
+            )
+            self.assertEqual(form_text(record).count("・Takk fyrir {thing}.（"), 1)
+
+            async def build():
+                return FeedbackView(record, 1, None)  # type: ignore[arg-type]
+
+            view = asyncio.run(build())
+            selects = [c for c in view.children if hasattr(c, "options")]
+            self.assertEqual(len(selects), 4)
+            for select in selects:
+                values = [o.value for o in select.options]
+                self.assertEqual(len(values), len(set(values)), values)
+
     def test_form_needs_only_the_load_and_records_once(self):
         with tempfile.TemporaryDirectory() as td:
             ledger = saved(Path(td))
@@ -336,6 +373,69 @@ def submit_form(test, log, kw, load="right"):
         await send[0].callback(interaction(log))
 
     return run()
+
+
+class FailureTests(unittest.TestCase):
+    """#78: a handler that fails before its first response still answers, ephemerally, and logs the failure."""
+
+    def test_a_handler_that_raises_before_responding_answers_and_logs(self):
+        from src.interaction import FAILED, answers_on_failure
+
+        @answers_on_failure()
+        async def handler(interaction):
+            raise RuntimeError("boom")
+
+        log = []
+        with self.assertLogs(level="ERROR") as logs:
+            asyncio.run(handler(interaction(log)))
+        self.assertEqual(log, [("send", FAILED, {"ephemeral": True})])
+        self.assertIn("boom", "".join(logs.output))
+
+    def test_a_handler_that_already_responded_follows_up(self):
+        from src.interaction import FAILED, answers_on_failure
+
+        sent = []
+
+        class Followup:
+            async def send(self, content, **kw):
+                sent.append((content, kw))
+
+        @answers_on_failure()
+        async def handler(interaction):
+            await interaction.response.send_message("first")
+            raise RuntimeError("late")
+
+        log = []
+        i = interaction(log)
+        i.followup = Followup()
+        with self.assertLogs(level="ERROR"):
+            asyncio.run(handler(i))
+        self.assertEqual(sent, [(FAILED, {"ephemeral": True})])
+
+    def test_the_button_answers_when_the_form_cannot_be_opened(self):
+        class Handler:
+            async def open_form(self, interaction, ref):
+                raise RuntimeError("400 Invalid Form Body")
+
+        async def run():
+            view = feedback_view(1, "lesson-019.2")
+            (button,) = view.children
+            match = FeedbackButton.__discord_ui_compiled_template__.fullmatch(
+                "lla-feedback:1:lesson-019.2"
+            )
+            rebuilt = await FeedbackButton.from_custom_id(None, button.item, match)
+            FeedbackButton.handler = Handler()
+            try:
+                log = []
+                with self.assertLogs(level="ERROR"):
+                    await rebuilt.callback(interaction(log))
+                return log
+            finally:
+                FeedbackButton.handler = None
+
+        log = asyncio.run(run())
+        self.assertEqual(len(log), 1)
+        self.assertIn("記録は残っています", log[0][1])
 
 
 class EntryPointTests(unittest.TestCase):
