@@ -1253,6 +1253,23 @@ class OpenItemWordingTests(unittest.TestCase):
         self.assertEqual(self.queue.entries["gott"].prompt, "「良い」と言ってください。", "another current cue: variety kept")
         self.assertEqual(self.queue.entries["sofa"].prompt, "「寝る」", "a stale bare question is reworded")
 
+    def test_without_cues_only_an_unaskable_question_is_reworded(self):
+        """An older audiolesson prints no «cues»: nothing current is overwritten, only what cannot be asked."""
+        self.queue.entries["gott"] = Entry(["gott"], "「良い」と言ってください。", "gott", 4, due=D.isoformat())
+        self.queue.entries["klukkan_er"] = Entry(["klukkan_er"], "Klukkan er {hour}.", "Klukkan er tvö.", 4, due=D.isoformat())
+
+        async def fake_cli(cfg, args, on_progress=None):
+            return 0, json.dumps({
+                "gott": {"prompt": "「良い」(状況0)", "answer": "gott"},
+                "sofa": {"prompt": "「寝る」", "answer": "sofa"},
+                "klukkan_er": {"prompt": "「2時です」", "answer": "Klukkan er tvö."},
+            }), ""
+
+        self.refresh(fake_cli)
+        self.assertEqual(self.queue.entries["gott"].prompt, "「良い」と言ってください。")
+        self.assertEqual(self.queue.entries["sofa"].prompt, "How do you say: Sleep.", "a stale bare question waits for cues")
+        self.assertEqual(self.queue.entries["klukkan_er"].prompt, "「2時です」")
+
     def test_the_stored_wording_stays_when_the_cli_fails(self):
         async def failing(cfg, args, on_progress=None):
             return 2, "", "error: invalid choice: 'questions'"

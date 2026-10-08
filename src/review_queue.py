@@ -321,7 +321,10 @@ class ReviewQueue:
                 continue
             cues = now.get("cues")
             cues = [c for c in cues if isinstance(c, str)] if isinstance(cues, list) else []
-            if not (unaskable(e) or (e.answer == answer and e.prompt not in (cues or [prompt]))):
+            # 聞けない問いは文の答えでも言い直す (そのままでは出せない. 普通は次の plan の B3 が先に直す).
+            # cues が無い (古い LLA) ときは、今の問い方を知らないので、聞けない問いだけ直す
+            stale_bare = bool(cues) and e.answer == answer and e.prompt not in cues
+            if not (unaskable(e) or stale_bare):
                 continue
             if (e.prompt, e.answer) != (prompt, answer):
                 e.prompt, e.answer = prompt, answer
