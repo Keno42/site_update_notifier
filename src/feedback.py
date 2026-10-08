@@ -608,15 +608,16 @@ class Feedback:
         user_dir: Callable[[str], Path],
         channel_id: int = 0,
         now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-        report_sooner: Callable[[str, int, list[str]], Awaitable[bool]] | None = None,
+        report_feedback: Callable[[str, int, list[str], str | None], Awaitable[bool]] | None = None,
     ) -> None:
         self.users = users
         self.user_dir = user_dir
         self.channel_id = channel_id
         self.now = now
-        # 「練習が足りなかった・覚えていない」と選んだ項目を、早めにもう一度出す依頼として音声レッスンへ報告する
-        # (`report --sooner`: 間隔の半分以内に。結果としては数えない, language-learning-audio #222). (名前, レッスン番号, 項目) → 届いたか
-        self.report_sooner = report_sooner
+        # 送信で選んだことを 1 回の report で音声レッスンへ報告する: 「練習が足りなかった・覚えていない」の項目は
+        # 早めにもう一度出す依頼 (`--sooner`: 間隔の半分以内に。結果としては数えない, language-learning-audio #222)、
+        # 負荷はペースの入力 (`--load`, #218). (名前, レッスン番号, 項目, 実効の負荷) → 受け付けたか
+        self.report_feedback = report_feedback
 
     def ledger(self, name: str) -> Ledger:
         return Ledger(self.user_dir(name))
@@ -656,27 +657,31 @@ class Feedback:
             return None
         return name, ledger, record
 
-    async def _report_sooner(
+    async def _report_feedback(
         self,
         interaction: discord.Interaction,
         name: str,
         record: Record,
         answers: Answers,
     ) -> None:
-        """記録できた後で、選んだ項目を「早めにもう一度」の依頼として報告する. 失敗してもフィードバックの記録は成功のまま:
-        失敗は黙らずチャンネルに知らせる (選んだ項目は記録に残っているので、あとから送り直せる)."""
-        if not answers.sooner or self.report_sooner is None:
+        """記録できた後で、選んだ項目 (早めにもう一度) と実効の負荷 (選んだ項目が新出の大半なら「重い」, 60% 以上) を
+        1 回の report で報告する. 何も選ばなくても負荷は送る. 失敗してもフィードバックの記録は成功のまま:
+        失敗は黙らずチャンネルに知らせる (選んだことは記録に残っているので、あとから送り直せる)."""
+        if self.report_feedback is None:
             return
         ids = list(dict.fromkeys(answers.sooner))
+        load = effective_load(record, answers)
+        if not ids and not load:
+            return
         try:
-            ok = await self.report_sooner(name, record.lesson, ids)
+            ok = await self.report_feedback(name, record.lesson, ids, load)
         except Exception:
-            logging.exception("早めにもう一度の報告に失敗しました")
+            logging.exception("フィードバックの報告に失敗しました")
             ok = False
         if not ok and interaction.channel is not None:
             try:
                 await interaction.channel.send(
-                    "「練習が足りなかった」の選択は記録しましたが、学習状態へはまだ反映できていません"
+                    "フィードバックは記録しましたが、学習状態へはまだ反映できていません"
                     "（もう一度 /lesson-feedback から送ると反映されます）。"
                 )
             except Exception:
@@ -693,7 +698,7 @@ class Feedback:
 
         async def submit(answers: Answers) -> None:
             ledger.append(build_event(record, answers, name, self.now()))
-            await self._report_sooner(interaction, name, record, answers)
+            await self._report_feedback(interaction, name, record, answers)
             # 記録できた後に、新出表現の一覧を出す (#79). 出せなくても記録は成功のまま
             pending = newlist.PendingLists(ledger.user_dir).take(record.dir.name)
             if pending is not None and interaction.channel is not None:

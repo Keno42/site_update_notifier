@@ -3,6 +3,7 @@
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -444,8 +445,8 @@ class StrugglingItemsTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 saved(Path(td))
 
-                async def report(name, lesson, ids):
-                    reported.append((name, lesson, ids))
+                async def report(name, lesson, ids, load):
+                    reported.append((name, lesson, ids, load))
                     return ok
 
                 fb = Feedback(
@@ -453,7 +454,7 @@ class StrugglingItemsTests(unittest.TestCase):
                     lambda n: Path(td) / n,
                     0,
                     lambda: NOW,
-                    report_sooner=report,
+                    report_feedback=report,
                 )
 
                 async def run():
@@ -475,7 +476,9 @@ class StrugglingItemsTests(unittest.TestCase):
 
                 said = asyncio.run(run())
                 self.assertEqual(
-                    reported[-1], ("yuki", 12, ["eg_var_ad_inf"]), "once, no duplicates"
+                    reported[-1],
+                    ("yuki", 12, ["eg_var_ad_inf"], "right"),
+                    "once, no duplicates, with the effective load",
                 )
                 self.assertEqual(
                     len(Ledger(Path(td) / "yuki").events("lesson-012")),
@@ -484,34 +487,76 @@ class StrugglingItemsTests(unittest.TestCase):
                 )
                 self.assertEqual(bool(said), not ok, "a failed report is not silent")
 
-    def test_nothing_is_reported_when_nothing_is_selected(self):
+    def _submit(self, select_items, load):
+        """Submit the form with the given selected items and load; return what the bot reported."""
+        calls = []
         with tempfile.TemporaryDirectory() as td:
             saved(Path(td))
-            calls = []
 
-            async def report(name, lesson, ids):
-                calls.append(ids)
+            async def report(name, lesson, ids, effective):
+                calls.append((name, lesson, ids, effective))
                 return True
 
-            fb = Feedback(
-                {1: "yuki"},
-                lambda n: Path(td) / n,
-                0,
-                lambda: NOW,
-                report_sooner=report,
-            )
+            fb = Feedback({1: "yuki"}, lambda n: Path(td) / n, 0, lambda: NOW, report_feedback=report)
 
             async def run():
                 log = []
                 await fb.open_form(interaction(log))
-                await submit_form(self, log, log[-1][2])
+                kw = log[-1][2]
+                if select_items:
+                    selects = [c for c in kw["view"].children if hasattr(c, "options")]
+                    selects[0]._values = select_items
+                    await selects[0].callback(interaction(log))
+                await submit_form(self, log, kw, load)
 
             asyncio.run(run())
-            self.assertEqual(calls, [])
+        return calls
+
+    def test_the_load_is_sent_even_when_nothing_is_selected(self):
+        self.assertEqual(self._submit([], "light"), [("yuki", 12, [], "light")])
+
+    def test_the_effective_load_is_sent_with_selected_items(self):
+        self.assertEqual(self._submit(["eg_var_ad_inf"], "light"), [("yuki", 12, ["eg_var_ad_inf"], "light")])
+        both = ["takk_fyrir", "eg_var_ad_inf"]
+        self.assertEqual(
+            self._submit(both, "light"), [("yuki", 12, both, "heavy")], "60% or more selected counts as heavy"
+        )
+
+    def test_a_report_during_a_lesson_waits_for_it_to_end(self):
+        """learner.json has no lock: the feedback report (--sooner and --load) never runs next to a generation (#218)."""
+        from unittest import mock
+
+        cfg = LessonConfig(root=Path("/nonexistent"), users={1: "yuki"})
+        lessons = Lessons(cfg)
+        sent = []
+
+        async def fake_run_cli(c, args):
+            sent.append(args)
+            return 0, "", ""
+
+        async def run():
+            lessons.busy["yuki"] = time.monotonic()
+            self.assertTrue(await lessons.report_feedback("yuki", 3, ["a"], "heavy"))
+            self.assertEqual(sent, [], "held while the user is busy")
+            await lessons.release("yuki")
+            self.assertEqual(len(sent), 1)
+            self.assertNotIn("yuki", lessons.busy)
+            self.assertTrue(await lessons.report_feedback("yuki", 3, [], "light"))
+            self.assertEqual(len(sent), 2, "sent at once when idle")
+
+        with mock.patch("src.lesson.run_cli", fake_run_cli):
+            asyncio.run(run())
+        args = sent[0]
+        self.assertEqual(
+            (args[args.index("--lesson") + 1], args[args.index("--sooner") + 1], args[args.index("--load") + 1]),
+            ("3", "a", "heavy"),
+        )
 
     def test_the_bot_asks_for_the_selected_items_sooner_not_as_an_outcome(self):
         cfg = LessonConfig(root=Path("/nonexistent"), users={1: "yuki"})
-        args = cfg.report_args("yuki", [], lesson=12, sooner=["a", "b"])
+        args = cfg.report_args("yuki", [], lesson=12, sooner=["a", "b"], load="heavy")
+        self.assertEqual(args[args.index("--load") + 1], "heavy")
+        self.assertNotIn("--load", cfg.report_args("yuki", [], lesson=12, sooner=["a"]))
         self.assertEqual(args[0], "report")
         self.assertEqual(args[args.index("--lesson") + 1], "12")
         self.assertEqual(args[args.index("--sooner") + 1], "a,b")
@@ -807,7 +852,7 @@ class GenerationTests(unittest.TestCase):
             )
             self.assertEqual(list(cfg.work_dir("yuki").iterdir()), [], "work cleaned")
 
-    def test_report_sooner_moves_the_due_date_through_the_real_cli_and_records_no_outcome(
+    def test_report_feedback_moves_the_due_date_through_the_real_cli_and_records_no_outcome(
         self,
     ):
         """#222 through the pinned audio: the bot's request changes only ``due`` and does not mark the lesson reported."""
@@ -823,7 +868,7 @@ class GenerationTests(unittest.TestCase):
             path = cfg.learner_path("yuki")
             before = json.loads(path.read_text("utf-8"))
             item = before["lessons"][-1]["new_items"][0]
-            ok = asyncio.run(lessons.report_sooner("yuki", 1, [item]))
+            ok = asyncio.run(lessons.report_feedback("yuki", 1, [item], None))
             self.assertTrue(ok)
             after = json.loads(path.read_text("utf-8"))
             self.assertEqual(
