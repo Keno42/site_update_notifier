@@ -807,6 +807,43 @@ class GenerationTests(unittest.TestCase):
             )
             self.assertEqual(list(cfg.work_dir("yuki").iterdir()), [], "work cleaned")
 
+    def test_report_sooner_moves_the_due_date_through_the_real_cli_and_records_no_outcome(
+        self,
+    ):
+        """#222 through the pinned audio: the bot's request changes only ``due`` and does not mark the lesson reported."""
+        from tests.test_lesson import FakeChannel
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = LessonConfig(
+                root=Path(td), users={1: "yuki"}, minutes=3,
+                extra_args=["--provider", "stub"],
+            )  # fmt: skip
+            lessons = Lessons(cfg)
+            asyncio.run(lessons.generate_and_post(FakeChannel(), "yuki"))
+            path = cfg.learner_path("yuki")
+            before = json.loads(path.read_text("utf-8"))
+            item = before["lessons"][-1]["new_items"][0]
+            ok = asyncio.run(lessons.report_sooner("yuki", 1, [item]))
+            self.assertTrue(ok)
+            after = json.loads(path.read_text("utf-8"))
+            self.assertEqual(
+                after["reported"],
+                before["reported"],
+                "the lesson is not marked reported",
+            )
+            a, b = after["items"][item], before["items"][item]
+            self.assertLessEqual(a["due"], b["due"])
+            for key in (
+                "hesitated",
+                "failures",
+                "recalled",
+                "ease",
+                "interval_days",
+                "history",
+                "last_outcome",
+            ):
+                self.assertEqual(a[key], b[key], key)
+
 
 if __name__ == "__main__":
     unittest.main()
