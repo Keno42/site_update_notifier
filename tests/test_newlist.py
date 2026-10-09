@@ -38,7 +38,14 @@ class Env:
 
     def __init__(self, td):
         self.td = Path(td)
-        self.cfg = LessonConfig(root=self.td, users={1: "yuki"}, minutes=3)
+        self.cfg = LessonConfig(
+            root=self.td,
+            users={1: "yuki"},
+            minutes=3,
+            default_minutes=3,
+            default_new_list="after",
+            default_order="spread",
+        )
         self.lessons = Lessons(self.cfg)
         self.channel = FakeChannel()
         work = self.td / "work"

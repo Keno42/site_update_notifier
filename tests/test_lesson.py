@@ -347,6 +347,7 @@ class ViewTests(unittest.TestCase):
             names,
             [
                 "lesson",
+                "lesson-configure",
                 "lesson-auto",
                 "lesson-feedback",
                 "lesson-feedback-report",
@@ -533,11 +534,14 @@ class EndToEndTests(unittest.TestCase):
         kw.setdefault("reading_cards", 0)  # 読みカードは test_reading_cards_* で
         kw.setdefault("scene_cards", 0)  # 場面カードと準備状況は test_scene_cards_* で
         kw.setdefault("readiness_days", 0)
+        kw.setdefault("minutes", 3)  # 振り返りの量はレッスンの長さに比例する (usersettings)
         return LessonConfig(
             root=Path(td),
             users={1: "yuki"},
-            minutes=3,
-            extra_args=["--provider", "stub"],
+            default_minutes=kw.get("minutes", 3),
+            default_new_list="after",
+            default_order="spread",
+            extra_args=["--provider", "stub", "--new", "3"],
             **kw,
         )
 
@@ -735,7 +739,13 @@ class EndToEndTests(unittest.TestCase):
         total); #132: a trip.toml is passed to generate, and the lesson record keeps only
         its sha256. Nothing from the profile is written by the bot."""
         with tempfile.TemporaryDirectory() as td:
-            cfg = self.config(td, review_limit=20, reading_cards=3)
+            cfg = self.config(
+                td,
+                review_limit=20,
+                reading_cards=3,
+                minutes=30,
+                upload_limit_mb=1000,
+            )
             user = cfg.user_dir("yuki")
             user.mkdir(parents=True)
             trip = cfg.trip_path("yuki")
@@ -788,7 +798,13 @@ class EndToEndTests(unittest.TestCase):
         same review length; the lesson post carries the weekly readiness summary."""
         with tempfile.TemporaryDirectory() as td:
             cfg = self.config(
-                td, review_limit=20, scene_cards=2, reading_cards=1, readiness_days=7
+                td,
+                review_limit=20,
+                scene_cards=2,
+                reading_cards=1,
+                readiness_days=7,
+                minutes=30,
+                upload_limit_mb=1000,
             )
             day = {"today": D}
             lessons = Lessons(cfg, today=lambda: day["today"])
@@ -909,6 +925,7 @@ class EndToEndTests(unittest.TestCase):
                 root=Path(td),
                 users={1: "a", 2: "b"},
                 minutes=3,
+                default_minutes=3, default_new_list="after", default_order="spread",
                 extra_args=["--provider", "stub", "--date", "2026-09-18"],
                 keep_cache=True,
             )
@@ -983,6 +1000,7 @@ class EndToEndTests(unittest.TestCase):
                 root=Path(td),
                 users={1: "yuki"},
                 minutes=3,
+                default_minutes=3, default_new_list="after", default_order="spread",
                 extra_args=["--provider", "stub"],
             )
             lessons = Lessons(cfg)

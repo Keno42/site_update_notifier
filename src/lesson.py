@@ -32,7 +32,18 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import discord
 from discord import app_commands
 
-from . import feedback, levers, newlist, reading, scenes, speech, trip, version, weekly
+from . import (
+    feedback,
+    levers,
+    newlist,
+    reading,
+    scenes,
+    speech,
+    trip,
+    usersettings,
+    version,
+    weekly,
+)
 from .cards import CardQueue
 from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, review_note
 from .review_queue import ReviewQueue
@@ -67,6 +78,11 @@ class LessonConfig:
     # 旅程の設定 (trip.toml / チャンネルのトピック) の地名 (places) も読みカードにする.
     # カードは振り返りのチャンネルに出るので、trip.toml の地名を他の人に見せたくないなら False に
     reading_own_places: bool = True
+    # 新しいユーザーの既定 (/lesson-configure で変えられる). 設定ができる前からのユーザーは今までどおり
+    # (minutes の長さ・フィードバックの後に一覧・混ぜる並び, usersettings.load)
+    default_minutes: float = 5
+    default_new_list: str = "before"
+    default_order: str = "new-first"
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
 
@@ -103,6 +119,15 @@ class LessonConfig:
             ),
             reading_own_places=getattr(
                 config, "LESSON_READING_OWN_PLACES", defaults.reading_own_places
+            ),
+            default_minutes=getattr(
+                config, "LESSON_DEFAULT_MINUTES", defaults.default_minutes
+            ),
+            default_new_list=getattr(
+                config, "LESSON_DEFAULT_NEW_LIST", defaults.default_new_list
+            ),
+            default_order=getattr(
+                config, "LESSON_DEFAULT_ORDER", defaults.default_order
             ),
         )
 
@@ -155,15 +180,39 @@ class LessonConfig:
             return self.root / "tts-cache"
         return self.work_dir(name) / "cache"
 
+    def default_settings(self) -> usersettings.UserSettings:
+        return usersettings.UserSettings(
+            self.default_minutes, self.default_new_list, self.default_order
+        )
+
+    def legacy_settings(self) -> usersettings.UserSettings:
+        """設定ができる前からのユーザー: 今までの動作."""
+        return usersettings.UserSettings(self.minutes, "after", "spread")
+
+    def user_settings(self, name: str) -> usersettings.UserSettings:
+        return usersettings.load(
+            self.user_dir(name), self.default_settings(), self.legacy_settings()
+        )
+
+    def review_size(self, minutes: float) -> usersettings.ReviewSize:
+        """その長さのレッスンの振り返りの量 (BASE_MINUTES で config の値そのまま)."""
+        return usersettings.ReviewSize.for_minutes(
+            minutes, self.review_limit, self.scene_cards, self.reading_cards
+        )
+
     def generate_args(
         self,
         name: str,
         auto: bool = False,
         trip: Path | None = None,
         lever_args: list[str] | None = None,
+        minutes: float | None = None,
+        order: str | None = None,
     ) -> list[str]:
         """trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める).
-        lever_args: チャンネルのトピックのレバー (src/levers.py). None なら extra_args のまま."""
+        lever_args: チャンネルのトピックのレバー (src/levers.py). None なら extra_args のまま.
+        minutes: レッスンの長さ (None なら config の LESSON_MINUTES). order: 並び順 (usersettings.ORDER).
+        今まで (spread) は渡さない: 並び順を知らない language-learning-audio でも動く."""
         extra = levers.apply(self.extra_args, lever_args)
         if auto and "--auto" not in extra:
             extra.append("--auto")
@@ -178,7 +227,7 @@ class LessonConfig:
             "--profile",
             self.profile,
             "--minutes",
-            f"{self.minutes:g}",
+            f"{(minutes if minutes is not None else self.minutes):g}",
             "--learner",
             str(self.learner_path(name)),
             "--out",
@@ -186,6 +235,7 @@ class LessonConfig:
             "--cache",
             str(self.cache_dir(name)),
             *extra,
+            *(["--order", order] if order and order != "spread" else []),
         ]
 
     def report_args(
@@ -405,7 +455,42 @@ class Lessons:
                         logging.exception("先送りの報告失敗の通知も送れませんでした")
                 return
 
-    async def start(self, interaction: discord.Interaction, auto: bool = False) -> None:
+    async def configure(
+        self,
+        interaction: discord.Interaction,
+        minutes: float | None = None,
+        new_list: str | None = None,
+        order: str | None = None,
+    ) -> None:
+        """/lesson-configure: 指定した項目だけ変えて保存し、今の設定を本人にだけ見せる."""
+        name = self.cfg.users.get(interaction.user.id)
+        if name is None:
+            await interaction.response.send_message(
+                "このコマンドは登録されたユーザーだけが使えます。", ephemeral=True
+            )
+            return
+        settings = self.cfg.user_settings(name)
+        changed = {
+            k: v
+            for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order))
+            if v is not None
+        }
+        for k, v in changed.items():
+            setattr(settings, k, v)
+        if changed:
+            usersettings.save(self.cfg.user_dir(name), settings)
+        head = "設定を変更しました。" if changed else "今の設定です。"
+        await interaction.response.send_message(
+            f"{head}\n{settings.describe()}", ephemeral=True
+        )
+
+    async def start(
+        self,
+        interaction: discord.Interaction,
+        auto: bool = False,
+        minutes: float | None = None,
+    ) -> None:
+        """minutes: 今回だけの長さ (/lesson の minutes). None ならその人の設定."""
         name = self.cfg.users.get(interaction.user.id)
         if name is None:
             await interaction.response.send_message(
@@ -433,6 +518,8 @@ class Lessons:
         try:
             await self.flush_deferred(name)  # 進行中の記録が捨てられて残った報告 (is_busy)
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
+            m = minutes or self.cfg.user_settings(name).minutes
+            size = self.cfg.review_size(m)  # 振り返りの量はレッスンの長さに比例させる
             today = self.today()
             path = self.cfg.pending_path(name)
             queue = ReviewQueue.load(path, today)
@@ -440,7 +527,11 @@ class Lessons:
                 queue.save(path)
             if not auto:
                 await self.refresh_wording(queue, today, path)
-            keys = [] if auto else queue.select(today, self.cfg.review_limit)
+            keys = (
+                []
+                if auto
+                else queue.select(today, size.questions, open_limit=size.open_limit)
+            )
             if not keys:
                 note = "（自動モード: 振り返りなし）" if auto else ""
                 await interaction.response.send_message(
@@ -451,7 +542,9 @@ class Lessons:
                     # 進行中に届いたフィードバックと、前回届かなかった報告があれば、生成の前に送る
                     await self.flush_deferred(name, channel)
                     if await self.flush_reports(channel, name, queue, path):
-                        await self.generate_and_post(channel, name, auto=auto)
+                        await self.generate_and_post(
+                            channel, name, auto=auto, minutes=m
+                        )
 
                 await self.guarded(channel, report_then_generate())
                 return
@@ -460,18 +553,27 @@ class Lessons:
             rq: CardQueue | None = None
             sq: CardQueue | None = None
             responded = False
-            if self.cfg.reading_cards > 0 or self.cfg.scene_cards > 0:
+            if size.reading_cards > 0 or size.scene_cards > 0:
                 # カードは CLI から読むので、Discord の応答期限 (3 秒) に先に返事をしておく
                 await interaction.response.send_message("振り返りを準備しています…")
                 responded = True
-                sq, picked_scenes = await self.pick_scenes(name, queue, today, channel)
+                sq, picked_scenes = await self.pick_scenes(
+                    name, queue, today, channel, size=size
+                )
                 rq, cards = await self.pick_cards(
-                    name, queue, today, channel, reserved=len(picked_scenes)
+                    name,
+                    queue,
+                    today,
+                    channel,
+                    reserved=len(picked_scenes),
+                    size=size,
                 )
                 shown = len(cards) + len(picked_scenes)
-                if shown and self.cfg.review_limit > 0:
+                if shown and size.questions > 0:
                     # 問いをカードの分だけ減らす: 振り返りの時間は増やさない
-                    keys = queue.select(today, self.cfg.review_limit - shown)
+                    keys = queue.select(
+                        today, size.questions - shown, open_limit=size.open_limit
+                    )
             session = ReviewSession(
                 queue,
                 keys,
@@ -492,7 +594,7 @@ class Lessons:
                     if not await self.flush_reports(channel, name, queue, path):
                         return
                     if generate:
-                        await self.generate_and_post(channel, name)
+                        await self.generate_and_post(channel, name, minutes=m)
 
                 try:
                     try:
@@ -537,22 +639,36 @@ class Lessons:
             if not handed_to_view:
                 await self.release(name, channel)
 
+
     def _card_room(
-        self, queue: ReviewQueue, today: date, wanted: int, reserved: int = 0
+        self,
+        queue: ReviewQueue,
+        today: date,
+        wanted: int,
+        reserved: int = 0,
+        size: usersettings.ReviewSize | None = None,
     ) -> int:
         """カードに使える枚数: wanted までで、必ず出す問い (直前のレッスンの新出と期限の来た未解決項目.
         なくても 1 問は残す) と先に決まったカード (reserved) と合わせて review_limit を超えない分."""
-        if self.cfg.review_limit <= 0:
+        size = size or self.cfg.review_size(self.cfg.minutes)
+        if size.questions <= 0:
             return wanted
-        room = self.cfg.review_limit - max(len(queue.must_answer(today)), 1) - reserved
+        required = queue.must_answer(today, open_limit=size.open_limit)
+        room = size.questions - max(len(required), 1) - reserved
         return max(min(wanted, room), 0)
 
     async def pick_scenes(
-        self, name: str, queue: ReviewQueue, today: date, channel: Any = None
+        self,
+        name: str,
+        queue: ReviewQueue,
+        today: date,
+        channel: Any = None,
+        size: usersettings.ReviewSize | None = None,
     ) -> tuple[CardQueue, list[dict]]:
-        """今回の場面カード (scene_cards 枚まで). 読みカードより先に枠を取る."""
+        """今回の場面カード (size.scene_cards 枚まで). 読みカードより先に枠を取る."""
+        size = size or self.cfg.review_size(self.cfg.minutes)
         sq = CardQueue.load(self.cfg.scene_path(name))
-        n = self._card_room(queue, today, self.cfg.scene_cards)
+        n = self._card_room(queue, today, size.scene_cards, size=size)
         if n <= 0:
             return sq, []
         deck = await self.scene_deck(name, channel)
@@ -565,9 +681,11 @@ class Lessons:
         today: date,
         channel: Any = None,
         reserved: int = 0,
+        size: usersettings.ReviewSize | None = None,
     ) -> tuple[CardQueue, list[dict]]:
-        """今回の読みカード (reading_cards 枚まで、場面カードの残りの枠で)."""
-        n = self._card_room(queue, today, self.cfg.reading_cards, reserved)
+        """今回の読みカード (size.reading_cards 枚まで、場面カードの残りの枠で)."""
+        size = size or self.cfg.review_size(self.cfg.minutes)
+        n = self._card_room(queue, today, size.reading_cards, reserved, size=size)
         rq = CardQueue.load(self.cfg.reading_path(name))
         if n <= 0:
             return rq, []
@@ -736,8 +854,14 @@ class Lessons:
         return rc == 0
 
     async def generate_and_post(
-        self, channel: discord.abc.Messageable, name: str, auto: bool = False
+        self,
+        channel: discord.abc.Messageable,
+        name: str,
+        auto: bool = False,
+        minutes: float | None = None,
     ) -> None:
+        """minutes: 今回だけの長さ. None ならその人の設定 (並び順と一覧のタイミングはいつも設定から)."""
+        settings = self.cfg.user_settings(name)
         # 前のレッスンの新出表現の一覧を、フィードバックが来ないまま次の生成が始まるなら、ここで出す (#79)
         await newlist.release(
             channel, newlist.PendingLists(self.cfg.user_dir(name)).take_all()
@@ -748,7 +872,15 @@ class Lessons:
         with trip.resolve(self.cfg.trip_path(name), channel) as (source, warning):
             if warning:
                 await channel.send(warning)
-            await self._generate_and_post(channel, name, auto, source, lever_args)
+            await self._generate_and_post(
+                channel,
+                name,
+                auto,
+                source,
+                lever_args,
+                settings=settings,
+                minutes=minutes or settings.minutes,
+            )
 
     async def _generate_and_post(
         self,
@@ -757,7 +889,10 @@ class Lessons:
         auto: bool,
         source: trip.TripSource | None,
         lever_args: list[str] | None = None,
+        settings: usersettings.UserSettings | None = None,
+        minutes: float | None = None,
     ) -> None:
+        settings = settings or self.cfg.user_settings(name)
         work = self.cfg.work_dir(name)
         cleanup(work)
         work.mkdir(parents=True, exist_ok=True)
@@ -765,7 +900,12 @@ class Lessons:
         # 生成前の learner.json: レッスンの記録に残し、選ばれ方を後から再現できるように
         learner_before = learner.read_bytes() if learner.exists() else None
         args = self.cfg.generate_args(
-            name, auto, source.path if source else None, lever_args
+            name,
+            auto,
+            source.path if source else None,
+            lever_args,
+            minutes=minutes or settings.minutes,
+            order=settings.order,
         )
         if source is not None and str(source.path) not in args:
             source = None  # LESSON_EXTRA_ARGS の --trip が優先された
@@ -800,15 +940,31 @@ class Lessons:
             queue.add_from_plan(plan, today)
             queue.save(path)
             tomorrow = today + timedelta(days=1)
-            note = "" if auto else review_note(queue, tomorrow, self.cfg.question_limit)
+            # 次の振り返りは、その人の既定の長さで見積もる
+            size = self.cfg.review_size(settings.minutes)
+            note = (
+                ""
+                if auto
+                else review_note(queue, tomorrow, size.question_limit, size.open_limit)
+            )
             owner = next((u for u, n in self.cfg.users.items() if n == name), 0)
             guide = [FEEDBACK_GUIDE] if manifest else []
             summary = await self.readiness_summary(name, source, today)
             if summary:
                 guide.append(summary)
-            await self.post(channel, work, plan, note, owner, manifest, guide)
+            await self.post(
+                channel,
+                work,
+                plan,
+                note,
+                owner,
+                manifest,
+                guide,
+                new_list=settings.new_list,
+            )
         finally:
             cleanup(work)
+
 
     async def readiness_summary(
         self, name: str, source: trip.TripSource | None, today: date
@@ -914,6 +1070,18 @@ class Lessons:
         except OSError:
             logging.exception("新出表現の一覧を保存できませんでした")
 
+    async def _send_new_list(self, channel: Any, sent: Any, plan: dict) -> None:
+        """「レッスンと一緒に出す」: 投稿への返信として、すぐ一覧を出す. 出せなくても投稿は成功のまま."""
+        items = plan.get("new_items", [])
+        if not newlist.unique_items(items):
+            return
+        entry = {
+            "channel": getattr(channel, "id", 0),
+            "message": getattr(sent, "id", 0),
+            "text": newlist.list_text(plan["lesson_number"], items),
+        }
+        await newlist.release(channel, [entry])
+
     async def post(
         self,
         channel: discord.abc.Messageable,
@@ -923,9 +1091,13 @@ class Lessons:
         owner: int = 0,
         manifest: str | None = None,
         guide: list[str] | None = None,
+        new_list: str = "after",
     ) -> None:
         """owner: レッスンを受けた人の Discord ID (フィードバックボタンを押せる人).
-        manifest: レッスンの記録の ID. 記録がなければボタンは付けない."""
+        manifest: レッスンの記録の ID. 記録がなければボタンは付けない.
+        new_list: 新出表現の一覧を「before」ならすぐ返信で出し、「after」ならフィードバックまで取っておく
+        (#79. その間は「新出表現をすぐ表示」ボタンでも出せる)."""
+        before = new_list == "before"
         n = plan["lesson_number"]
         stem = work / f"lesson-{n:03d}"
         files = []
@@ -962,20 +1134,23 @@ class Lessons:
             text += "\n\n" + "\n".join(guide)
         try:
             if manifest:
-                view = feedback.feedback_view(owner, manifest)
+                view = feedback.feedback_view(owner, manifest, list_button=not before)
                 sent = await channel.send(text, files=files, view=view)
-                self._keep_new_list(owner, manifest, plan, channel, sent)
+                if not before:
+                    self._keep_new_list(owner, manifest, plan, channel, sent)
             else:
-                await channel.send(text, files=files)
+                sent = await channel.send(text, files=files)
+            if before:
+                await self._send_new_list(channel, sent, plan)
         finally:
             for f in files:
                 f.close()
 
 
 def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] | None:
-    """config に LESSON_ROOT と LESSON_USERS があれば /lesson, /lesson-auto,
-    /lesson-feedback (-report, -export), /version と、レッスン投稿のフィードバック
-    ボタンを登録し、スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
+    """config に LESSON_ROOT と LESSON_USERS があれば /lesson, /lesson-configure, /lesson-auto,
+    /lesson-feedback (-report, -export), /version と、レッスン投稿のボタン (フィードバック・新出表現をすぐ表示)
+    を登録し、スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
     cfg = LessonConfig.from_module(config)
     if cfg is None:
         logging.info("LESSON_ROOT / LESSON_USERS が未設定のため /lesson は無効です。")
@@ -985,12 +1160,52 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
         cfg.users, cfg.user_dir, cfg.channel_id, report_feedback=lessons.report_feedback
     )
     feedback.FeedbackButton.handler = fb
-    client.add_dynamic_items(feedback.FeedbackButton)
+    newlist.NewListButton.users = cfg.users
+    newlist.NewListButton.user_dir = cfg.user_dir
+    client.add_dynamic_items(feedback.FeedbackButton, newlist.NewListButton)
     tree = app_commands.CommandTree(client)
     guild = discord.Object(id=cfg.guild_id) if cfg.guild_id else None
 
-    async def lesson(interaction: discord.Interaction) -> None:
-        await lessons.start(interaction)
+    minute_choices = [
+        app_commands.Choice(name=f"{m}分", value=m) for m in usersettings.MINUTES_CHOICES
+    ]
+
+    @app_commands.describe(
+        minutes="今回だけのレッスンの長さ（省略すると /lesson-configure の設定）"
+    )
+    @app_commands.choices(minutes=minute_choices)
+    async def lesson(
+        interaction: discord.Interaction,
+        minutes: app_commands.Choice[int] | None = None,
+    ) -> None:
+        await lessons.start(interaction, minutes=minutes.value if minutes else None)
+
+    @app_commands.describe(
+        minutes="レッスンの長さの目安",
+        new_list="新出表現の一覧を出すタイミング",
+        order="新出と既出の並び順",
+    )
+    @app_commands.choices(
+        minutes=minute_choices,
+        new_list=[
+            app_commands.Choice(name=v, value=k) for k, v in usersettings.NEW_LIST.items()
+        ],
+        order=[
+            app_commands.Choice(name=v, value=k) for k, v in usersettings.ORDER.items()
+        ],
+    )
+    async def lesson_configure(
+        interaction: discord.Interaction,
+        minutes: app_commands.Choice[int] | None = None,
+        new_list: app_commands.Choice[str] | None = None,
+        order: app_commands.Choice[str] | None = None,
+    ) -> None:
+        await lessons.configure(
+            interaction,
+            minutes.value if minutes else None,
+            new_list.value if new_list else None,
+            order.value if order else None,
+        )
 
     async def lesson_auto(interaction: discord.Interaction) -> None:
         await lessons.start(interaction, auto=True)
@@ -1025,6 +1240,11 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
             name="lesson",
             description="前回の振り返りをして、次のレッスンを生成します",
             callback=lesson,
+        ),
+        app_commands.Command(
+            name="lesson-configure",
+            description="レッスンの長さ・新出表現の一覧のタイミング・並び順を設定します",
+            callback=lesson_configure,
         ),
         app_commands.Command(
             name="lesson-auto",
