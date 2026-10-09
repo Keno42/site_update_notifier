@@ -740,7 +740,11 @@ class EndToEndTests(unittest.TestCase):
         its sha256. Nothing from the profile is written by the bot."""
         with tempfile.TemporaryDirectory() as td:
             cfg = self.config(
-                td, review_limit=20, reading_cards=3, minutes=30
+                td,
+                review_limit=20,
+                reading_cards=3,
+                minutes=30,
+                upload_limit_mb=1000,
             )
             user = cfg.user_dir("yuki")
             user.mkdir(parents=True)
@@ -800,6 +804,7 @@ class EndToEndTests(unittest.TestCase):
                 reading_cards=1,
                 readiness_days=7,
                 minutes=30,
+                upload_limit_mb=1000,
             )
             day = {"today": D}
             lessons = Lessons(cfg, today=lambda: day["today"])
