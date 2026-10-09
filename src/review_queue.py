@@ -112,24 +112,36 @@ class ReviewQueue:
         """キューに問いを足した最新のレッスン (直前に生成したレッスン)."""
         return max((e.source_lesson for e in self.entries.values()), default=0)
 
-    def must_answer(self, today: date) -> list[str]:
+    def must_answer(self, today: date, open_limit: int | None = None) -> list[str]:
         """必ず出す問い: 直前のレッスンの、まだ答えていない新出の問いと、期限の来た未解決
         (open) 項目の問い (language-learning-audio #220). 通常の /lesson ではこれに全部答えるまで
         次のレッスンを生成しない (答えがなければ音声レッスン側は成功とみなすので、新出は必ず
         確かめる. 未解決の項目は言えたと確かめるまで閉じないので、毎回確かめる).
 
         未解決項目の問いは項目ごとに 1 件 (add_from_plan が open を付けた問い). 同じ日にもう一度
-        失敗した問いは期限が明日になるので、二度は出ない. 波括弧の残った問いは出せない (``unaskable``)."""
+        失敗した問いは期限が明日になるので、二度は出ない. 波括弧の残った問いは出せない (``unaskable``).
+
+        open_limit: 必須にする未解決項目の問いの上限 (短いレッスン, usersettings.open_limit). 古いレッスンの
+        問いから. None ならすべて. 上限を超えた分も必須でないだけで、キューに残り select で選ばれうる."""
         latest = self.latest_lesson()
-        return [
+        new = [
             k
             for k, e in self.entries.items()
             if not unaskable(e)
-            and (
-                (e.new and e.state == "unseen" and e.source_lesson == latest)
-                or (e.open and e.tier(today) < 5)
-            )
+            and e.new
+            and e.state == "unseen"
+            and e.source_lesson == latest
         ]
+        opened = [
+            k
+            for k, e in self.entries.items()
+            if not unaskable(e) and k not in new and e.open and e.tier(today) < 5
+        ]
+        if open_limit is not None:
+            opened = sorted(opened, key=lambda k: self.entries[k].source_lesson)[
+                : max(open_limit, 0)
+            ]
+        return new + opened
 
     def drop_stale_new(self) -> list[str]:
         """直前より前のレッスンの、答えないまま次のレッスンに進んだ新出の問いを外す
@@ -145,7 +157,9 @@ class ReviewQueue:
             del self.entries[k]
         return stale
 
-    def select(self, today: date, limit: int = 0) -> list[str]:
+    def select(
+        self, today: date, limit: int = 0, open_limit: int | None = None
+    ) -> list[str]:
         """今回の振り返りで出す問いのキー. 必ず出す問い (must_answer: 直前のレッスンの未回答の新出と、期限の来た未解決項目) は
         limit を超えても全部、先頭に. limit > 0 なら残りを最大 limit 問まで、期限の来ている
         問いが足りなければ期限前の問いで埋める. limit = 0 なら期限の来ている問いすべて."""
@@ -163,7 +177,7 @@ class ReviewQueue:
                 e.last_reviewed or "",
             )  # 同じ tier では bonus が最後 (満席なら最初に外れる)
 
-        required = sorted(self.must_answer(today), key=order)
+        required = sorted(self.must_answer(today, open_limit), key=order)
         rest = [k for k in sorted(self.entries, key=order) if k not in required]
         for k in rest:
             if unaskable(self.entries[k]) and self.entries[k].tier(today) < 5:

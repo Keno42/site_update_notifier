@@ -1,4 +1,5 @@
-"""新出表現の一覧は、レッスンを聞いた後に出す (#79).
+"""新出表現の一覧は、レッスンを聞いた後に出す (#79). ユーザーの設定 (/lesson-configure, usersettings) で
+「レッスンと一緒に出す」を選んだ人には投稿のすぐ後に出し、後に出す人も「新出表現をすぐ表示」で今出せる.
 
 聞く前に綴りを読むと、新しい言葉との最初の出会いが「耳で」ではなくなる (このコースは音声が先で、
 読みは別の道, language-learning-audio #133). レッスンの投稿には数だけ載せ、一覧 (表現と英語の意味)
@@ -9,10 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import discord
+
+from .interaction import answers_on_failure
 
 PENDING_FILE = "new_list_pending.json"
 LIMIT = 1900  # Discord の 1 通は 2000 字まで
@@ -111,3 +115,54 @@ async def release(channel: Any, entries: list[dict]) -> None:
             await send(channel, entry)
         except Exception:
             logging.exception("新出表現の一覧を出せませんでした")
+
+
+class NewListButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"lla-newlist:(?P<owner>[0-9]+):(?P<manifest>lesson-[0-9]+(?:\.[0-9]+)?)",
+):
+    """「新出表現をすぐ表示」: 一覧をフィードバックまで取っておく (after) 人が、今見たいときに出す.
+    custom_id にレッスンを受けた人と記録の ID を持つので、bot を再起動した後でも押せる. 押せるのはその人だけ."""
+
+    users: dict[int, str] = {}
+    user_dir: Callable[[str], Path] | None = None
+
+    def __init__(self, owner: int, manifest: str) -> None:
+        super().__init__(
+            discord.ui.Button(
+                label="新出表現をすぐ表示",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"lla-newlist:{owner}:{manifest}",
+            )
+        )
+        self.owner = owner
+        self.manifest = manifest
+
+    @classmethod
+    async def from_custom_id(  # type: ignore[override]
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Button,
+        match: re.Match[str],
+    ) -> "NewListButton":
+        return cls(int(match["owner"]), match["manifest"])
+
+    @answers_on_failure()
+    async def callback(self, interaction: discord.Interaction) -> None:
+        name = NewListButton.users.get(self.owner)
+        if (
+            interaction.user.id != self.owner
+            or name is None
+            or NewListButton.user_dir is None
+        ):
+            await interaction.response.send_message(
+                "このレッスンを受けた人だけが押せます。", ephemeral=True
+            )
+            return
+        entry = PendingLists(NewListButton.user_dir(name)).take(self.manifest)
+        if entry is None:
+            await interaction.response.send_message(
+                "一覧はもう出ています。", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(entry["text"])

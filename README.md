@@ -66,6 +66,20 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
 「できた」とみなしてペースが上がっていく。auto モードは learner.json に残るので、
 その後 `/lesson` で振り返って `--failed` を報告すれば、その分ペースは落ちる。
 
+### ユーザーごとの設定（`/lesson-configure`, #92）
+
+希望する人向けのオプション（学習設計の外）。`<LESSON_ROOT>/<user>/lesson_settings.json` に保存する。
+
+- **レッスンの長さ**: 5 / 10 / 15 / 30 分。`/lesson minutes:30` はその 1 回だけの上書きで、保存した設定は変わらない。
+  振り返り（問い・カード・必須にする未解決項目の確認）の量もこの長さに比例する（30 分で `LESSON_REVIEW_LIMIT` などの値そのまま）。
+- **新出表現の一覧**: 「レッスンと一緒に出す」（投稿への返信で、すぐ）か「フィードバックの後に出す」（今まで。
+  その間も「新出表現をすぐ表示」ボタンで出せる）。
+- **並び順**: 「新出をまとめて先に → 既出」（`generate --order new-first`）か「混ぜる」（今まで）。
+- 15 分より短いレッスンのフィードバックは「量・難しさ」「練習が足りなかった」と送信だけの簡易フォームになる。
+
+設定ができる前からの人（`learner.json` がある）は、設定ファイルを作るまで今までどおり
+（`LESSON_MINUTES`・フィードバックの後に一覧・混ぜる）。新しい人の既定は `LESSON_DEFAULT_MINUTES` など（下）。
+
 生成中はチャンネルに「生成中…（経過 3:15）音声合成 120/450」のような 1 通を出し、
 15 秒おきに書き換える。初回はすべての文を音声合成するので時間がかかる（キャッシュを
 残せば 2 回目以降は新しい文だけ）。
@@ -295,6 +309,9 @@ lesson_manifests/lesson-012/
    LESSON_SCENE_CARDS = 3                # 振り返りの場面カードの枚数（その分問いを減らす）。0 で出さない
    LESSON_READING_CARDS = 3              # 振り返りの最後の読みカードの枚数（その分問いを減らす）。0 で出さない
    LESSON_READINESS_DAYS = 7             # 場面ごとの準備状況をレッスンの投稿に添える間隔。0 で添えない
+   LESSON_DEFAULT_MINUTES = 5            # 新しい人の既定（/lesson-configure で変えられる）。5 / 10 / 15 / 30
+   LESSON_DEFAULT_NEW_LIST = "before"    # "before"（レッスンと一緒に出す）| "after"（フィードバックの後に出す）
+   LESSON_DEFAULT_ORDER = "new-first"    # "new-first"（新出を先に）| "spread"（混ぜる）。new-first は language-learning-audio #243 以降が必要
    LESSON_READING_OWN_PLACES = True      # 旅程の設定の地名も読みカードにする（trip.toml の地名を見せたくないなら False）
    ```
 

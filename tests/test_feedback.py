@@ -877,7 +877,7 @@ class GenerationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             cfg = LessonConfig(
-                root=Path(td), users={1: "yuki"}, minutes=3,
+                root=Path(td), users={1: "yuki"}, minutes=3, default_minutes=3, default_new_list="after", default_order="spread",
                 extra_args=["--provider", "stub"],
             )  # fmt: skip
             lessons = Lessons(cfg)
@@ -916,7 +916,7 @@ class GenerationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             cfg = LessonConfig(
-                root=Path(td), users={1: "yuki"}, minutes=3,
+                root=Path(td), users={1: "yuki"}, minutes=3, default_minutes=3, default_new_list="after", default_order="spread",
                 extra_args=["--provider", "stub"],
             )  # fmt: skip
             lessons = Lessons(cfg)
@@ -951,7 +951,7 @@ class GenerationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             cfg = LessonConfig(
-                root=Path(td), users={1: "yuki"}, minutes=3,
+                root=Path(td), users={1: "yuki"}, minutes=3, default_minutes=3, default_new_list="after", default_order="spread",
                 extra_args=["--provider", "stub"],
             )  # fmt: skip
             lessons = Lessons(cfg)

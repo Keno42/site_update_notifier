@@ -32,3 +32,7 @@ LESSON_SCENE_CARDS: int
 LESSON_READING_CARDS: int
 LESSON_READING_OWN_PLACES: bool
 LESSON_READINESS_DAYS: int
+# 新しいユーザーの既定 (/lesson-configure で変えられる). 設定ができる前からのユーザーは今までどおり
+LESSON_DEFAULT_MINUTES: float  # 5 / 10 / 15 / 30
+LESSON_DEFAULT_NEW_LIST: str  # "before" | "after"
+LESSON_DEFAULT_ORDER: str  # "new-first" | "spread"

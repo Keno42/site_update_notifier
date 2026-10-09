@@ -295,13 +295,16 @@ def read_review_log(user_dir: Path) -> list[dict]:
     return out
 
 
-def review_note(queue: ReviewQueue, day: date, limit: int) -> str:
+def review_note(
+    queue: ReviewQueue, day: date, limit: int, open_limit: int | None = None
+) -> str:
     """投稿に添える振り返りの見通し. ``day`` は次に振り返る日."""
     pending = queue.due_count(day)
     if not pending:
         return ""
     # 直前のレッスンの新出は上限を超えても全部出る (ReviewQueue.select)
-    asked = max(len(queue.must_answer(day)), min(pending, limit)) if limit > 0 else pending
+    required = len(queue.must_answer(day, open_limit))
+    asked = max(required, min(pending, limit)) if limit > 0 else pending
     return f"Discord 振り返り: 次回 {asked}問（確認待ち {pending}件）"
 
 

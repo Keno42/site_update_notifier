@@ -37,7 +37,7 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
-from . import newlist
+from . import newlist, usersettings
 from .interaction import (
     CHOOSE_FAILED,
     NOTE_FAILED,
@@ -382,7 +382,10 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
     }
 
 
-def form_text(record: Record, answers: Answers | None = None) -> str:
+def form_text(
+    record: Record, answers: Answers | None = None, compact: bool = False
+) -> str:
+    """compact: 短いレッスンのフォーム (当てはまること・気になった点の欄がないので、その候補も書かない)."""
     lines = [
         f"**{record.title} のフィードバック**（30秒ほど。必須なのは「今日の量・難しさ」だけです）",
         "下の欄で当てはまるものを選んで、「送信」を押してください（選ばなくていい欄は飛ばして構いません）。",
@@ -393,7 +396,7 @@ def form_text(record: Record, answers: Answers | None = None) -> str:
         lines += [
             f"・{i.get('target') or i['id']}（{i.get('meaning') or ''}）" for i in new
         ]
-    cands = record.candidates()
+    cands = [] if compact else record.candidates()
     if cands:
         lines.append(
             "レッスンの記録から機械が気づいたこと（当てはまるかどうかだけ、いちばん下の欄で教えてください）:"
@@ -471,14 +474,22 @@ class NoteModal(discord.ui.Modal, title="メモ（任意）"):
         )
 
 
+def lesson_minutes(record: "Record") -> float:
+    """レッスンの長さ (plan.json の config.minutes). なければ BASE_MINUTES."""
+    minutes = (record.plan.get("config") or {}).get("minutes")
+    return float(minutes or usersettings.BASE_MINUTES)
+
+
 class FeedbackView(discord.ui.View):
-    """新出の複数選択 2 つ・今日の量と難しさ・当てはまることと気になった点・メモ・送信."""
+    """練習が足りなかった新出・今日の量と難しさ・当てはまることと気になった点・メモ・送信.
+    compact (短いレッスン) なら、当てはまること・気になった点とメモは出さない."""
 
     def __init__(
         self,
         record: Record,
         owner_id: int,
         submit: Callable[[Answers], Awaitable[None]],
+        compact: bool = False,
     ) -> None:
         super().__init__(timeout=900)
         self.record = record
@@ -515,6 +526,13 @@ class FeedbackView(discord.ui.View):
             min_values=1,
             max_values=1,
         )
+        send: discord.ui.Button = discord.ui.Button(
+            label="送信", style=discord.ButtonStyle.primary, row=4
+        )
+        send.callback = self._send  # type: ignore[method-assign]
+        if compact:
+            self.add_item(send)
+            return
         concerns = [
             discord.SelectOption(label=_clip(record.describe(c)), value=f"c{n}")
             for n, c in enumerate(record.candidates())
@@ -529,10 +547,6 @@ class FeedbackView(discord.ui.View):
         )
         note: discord.ui.Button = discord.ui.Button(label="メモを書く", row=4)
         note.callback = self._note  # type: ignore[method-assign]
-        send: discord.ui.Button = discord.ui.Button(
-            label="送信", style=discord.ButtonStyle.primary, row=4
-        )
-        send.callback = self._send  # type: ignore[method-assign]
         self.add_item(note)
         self.add_item(send)
 
@@ -704,9 +718,10 @@ class Feedback:
             if pending is not None and interaction.channel is not None:
                 await newlist.release(interaction.channel, [pending])
 
+        compact = lesson_minutes(record) < usersettings.COMPACT_FEEDBACK_BELOW
         await interaction.response.send_message(
-            form_text(record),
-            view=FeedbackView(record, interaction.user.id, submit),
+            form_text(record, compact=compact),
+            view=FeedbackView(record, interaction.user.id, submit, compact=compact),
             ephemeral=True,
         )
 
@@ -783,7 +798,12 @@ class FeedbackButton(
             await FeedbackButton.handler.open_form(interaction, self.manifest)
 
 
-def feedback_view(owner: int, manifest: str) -> discord.ui.View:
+def feedback_view(
+    owner: int, manifest: str, list_button: bool = False
+) -> discord.ui.View:
+    """レッスン投稿のボタン. list_button: 一覧をフィードバックまで取っておくとき「新出表現をすぐ表示」も."""
     view = discord.ui.View(timeout=None)
     view.add_item(FeedbackButton(owner, manifest))
+    if list_button:
+        view.add_item(newlist.NewListButton(owner, manifest))
     return view
