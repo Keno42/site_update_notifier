@@ -615,7 +615,8 @@ class EndToEndTests(unittest.TestCase):
 
     def test_review_report_and_next_lesson_through_discord(self):
         with tempfile.TemporaryDirectory() as td:
-            cfg = self.config(td, review_limit=2)
+            # 5 minutes: a part is now introduced inside its whole (language-learning-audio #239), a longer exercise, so three new items no longer fit in 3
+            cfg = self.config(td, review_limit=2, minutes=5)
             day = {"today": D}
             lessons = Lessons(cfg, today=lambda: day["today"])
             channel = FakeChannel()
