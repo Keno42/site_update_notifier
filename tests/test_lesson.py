@@ -541,7 +541,7 @@ class EndToEndTests(unittest.TestCase):
             default_minutes=kw.get("minutes", 3),
             default_new_list="after",
             default_order="spread",
-            extra_args=["--provider", "stub"],
+            extra_args=["--provider", "stub", "--new", "3"],
             **kw,
         )
 
