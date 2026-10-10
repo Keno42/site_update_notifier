@@ -51,11 +51,17 @@ class CardQueue:
         new = [c["id"] for c in deck if c["id"] not in self.cards]
         return [by_id[k] for k in (due + new)[:n]]
 
-    def record(self, card_id: str, result: str, today: date) -> None:
+    def record(self, card_id: str, result: str, today: date, skip_first_ok: bool = False) -> None:
+        """``skip_first_ok``: 場面カードを初めて見て「言えた」ときは、「言えた」の最初の段 (1 日) を飛ばして 3 日後から
+        始める (language-learning-audio の場面カード: 翌朝また出ると繰り返しに感じる, site_update_notifier#95). 言えなかった・迷った
+        の 1 日、読みカードと項目の問いの間隔は変えない."""
         if result not in INTERVALS:
             raise ValueError(result)
+        first = card_id not in self.cards
         s = self.cards.setdefault(card_id, CardState())
         s.streak = s.streak + 1 if s.state == result else 1
+        if skip_first_ok and first and result == "ok":
+            s.streak = 2  # the first step of the ok sequence is skipped: 3 days now, 7 after the next «ok»
         s.state = result
         s.reviews += 1
         s.last_reviewed = today.isoformat()
