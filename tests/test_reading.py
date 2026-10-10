@@ -88,6 +88,24 @@ class CardQueueTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             q.record("opid", "maybe", D)
 
+    def test_skip_first_ok_starts_a_card_answered_well_at_three_days(self):
+        """site_update_notifier#95: «Það er svo kalt í dag!» came up two days running. A scene card answered ok on its first showing starts at 3 days."""
+        q = CardQueue()
+        q.record("a6_so_cold", "ok", D, skip_first_ok=True)
+        self.assertEqual(q.cards["a6_so_cold"].due, (D + timedelta(days=3)).isoformat())
+        q.record("a6_so_cold", "ok", D + timedelta(days=3), skip_first_ok=True)
+        self.assertEqual(q.cards["a6_so_cold"].due, (D + timedelta(days=10)).isoformat(), "then 7 days: the sequence goes on")
+        # only a first showing, and only «ok»: shaky and failed keep their day, a card seen before goes on as it was
+        for result in ("shaky", "failed"):
+            q.record(result, result, D, skip_first_ok=True)
+            self.assertEqual(q.cards[result].due, (D + timedelta(days=1)).isoformat())
+        q.record("again", "failed", D, skip_first_ok=True)
+        q.record("again", "ok", D + timedelta(days=1), skip_first_ok=True)
+        self.assertEqual(q.cards["again"].due, (D + timedelta(days=2)).isoformat())
+        # the default is unchanged: reading cards and questions
+        q.record("reading", "ok", D)
+        self.assertEqual(q.cards["reading"].due, (D + timedelta(days=1)).isoformat())
+
     def test_cards_gone_from_the_deck_are_not_shown(self):
         q = CardQueue()
         q.record("old_card", "failed", D)

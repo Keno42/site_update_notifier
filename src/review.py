@@ -130,7 +130,7 @@ class ReviewSession:
                 else (self.cards, self.reading_queue, self.reading_path)
             )
             if queue is not None and path is not None:
-                queue.record(cards[n]["id"], result, self.today)
+                queue.record(cards[n]["id"], result, self.today, skip_first_ok=kind == "scene")  # 場面カードは最初の「言えた」を 3 日後から (#95)
                 queue.save(path)
         self.results.append(result)
 
