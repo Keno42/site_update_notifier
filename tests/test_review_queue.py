@@ -446,3 +446,119 @@ class BonusTests(unittest.TestCase):
             {k: e.bonus for k, e in again.entries.items()},
             {k: e.bonus for k, e in q.entries.items()},
         )
+
+
+def stored(items, answer, prompt="p", due=D, state="ok", lesson=20, open_=False):
+    return Entry(items=items, prompt=prompt, answer=answer, source_lesson=lesson, state=state, due=due.isoformat(), open=open_)
+
+
+class RefinementTests(unittest.TestCase):
+    """site_update_notifier#96 (language-learning-audio #239): the queue keeps questions from earlier plans, so a part's bare question has to leave it
+    when the plan stops asking it, and the whole's question has to be there."""
+
+    def old_queue(self):
+        q = ReviewQueue()
+        q.entries = {
+            "hjalpina": stored(["hjalpina"], "hjálpina", "for the help"),
+            "matinn": stored(["matinn"], "matinn", "for the meal", state="failed", due=D, open_=True),
+            "tvo_fullordna": stored(["tvo_fullordna"], "tvo fullorðna", "two adults", due=D + timedelta(days=3)),
+            "partei_takk": stored(["partei_takk"], "Tvo fullorðna, takk.", "Two adults, please.", due=D + timedelta(days=7)),
+            "eigdu_godan_dag": stored(["eigdu_godan_dag"], "Eigðu góðan dag.", "Wish him a good day."),
+            "eigdu_godur": stored(["eigdu_godur"], "Eigðu góðan dag.", "Have a good day.", due=D + timedelta(days=5)),
+        }
+        return q
+
+    def lesson21(self):
+        return {
+            "lesson_number": 21,
+            "new_items": [],
+            "open_items": ["matinn"],
+            "review": [
+                {"items": ["hjalpina"], "prompt": "Say in Icelandic: Thanks for the help.", "answer": "Takk fyrir hjálpina."},
+                {"items": ["matinn"], "prompt": "Say in Icelandic: Thanks for the meal.", "answer": "Takk fyrir matinn."},
+                {"items": ["partei_takk", "tvo_fullordna"], "prompt": "Two adults, please.", "answer": "Tvo fullorðna, takk."},
+                {"items": ["eigdu_godan_dag", "eigdu_godur"], "prompt": "Wish him a good day.", "answer": "Eigðu góðan dag."},
+            ],
+            "review_refined": [
+                {"items": ["hjalpina"], "kind": "through_whole", "was": "hjálpina", "now": "Takk fyrir hjálpina."},
+                {"items": ["matinn"], "kind": "through_whole", "was": "matinn", "now": "Takk fyrir matinn."},
+                {"items": ["tvo_fullordna"], "kind": "beside_whole", "answer": "tvo fullorðna", "whole": "Tvo fullorðna, takk."},
+                {"items": ["eigdu_godur"], "kind": "same_answer", "answer": "Eigðu góðan dag."},
+            ],
+        }
+
+    def test_the_replay_of_lesson_21_leaves_no_bare_part_and_one_answer_each(self):
+        q = self.old_queue()
+        q.add_from_plan(self.lesson21(), D)
+        answers = [e.answer for e in q.entries.values()]
+        self.assertEqual(len(answers), len(set(answers)), "one answer, one question")
+        self.assertNotIn("matinn", answers)
+        self.assertNotIn("hjálpina", answers)
+        self.assertNotIn("tvo fullorðna", answers)
+        self.assertEqual(answers.count("Eigðu góðan dag."), 1)
+        self.assertEqual(q.entries["matinn"].answer, "Takk fyrir matinn.", "the open item is asked through its sentence")
+        self.assertTrue(q.entries["matinn"].open)
+
+    def test_the_whole_takes_the_dropped_questions_due_and_the_part_is_credited_to_it(self):
+        q = self.old_queue()
+        q.add_from_plan(self.lesson21(), D)
+        cover = q.entries["partei_takk+tvo_fullordna"]
+        self.assertEqual((cover.items, cover.answer), (["partei_takk", "tvo_fullordna"], "Tvo fullorðna, takk."))
+        self.assertEqual(cover.due, (D + timedelta(days=3)).isoformat(), "the earlier due of the two")
+        self.assertNotIn("tvo_fullordna", q.entries)
+        both = q.entries["eigdu_godan_dag+eigdu_godur"]
+        self.assertEqual(both.due, D.isoformat(), "the same answer asked twice becomes one, due at the earlier date")
+
+    def test_an_open_part_is_asked_through_the_whole_that_took_its_question(self):
+        q = ReviewQueue()
+        q.entries = {
+            "tvo_fullordna": stored(["tvo_fullordna"], "tvo fullorðna", state="failed", due=D, open_=True),
+            "partei_takk": stored(["partei_takk"], "Tvo fullorðna, takk.", due=D + timedelta(days=7)),
+        }
+        plan_ = {
+            "lesson_number": 21, "new_items": [], "open_items": ["tvo_fullordna"],
+            "review": [{"items": ["partei_takk", "tvo_fullordna"], "prompt": "Two adults, please.", "answer": "Tvo fullorðna, takk."}],
+            "review_refined": [{"items": ["tvo_fullordna"], "kind": "beside_whole", "answer": "tvo fullorðna", "whole": "Tvo fullorðna, takk."}],
+        }
+        q.add_from_plan(plan_, D)
+        self.assertEqual(list(q.entries), ["partei_takk+tvo_fullordna"])
+        cover = q.entries["partei_takk+tvo_fullordna"]
+        self.assertTrue(cover.open)
+        self.assertEqual(cover.due, D.isoformat(), "brought forward by the open part")
+        self.assertEqual(q.must_answer(D), ["partei_takk+tvo_fullordna"])
+
+    def test_a_part_with_no_home_leaves_the_queue_and_bonus_questions_stay(self):
+        q = ReviewQueue()
+        q.entries = {"hundrad": stored(["hundrad"], "hundrað"), "bonus:2:x": Entry(["x"], "p", "a", 2, due=D.isoformat(), bonus=True)}
+        q.add_from_plan({"lesson_number": 2, "new_items": [], "review": [], "review_refined": [{"items": ["hundrad"], "kind": "no_home", "answer": "hundrað"}]}, D)
+        self.assertEqual(list(q.entries), ["bonus:2:x"])
+
+    def test_through_whole_keeps_the_key_and_the_schedule(self):
+        q = self.old_queue()
+        before = q.entries["hjalpina"]
+        due, state = before.due, before.state
+        q.add_from_plan(self.lesson21(), D)
+        self.assertEqual((q.entries["hjalpina"].answer, q.entries["hjalpina"].due, q.entries["hjalpina"].state), ("Takk fyrir hjálpina.", due, state))
+
+    def test_one_pass_over_the_existing_queue_applies_what_refine_review_returns(self):
+        """The one-time pass (`Lessons.refine_queue`): audiolesson refine-review gives the refined questions and the report; the queue is rewritten from them."""
+        q = self.old_queue()
+        refined = self.lesson21()
+        n = q.apply_refinement(refined["review"], refined["review_refined"], D, rewrite=True)
+        self.assertGreater(n, 0)
+        answers = [e.answer for e in q.entries.values()]
+        self.assertEqual(len(answers), len(set(answers)))
+        self.assertEqual(q.entries["hjalpina"].prompt, "Say in Icelandic: Thanks for the help.", "reworded by the refined question")
+        self.assertEqual(q.entries["matinn"].answer, "Takk fyrir matinn.")
+        # nothing to do the second time
+        self.assertEqual(q.apply_refinement(refined["review"], refined["review_refined"], D, rewrite=True), 0)
+
+    def test_the_refined_version_is_saved(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.json"
+            q = self.old_queue()
+            q.refined = 1
+            q.save(path)
+            self.assertEqual(ReviewQueue.load(path, D).refined, 1)
+            self.assertEqual(ReviewQueue().refined, 0)
+

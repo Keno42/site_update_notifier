@@ -46,7 +46,7 @@ from . import (
 )
 from .cards import CardQueue
 from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, review_note
-from .review_queue import ReviewQueue
+from .review_queue import REFINE_VERSION, ReviewQueue
 
 LLA_DIR = (
     Path(__file__).resolve().parent.parent / "external" / "language-learning-audio"
@@ -310,6 +310,7 @@ async def run_cli(
     cfg: LessonConfig,
     args: list[str],
     on_progress: Callable[[str], Awaitable[None]] | None = None,
+    stdin: str | None = None,
 ) -> tuple[int, str, str]:
     """CLI を実行する。stderr の進捗行 (「synthesized 120/450 …」) を on_progress に渡し、
     cfg.timeout_min を超えたら止めて rc=-1 を返す."""
@@ -319,10 +320,15 @@ async def run_cli(
         "audiolesson.cli",
         *args,
         cwd=str(cfg.lla_dir),
+        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     assert proc.stdout is not None and proc.stderr is not None
+    if stdin is not None and proc.stdin is not None:
+        proc.stdin.write(stdin.encode())
+        await proc.stdin.drain()
+        proc.stdin.close()
     err_chunks: list[bytes] = []
 
     async def read_stderr(stream: asyncio.StreamReader) -> None:
@@ -526,6 +532,7 @@ class Lessons:
             if not auto and queue.drop_stale_new():
                 queue.save(path)
             if not auto:
+                await self.refine_queue(name, queue, today, path)
                 await self.refresh_wording(queue, today, path)
             keys = (
                 []
@@ -719,6 +726,37 @@ class Lessons:
         if source is not None:
             args += ["--trip", str(source.path)]
         return await self._deck(args, scenes.parse_scenes, "場面カード")
+
+    async def refine_queue(
+        self, name: str, queue: ReviewQueue, today: date, path: Path
+    ) -> None:
+        """前のレッスンまでの問いを、一度だけ audiolesson refine-review で整える (language-learning-audio #239, #96): plan.json
+        の review と同じ規則 (各表現を一度だけ、部分は全体を通して、同じ答えの問いは一つに). #254 より前の plan の問いは
+        整っていないので、これをしないと「matinn」のような部分の問いがキューに残る. 読めなければ、保存したままにして次に
+        もう一度試す."""
+        if queue.refined >= REFINE_VERSION or not queue.entries:
+            return
+        review = [
+            {"items": e.items, "prompt": e.prompt, "answer": e.answer}
+            for e in queue.entries.values()
+            if not e.bonus
+        ]
+        args = ["refine-review", self.cfg.curriculum, "--known", self.cfg.known, "-l", str(self.cfg.learner_path(name))]
+        try:
+            rc, out, _ = await asyncio.wait_for(
+                run_cli(self.cfg, args, stdin=json.dumps({"review": review}, ensure_ascii=False)), timeout=60
+            )
+            if rc != 0:
+                logging.warning(f"キューの問いを整えられませんでした (rc={rc})")
+                return
+            data = json.loads(out)
+            questions, rows = data["review"], data["refined"]
+        except Exception as e:
+            logging.warning(f"キューの問いを整えられませんでした ({type(e).__name__})")
+            return
+        queue.apply_refinement(questions, rows, today, rewrite=True)
+        queue.refined = REFINE_VERSION
+        queue.save(path)
 
     async def refresh_wording(
         self, queue: ReviewQueue, today: date, path: Path

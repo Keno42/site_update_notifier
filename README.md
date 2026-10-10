@@ -58,6 +58,11 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
   なる（手動モードのペースに効く）のは、そのレッスンの問いに答えたときだけ
 - 報告が失敗しても答えは失われない。届いていない報告はキューに残り、次の `/lesson` の最初に
   送り直す（届いた報告は二度送らない）
+- 音声レッスンの plan が出さなくなった問いは、キューにも残さない（language-learning-audio #239）: `plan.json` の `review_refined`
+  のうち、部分の問いが文に含まれた・同じ答えの問いが一つになった・家のない部分が復習から外れた、の問いをキューから外し、
+  それを含む文の問いが入っていなければ入れる（外した問いの期限と未解決の印を引き継ぐ）。#254 より前の plan の問いは、最初の
+  `/lesson` で一度だけ `audiolesson refine-review` にかけて整える（`pending_review.json` の `refined` が済んだ印。
+  読めなければ、保存したままにして次にもう一度試す）。
 - 旧形式の `pending_review.json`（`{"lesson", "questions"}`）は最初に読んだときに変換する。
   変換した問いはすべて未回答・当日期限で、元のファイルは `pending_review.json.v1.bak` に残る
 
