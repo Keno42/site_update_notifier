@@ -127,6 +127,8 @@ class SessionTests(unittest.TestCase):
                 (saved["a3_bag"].state, saved["a8_toilet"].state), ("failed", "shaky")
             )
             self.assertEqual(list(CardQueue.load(s.reading_path).cards), ["opid"])
+            # the reading card answered ok comes back the next day; a scene card would wait three days (#95)
+            self.assertEqual(CardQueue.load(s.reading_path).cards["opid"].due, (D + timedelta(days=1)).isoformat())
             self.assertEqual(s.failed_ids(), [], "scene cards are not curriculum items")
             summary = s.summary()
             self.assertIn("**場面**: 2/2枚（迷った 1・言えなかった 1）", summary)
@@ -157,6 +159,17 @@ class FakeInteraction:
 
 
 class SpeakerTests(unittest.TestCase):
+    def test_a_scene_card_answered_well_the_first_time_comes_back_in_three_days(self):
+        with tempfile.TemporaryDirectory() as td:
+            s = session_with(td, [RESPOND, INITIATE])
+            s.rate("ok")
+            s.rate("ok")
+            s.rate("ok")  # the two questions, then the scene card
+            s.rate("ok")
+            saved = CardQueue.load(s.scene_path).cards
+            self.assertEqual({k: v.due for k, v in saved.items()}, {k: (D + timedelta(days=3)).isoformat() for k in saved})
+            self.assertEqual(len(saved), 2)
+
     def test_a_respond_card_plays_the_partner_before_and_the_reply_after(self):
         async def scenario(td):
             spoken = []
