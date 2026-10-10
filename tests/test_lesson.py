@@ -527,6 +527,67 @@ async def answer_all(view, first="言えなかった", second="言えた", rest=
     return n
 
 
+class RefineQueueTests(unittest.TestCase):
+    """site_update_notifier#96: the one-time pass over the queue with `audiolesson refine-review`. The CLI is replaced by a canned answer: the rules themselves
+    are language-learning-audio's (its own tests) and `RefinementTests` in test_review_queue."""
+
+    def config(self, td):
+        return LessonConfig(root=Path(td), users={1: "yuki"}, default_minutes=5, default_new_list="after", default_order="spread")
+
+    def queue(self):
+        q = ReviewQueue()
+        q.entries = {
+            "matinn": Entry(["matinn"], "for the meal", "matinn", 20, state="failed", due=D.isoformat(), open=True),
+            "eigdu_godan_dag": Entry(["eigdu_godan_dag"], "p", "Eigðu góðan dag.", 20, state="ok", due=D.isoformat()),
+            "eigdu_godur": Entry(["eigdu_godur"], "q", "Eigðu góðan dag.", 20, state="ok", due=(D + timedelta(days=5)).isoformat()),
+        }
+        return q
+
+    refined = {
+        "review": [
+            {"items": ["matinn"], "prompt": "Say in Icelandic: Thanks for the meal.", "answer": "Takk fyrir matinn."},
+            {"items": ["eigdu_godan_dag", "eigdu_godur"], "prompt": "p", "answer": "Eigðu góðan dag."},
+        ],
+        "refined": [{"items": ["matinn"], "kind": "through_whole"}, {"items": ["eigdu_godur"], "kind": "same_answer"}],
+    }
+
+    def run_pass(self, rc, out):
+        calls = []
+
+        async def fake_run_cli(cfg, args, on_progress=None, stdin=None):
+            calls.append((args, stdin))
+            return rc, out, ""
+
+        with tempfile.TemporaryDirectory() as td:
+            lessons = Lessons(self.config(td), today=lambda: D)
+            path = Path(td) / "pending_review.json"
+            queue = self.queue()
+            with mock.patch("src.lesson.run_cli", fake_run_cli):
+                asyncio.run(lessons.refine_queue("yuki", queue, D, path))
+                asyncio.run(lessons.refine_queue("yuki", queue, D, path))  # the second time asks nothing
+            return queue, calls, path.exists()
+
+    def test_the_queue_is_refined_once_and_the_version_is_saved(self):
+        queue, calls, saved = self.run_pass(0, json.dumps(self.refined))
+        self.assertEqual(len(calls), 1)
+        args, stdin = calls[0]
+        self.assertEqual(args[0], "refine-review")
+        self.assertIn("-l", args)
+        sent = json.loads(stdin)["review"]
+        self.assertEqual([q["items"] for q in sent], [["matinn"], ["eigdu_godan_dag"], ["eigdu_godur"]])
+        self.assertEqual(queue.entries["matinn"].answer, "Takk fyrir matinn.")
+        self.assertTrue(queue.entries["matinn"].open)
+        self.assertEqual(list(queue.entries), ["matinn", "eigdu_godan_dag+eigdu_godur"])
+        self.assertEqual((queue.refined, saved), (1, True))
+
+    def test_an_audio_side_that_cannot_refine_leaves_the_queue_as_it_was_and_tries_again(self):
+        queue, calls, saved = self.run_pass(2, "")
+        self.assertEqual((len(calls), queue.refined, saved), (2, 0, False), "asked both times: nothing was marked done")
+        self.assertEqual(queue.entries["matinn"].answer, "matinn")
+        queue, calls, saved = self.run_pass(0, "not json")
+        self.assertEqual((queue.refined, saved), (0, False))
+
+
 class EndToEndTests(unittest.TestCase):
     """実際の CLI (stub 音声) で 生成 → 投稿 → 振り返り → report → 次の生成."""
 
@@ -615,7 +676,8 @@ class EndToEndTests(unittest.TestCase):
 
     def test_review_report_and_next_lesson_through_discord(self):
         with tempfile.TemporaryDirectory() as td:
-            cfg = self.config(td, review_limit=2)
+            # 5 minutes: a part is now introduced inside its whole (language-learning-audio #239), a longer exercise, so three new items no longer fit in 3
+            cfg = self.config(td, review_limit=2, minutes=5)
             day = {"today": D}
             lessons = Lessons(cfg, today=lambda: day["today"])
             channel = FakeChannel()

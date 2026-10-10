@@ -99,12 +99,25 @@ def key_for(items: list[str]) -> str:
     return "+".join(items)
 
 
+# language-learning-audio #239: plan.json の review_refined のうち、問いが plan から消える種類 (部分の問いが全体の問いに
+# 含まれた / 同じ答えの問いが一つにまとまった / 家のない部分が復習から外れた)
+DROPPING = ("beside_whole", "same_answer", "no_home")
+# キューを audiolesson refine-review で一度整えた印 (保存する). 規則が変わったら上げて、もう一度整える
+REFINE_VERSION = 1
+
+
+def _norm(text: str) -> str:
+    return text.strip().rstrip(".?!…").strip().lower()
+
+
 @dataclass
 class ReviewQueue:
     entries: dict[str, Entry] = field(default_factory=dict)
     # 出題元レッスン → まだ report していない結果別の項目. キーがあること自体が
     # 「このレッスンの問いに答えたが、まだ報告していない」を表す
     pending_reports: dict[int, Report] = field(default_factory=dict)
+    # 古い plan の問いを audiolesson refine-review で整えた版 (0: まだ). REFINE_VERSION に届くまで一度やる (#96)
+    refined: int = 0
 
     # ---- 選ぶ ---------------------------------------------------------
 
@@ -315,9 +328,78 @@ class ReviewQueue:
             )
             queued.update(items)
             added += 1
+        # language-learning-audio #239: plan が出さなくなった問い (全体に含まれた部分、同じ答え、家のない部分) を、前のレッスンの
+        # 古い問いのままキューに残さない. 全体の問いが入っていなければ入れ、外した問いの期限と open を引き継ぐ
+        self.apply_refinement(plan.get("review", []), plan.get("review_refined") or [], today)
         if "open_items" in plan or "open_not_fitted" in plan:
             self._ask_open_items(open_ids, today)
         return added
+
+    def apply_refinement(
+        self, questions: list[dict], rows: list[dict], today: date, rewrite: bool = False
+    ) -> int:
+        """audiolesson の ``review_refined`` (``rows``: {"items", "kind"}) と、整えたあとの問い (``questions``) をキューに当てる
+        (site_update_notifier#96, language-learning-audio #239).
+
+        1. ``DROPPING`` の行の項目をキーにした問い (bonus 以外) を外す.
+        2. 外した問いの項目を含む問いが、キューになければ入れる (外した問いのうち一番早い期限と open を引き継ぐ). すでにあれば
+           (同じ答えの問いが別のキーで入っていれば、項目を足したキーに付け替えて) 期限は早い方、open はどちらか.
+        3. ``rewrite``: 整えた問いの問い方 (prompt / answer) で、同じキーの問いを書き直す (キューを一度整えるとき. plan のときは
+           ``add_from_plan`` がすでに書き直している).
+
+        結果 (state / streak) は項目ごとに音声レッスン側が持つので、外した問いのものは移さない. 変えた件数を返す."""
+        changed = 0
+        removed: list[Entry] = []
+        for row in rows:
+            if row.get("kind") not in DROPPING:
+                continue
+            gone = self.entries.get(key_for(list(row.get("items") or [])))
+            if gone is not None and not gone.bonus:
+                removed.append(self.entries.pop(key_for(list(row.get("items") or []))))
+                changed += 1
+        for q in questions:
+            items = list(q.get("items") or [])
+            prompt, answer = q.get("prompt"), q.get("answer")
+            if not items or q.get("bonus") or not isinstance(prompt, str) or not isinstance(answer, str):
+                continue
+            key = key_for(items)
+            mine = [r for r in removed if set(r.items) <= set(items)]
+            entry = self.entries.get(key)
+            # 同じ答えの問いが、項目の少ないキーで入っている: 一つにまとめる (全体の問いがまだなければ、その問いを項目を足したキーに付け替える)
+            same = [
+                k
+                for k, e in self.entries.items()
+                if k != key and not e.bonus and _norm(e.answer) == _norm(answer) and set(e.items) <= set(items)
+            ]
+            for k in same:
+                other = self.entries.pop(k)
+                changed += 1
+                if entry is None:
+                    entry = other
+                    entry.items = items
+                    self.entries[key] = entry
+                else:
+                    mine.append(other)  # its due and open go to the question that stays
+            if entry is None:
+                if not mine:
+                    continue
+                entry = Entry(
+                    items=items,
+                    prompt=prompt,
+                    answer=answer,
+                    source_lesson=max(r.source_lesson for r in mine),
+                    due=min(r.due for r in mine) or today.isoformat(),
+                )
+                self.entries[key] = entry
+                changed += 1
+            for r in mine:
+                if r.due and (not entry.due or r.due < entry.due):
+                    entry.due = r.due
+                entry.open = entry.open or r.open
+            if rewrite and (entry.prompt, entry.answer) != (prompt, answer):
+                entry.prompt, entry.answer = prompt, answer
+                changed += 1
+        return changed
 
     def refresh_wording(self, fresh: dict[str, dict]) -> int:
         """1 項目だけの問い (キーが項目 ID) のうち、古くなったものだけ今の言い方 (``fresh`` = {ID: {"prompt",
@@ -398,6 +480,7 @@ class ReviewQueue:
             return cls(
                 {k: Entry(**v) for k, v in raw.get("items", {}).items()},
                 {int(n): _report(r) for n, r in raw.get("pending_reports", {}).items()},
+                int(raw.get("refined", 0)),
             )
         queue = cls.from_legacy(raw, today)
         shutil.copyfile(path, path.with_name(path.name + ".v1.bak"))
@@ -426,6 +509,7 @@ class ReviewQueue:
             "format": FORMAT,
             "items": {k: asdict(e) for k, e in self.entries.items()},
             "pending_reports": {str(n): v for n, v in self.pending_reports.items()},
+            "refined": self.refined,
         }
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
