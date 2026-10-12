@@ -143,6 +143,10 @@ class LessonConfig:
     def pending_path(self, name: str) -> Path:
         return self.user_dir(name) / "pending_review.json"
 
+    def generating_path(self, name: str) -> Path:
+        """今日の振り返りが済み、生成を始めたが、まだ投稿できていない印 (#110): 生成が失敗したら、この印があるので /lesson は振り返りを飛ばして生成だけやり直す."""
+        return self.user_dir(name) / "generating.json"
+
     def reading_path(self, name: str) -> Path:
         return self.user_dir(name) / "reading_queue.json"
 
@@ -441,6 +445,37 @@ def failure_message(rc_err: str) -> str:
     return f"生成に失敗しました:\n```\n{_tail(redact(rc_err))}\n```"
 
 
+class RetryView(discord.ui.View):
+    """生成に失敗したメッセージの「もう一度生成」ボタン (#110): 振り返りも「できた前提」も使わずに同じ長さで生成し直す. そのレッスンの本人だけ.
+    /lesson と同じ busy の守りがあるので、二重には走らない."""
+
+    def __init__(self, lessons: "Lessons", name: str, minutes: float, timeout: float = 6 * 3600) -> None:
+        super().__init__(timeout=timeout)
+        self.lessons = lessons
+        self.name = name
+        self.minutes = minutes
+
+    @discord.ui.button(label="もう一度生成", style=discord.ButtonStyle.primary)
+    async def retry(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        lessons = self.lessons
+        if lessons.cfg.users.get(interaction.user.id) != self.name:
+            await interaction.response.send_message("このボタンは本人だけが使えます。", ephemeral=True)
+            return
+        if lessons.is_busy(self.name):
+            await interaction.response.send_message("前の /lesson がまだ進行中です。", ephemeral=True)
+            return
+        channel = interaction.channel
+        if not isinstance(channel, discord.abc.Messageable):
+            await interaction.response.send_message("このチャンネルには投稿できません。", ephemeral=True)
+            return
+        lessons.busy[self.name] = time.monotonic()
+        try:
+            await interaction.response.send_message("生成をやり直します…")
+            await lessons.guarded(channel, lessons.regenerate(channel, self.name, self.minutes))
+        finally:
+            await lessons.release(self.name, channel)
+
+
 # ---------------------------------------------------------------- flow
 
 
@@ -456,6 +491,24 @@ class Lessons:
         # 進行中に届いたフィードバックの報告 (名前 → [(レッスン, 項目, 負荷)]). learner.json には鍵がないので、
         # 生成と並べて走らせず、/lesson が終わってから送る (language-learning-audio #218)
         self.deferred: dict[str, list[tuple[int, list[str], str | None]]] = {}
+
+    def mark_generating(self, name: str, minutes: float) -> None:
+        path = self.cfg.generating_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"date": self.today().isoformat(), "minutes": minutes}), "utf-8")
+
+    def clear_generating(self, name: str) -> None:
+        self.cfg.generating_path(name).unlink(missing_ok=True)
+
+    def failed_generation(self, name: str) -> float | None:
+        """今日、振り返りを済ませたあとの生成が失敗して残っているなら、その長さ (分). なければ None."""
+        try:
+            raw = json.loads(self.cfg.generating_path(name).read_text("utf-8"))
+            if raw["date"] != self.today().isoformat():
+                return None
+            return float(raw["minutes"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
     def busy_limit(self) -> float:
         """/lesson の進行中でいられる上限 (秒): 振り返りの画面の待ち + 報告と生成 (それぞれ cfg.timeout_min が上限)."""
@@ -566,6 +619,13 @@ class Lessons:
             await self.flush_deferred(name)  # 進行中の記録が捨てられて残った報告 (is_busy)
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
             m = minutes or self.cfg.user_settings(name).minutes
+            if not auto and (again := self.failed_generation(name)) is not None:
+                # 今日の振り返りは済み、報告も届き、生成だけが失敗した: 振り返りをもう一度やらずに、生成だけやり直す (#110)
+                await interaction.edit_original_response(
+                    content="今日の振り返りは済んでいます。生成だけやり直します。"
+                )
+                await self.guarded(channel, self.regenerate(channel, name, minutes or again))
+                return
             size = self.cfg.review_size(m)  # 振り返りの量はレッスンの長さに比例させる
             today = self.today()
             path = self.cfg.pending_path(name)
@@ -590,6 +650,8 @@ class Lessons:
                     # 進行中に届いたフィードバックと、前回届かなかった報告があれば、生成の前に送る
                     await self.flush_deferred(name, channel)
                     if await self.flush_reports(channel, name, queue, path):
+                        if not auto:
+                            self.mark_generating(name, m)  # 失敗したらやり直しは振り返りを飛ばす (#110)
                         await self.generate_and_post(
                             channel, name, auto=auto, minutes=m
                         )
@@ -638,6 +700,7 @@ class Lessons:
                     if not await self.flush_reports(channel, name, queue, path):
                         return
                     if generate:
+                        self.mark_generating(name, m)  # 投稿できたら消す: 失敗したら /lesson とボタンが振り返りを飛ばす (#110)
                         await self.generate_and_post(channel, name, minutes=m)
 
                 try:
@@ -988,7 +1051,10 @@ class Lessons:
             await status.finish(rc == 0)
             if rc != 0:
                 logging.error("生成に失敗しました (%s): %s", name, err or out)  # 全文はログへ
-                await channel.send(failure_message(err or out))
+                await channel.send(
+                    failure_message(err or out),
+                    **({} if auto else {"view": RetryView(self, name, minutes or settings.minutes)}),
+                )
                 return
             plan_path = latest_plan(work)
             if plan_path is None:
@@ -1032,9 +1098,18 @@ class Lessons:
                 guide,
                 new_list=settings.new_list,
             )
+            self.clear_generating(name)  # 投稿できた
         finally:
             cleanup(work)
 
+
+    async def regenerate(self, channel: discord.abc.Messageable, name: str, minutes: float) -> None:
+        """失敗した生成のやり直し (#110): 振り返りも「できた前提」も使わず、報告が残っていれば先に送って、同じ長さで生成する."""
+        queue = ReviewQueue.load(self.cfg.pending_path(name), self.today())
+        await self.flush_deferred(name, channel)
+        if await self.flush_reports(channel, name, queue, self.cfg.pending_path(name)):
+            self.mark_generating(name, minutes)
+            await self.generate_and_post(channel, name, minutes=minutes)
 
     async def readiness_summary(
         self, name: str, source: trip.TripSource | None, today: date
