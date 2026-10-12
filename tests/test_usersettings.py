@@ -137,6 +137,7 @@ class GenerateTests(unittest.TestCase):
                 channel_id=0,
                 channel=channel,
                 response=Response(),
+                edit_original_response=mock.AsyncMock(),
             )
             with mock.patch.object(
                 Lessons, "generate_and_post", new=mock.AsyncMock()
