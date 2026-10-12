@@ -630,3 +630,37 @@ class RetentionShareTests(unittest.TestCase):
         q.entries["o3"].open = True
         q.entries["o2"].state = "failed"
         self.assertEqual([k for k in q.select(D, limit=9) if k in ("o1", "o2", "o3") and q.entries[k].state == "ok" and not q.entries[k].open], ["o1"])
+
+
+class GapReportTests(unittest.TestCase):
+    """language-learning-audio #220: an answer is reported with the days since the question was last confirmed."""
+
+    def test_an_answer_after_a_gap_records_it_per_item_and_a_short_gap_does_not(self):
+        q = ReviewQueue()
+        q.entries["ab"] = Entry(items=["a", "b"], prompt="p", answer="x", source_lesson=4, state="ok", due=D.isoformat(), last_reviewed=(D - timedelta(days=14)).isoformat(), reviews=2, streak=2)
+        q.entries["c"] = Entry(items=["c"], prompt="p", answer="y", source_lesson=4, state="ok", due=D.isoformat(), last_reviewed=(D - timedelta(days=1)).isoformat(), reviews=1)
+        q.entries["d"] = Entry(items=["d"], prompt="p", answer="z", source_lesson=4, state="unseen", due=D.isoformat())
+        for k in ("ab", "c", "d"):
+            q.record(k, "ok", D)
+        self.assertEqual(q.pending_gaps, {4: {"a": 14, "b": 14}})
+
+    def test_the_gaps_are_saved_loaded_and_cleared_when_the_report_is_sent(self):
+        q = ReviewQueue()
+        q.entries["a"] = Entry(items=["a"], prompt="p", answer="x", source_lesson=4, state="ok", due=D.isoformat(), last_reviewed=(D - timedelta(days=7)).isoformat(), reviews=2)
+        q.record("a", "ok", D)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.json"
+            q.save(path)
+            loaded = ReviewQueue.load(path, D)
+            self.assertEqual(loaded.pending_gaps, {4: {"a": 7}})
+            for lesson, report in loaded.reports():
+                loaded.mark_reported(lesson, report)
+            self.assertEqual((loaded.pending_gaps, loaded.reports()), ({}, []))
+
+    def test_report_args_carry_the_gaps(self):
+        from src.lesson import LessonConfig
+
+        cfg = LessonConfig(root=Path("/x"), users={1: "yuki"}, default_minutes=5, default_new_list="after", default_order="spread")
+        args = cfg.report_args("yuki", [], lesson=4, recalled=["a", "b"], gaps={"a": 14, "b": 7})
+        self.assertEqual(args[args.index("--gaps") + 1], "a=14,b=7")
+        self.assertNotIn("--gaps", cfg.report_args("yuki", [], lesson=4, recalled=["a"]))
