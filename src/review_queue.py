@@ -102,7 +102,7 @@ def key_for(items: list[str]) -> str:
 # 1 回の振り返りの問いのうち、期限の来た古い問い (答えたことのある問い) に必ず回す割合の分母 (3: 3 分の 1). 新出の確認と
 # 未解決の確認が席を埋めても、古い項目が定着したかの確認が飢えないように (language-learning-audio #220)
 RETENTION_SHARE = 3
-# 期限の来た (確認待ちの) 問いの上限. 1 週間の振り返りで聞ける数 (1 日 14 問 × 7) を超えたら、すでに何度も言えた問いから外す
+# 期限の来た (確認待ちの) 問いの上限. 1 週間の振り返りで聞ける数 (1 日 14 問 × 7) を超えたら、すでに何度も言えた問いの期限を先へ送る
 BACKLOG_MAX = 100
 
 
@@ -223,6 +223,8 @@ class ReviewQueue:
                 for k in rest
                 if self.entries[k].tier(today) < 5
                 and not self.entries[k].bonus
+                and not self.entries[k].open
+                and self.entries[k].state in ("ok", "shaky")  # 言えなかった問いは tier で先に出る: この席は定着の確認のため
                 and self.entries[k].reviews >= 1
             ),
             key=lambda k: (self.entries[k].last_reviewed or "", self.entries[k].due),
@@ -231,11 +233,15 @@ class ReviewQueue:
         chosen = aged + [k for k in rest if k not in picked][: room - len(aged)]
         return required + sorted(chosen, key=order)
 
-    def trim_backlog(self, today: date, maximum: int = BACKLOG_MAX) -> list[str]:
-        """期限の来た問いが ``maximum`` を超えたら、すでに何度も言えた問い (ok が続いている) から外す (#220).
-        1 週間の振り返りで聞けない数のまま積み上げない: 積み上がるほど新しい確認が古い問いに埋もれる. 外すのは
-        bonus・新出・未解決・言えなかった / 迷った問いではなく、確かめるほど価値の低い順 (連続 ok が長く、確認回数が多い順).
-        外した問いのキーを返す (報告は要らない: 結果はもう届いている)."""
+    def defer_backlog(self, today: date, maximum: int = BACKLOG_MAX) -> list[str]:
+        """期限の来た問いが ``maximum`` を超えたら、すでに何度も言えた問い (ok が続いている) の期限を先へ送る (#220).
+        1 週間の振り返りで聞けない数のまま積み上げない: 積み上がるほど新しい確認が古い問いに埋もれる. 外すのではなく送る:
+        外すと、次の plan がその項目を出したときに履歴のない新しい問いとして戻ってきて (連続 ok も確認回数も消えて)、
+        一番よく知っている項目ほど明日の席に戻り、どの plan も出さない項目は二度と確かめられない. 送るだけなら連続 ok も
+        確認回数もそのままで、plan が出しても ``add_from_plan`` は足し直さない.
+
+        送る先は 14 日後から 14 日幅にずらす (一日に戻ってこない). 対象は bonus・新出・未解決・言えなかった / 迷った問いではなく、
+        確かめるほど価値の低い順 (連続 ok が長く、確認回数が多い順). 送った問いのキーを返す."""
         due = [
             k
             for k, e in self.entries.items()
@@ -256,10 +262,10 @@ class ReviewQueue:
             ),
             key=lambda k: (-self.entries[k].streak, -self.entries[k].reviews, self.entries[k].due),
         )[:excess]
-        for k in trusted:
-            del self.entries[k]
+        for n, k in enumerate(trusted):
+            self.entries[k].due = (today + timedelta(days=14 + n % 14)).isoformat()
         if trusted:
-            logging.info(f"確認待ちが {len(due)} 件になったので、定着した問いを {len(trusted)} 件外しました")
+            logging.info(f"確認待ちが {len(due)} 件になったので、定着した問いの期限を {len(trusted)} 件先へ送りました")
         return trusted
 
     def due_count(self, today: date) -> int:
@@ -386,7 +392,7 @@ class ReviewQueue:
         self.apply_refinement(plan.get("review", []), plan.get("review_refined") or [], today)
         if "open_items" in plan or "open_not_fitted" in plan:
             self._ask_open_items(open_ids, today)
-        self.trim_backlog(today)
+        self.defer_backlog(today)
         return added
 
     def apply_refinement(

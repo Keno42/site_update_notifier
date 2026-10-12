@@ -596,15 +596,37 @@ class RetentionShareTests(unittest.TestCase):
             del q.entries[k]
         self.assertEqual(len(q.select(D, limit=9)), 9)
 
-    def test_the_backlog_is_bounded_by_dropping_what_the_learner_has_said_most_often(self):
+    def test_the_backlog_is_bounded_by_deferring_what_the_learner_has_said_most_often(self):
         q = ReviewQueue()
         for n in range(8):
             q.entries[f"t{n}"] = Entry(items=[f"t{n}"], prompt="p", answer="a", source_lesson=2, state="ok", due=(D - timedelta(days=1)).isoformat(), reviews=3 + n, streak=1 + n)
         q.entries["f"] = Entry(items=["f"], prompt="p", answer="a", source_lesson=2, state="failed", due=D.isoformat(), reviews=1)
         q.entries["n"] = Entry(items=["n"], prompt="p", answer="a", source_lesson=2, state="unseen", new=True, due=D.isoformat())
-        dropped = q.trim_backlog(D, maximum=6)
-        self.assertEqual(len(dropped), 4)
-        self.assertEqual(sorted(dropped), ["t4", "t5", "t6", "t7"], "the most-confirmed first")
+        moved = q.defer_backlog(D, maximum=6)
+        self.assertEqual(sorted(moved), ["t4", "t5", "t6", "t7"], "the most-confirmed first")
+        self.assertEqual(q.due_count(D), 6)
+        for k in moved:
+            self.assertGreaterEqual(date.fromisoformat(q.entries[k].due), D + timedelta(days=14))
+        self.assertEqual((q.entries["t7"].streak, q.entries["t7"].reviews), (8, 10), "the history stays")
+        self.assertEqual(len({q.entries[k].due for k in moved}), 4, "staggered, not all back on one day")
         self.assertIn("f", q.entries)
         self.assertIn("n", q.entries)
-        self.assertEqual(q.trim_backlog(D, maximum=6), [])
+        self.assertEqual(q.defer_backlog(D, maximum=6), [])
+
+    def test_a_deferred_entry_is_not_re_added_as_a_new_question_by_the_next_plan(self):
+        q = ReviewQueue()
+        for n in range(4):
+            q.entries[f"t{n}"] = Entry(items=[f"t{n}"], prompt="p", answer="a", source_lesson=2, state="ok", due=(D - timedelta(days=1)).isoformat(), reviews=4, streak=2 + n)
+        q.defer_backlog(D, maximum=2)
+        q.add_from_plan({"lesson_number": 9, "new_items": [], "review": [{"items": ["t3"], "prompt": "p2", "answer": "a2", "stage": "meaning"}]}, D + timedelta(days=1))
+        self.assertEqual((q.entries["t3"].streak, q.entries["t3"].reviews, q.entries["t3"].state), (5, 4, "ok"))
+        self.assertEqual(sum(1 for k in q.entries if k == "t3"), 1)
+
+    def test_the_retention_seats_go_to_ok_and_shaky_entries_not_to_failures_or_open_ones(self):
+        q = self.queue()
+        q.entries["o0"].state = "failed"  # a failure is first by tier (its old due date puts it in the ordinary seats); it does not use a retention seat
+        keys = q.select(D, limit=9)
+        self.assertEqual([k for k in keys if k.startswith("o") and q.entries[k].state == "ok"], ["o1", "o2", "o3"], "the three retention seats go to ok entries, oldest check first")
+        q.entries["o3"].open = True
+        q.entries["o2"].state = "failed"
+        self.assertEqual([k for k in q.select(D, limit=9) if k in ("o1", "o2", "o3") and q.entries[k].state == "ok" and not q.entries[k].open], ["o1"])
