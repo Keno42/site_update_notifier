@@ -533,6 +533,13 @@ class RefinementTests(unittest.TestCase):
         q.add_from_plan({"lesson_number": 2, "new_items": [], "review": [], "review_refined": [{"items": ["hundrad"], "kind": "no_home", "answer": "hundrað"}]}, D)
         self.assertEqual(list(q.entries), ["bonus:2:x"])
 
+    def test_a_question_whose_cue_is_its_answer_leaves_the_queue(self):
+        """language-learning-audio #277: «Say: Akureyri. → Akureyri» asks nothing."""
+        q = ReviewQueue()
+        q.entries = {"akureyri": stored(["akureyri"], "Akureyri")}
+        q.add_from_plan({"lesson_number": 2, "new_items": [], "review": [], "review_refined": [{"items": ["akureyri"], "kind": "trivial", "answer": "Akureyri"}]}, D)
+        self.assertEqual(list(q.entries), [])
+
     def test_through_whole_keeps_the_key_and_the_schedule(self):
         q = self.old_queue()
         before = q.entries["hjalpina"]
