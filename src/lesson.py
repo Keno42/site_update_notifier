@@ -305,6 +305,12 @@ async def fit_upload(audio: Path, limit_bytes: int) -> Path | None:
 
 
 SYNTH_RE = re.compile(r"synthesized (\d+)/(\d+)")
+# 音声合成のサービスが断っている間にレンダラが stderr に出す行 (language-learning-audio #296):
+#   「edge-tts: WSServerHandshakeError, retrying in 20s (2/3)」「edge-tts: service refusing (403), waiting 2 min (2/5)」
+RETRY_RE = re.compile(r"edge-tts: .*?\((\d+)/(\d+)\)")
+# 音声合成のサービスが断った失敗 (stderr の特徴): 一文で言い、全文はログに回す
+REFUSAL_MARKERS = ("WSServerHandshakeError", "speech service refused", "service refusing", "NoAudioReceived")
+REFUSAL_MESSAGE = "音声合成のサービスが応答を拒否しています。しばらく待ってからもう一度生成してください。"
 
 
 async def run_cli(
@@ -367,6 +373,8 @@ class StatusMessage:
         self.started = time.monotonic()
         self.last_edit = 0.0
         self.detail = ""
+        self.synth = ""
+        self.retry = ""
 
     def text(self, head: str = "生成中…") -> str:
         m, sec = divmod(int(time.monotonic() - self.started), 60)
@@ -380,7 +388,12 @@ class StatusMessage:
     async def update(self, line: str) -> None:
         match = SYNTH_RE.search(line)
         if match:
-            self.detail = f"音声合成 {match[1]}/{match[2]}"
+            self.synth = f"音声合成 {match[1]}/{match[2]}"
+            self.retry = ""  # 進んだ: 断られていない
+        elif (retry := RETRY_RE.search(line)) is not None:
+            why = "403" if "403" in line or "WSServerHandshakeError" in line else "接続エラー"
+            self.retry = f"再試行中（{why}、{retry[1]}/{retry[2]}）"
+        self.detail = "・".join(x for x in (self.synth or ("音声合成" if self.retry else ""), self.retry) if x)
         if self.message is None or time.monotonic() - self.last_edit < self.interval:
             return
         self.last_edit = time.monotonic()
@@ -402,6 +415,30 @@ class StatusMessage:
 
 def _tail(text: str, limit: int = 1500) -> str:
     return text[-limit:] if len(text) > limit else text
+
+
+_URL_RE = re.compile(r"[a-z]+://\S+", re.IGNORECASE)
+_QUERY_RE = re.compile(r"\?[^\s'\"]*(?:token|connectionid|key|sig)[^\s'\"]*", re.IGNORECASE)
+_PATH_RE = re.compile(r"(?<![\w:])(?:/[\w.\-]+){2,}/([\w.\-]+)")
+
+
+def redact(text: str) -> str:
+    """チャンネルに出す失敗の末尾から、URL (接続トークンの query を含む) とサーバのパスを消す (#111)."""
+    text = _URL_RE.sub("<url>", text)
+    text = _QUERY_RE.sub("?…", text)
+    return _PATH_RE.sub(r"…/\1", text)
+
+
+def is_speech_refusal(stderr: str) -> bool:
+    """失敗が音声合成のサービスの拒否 (403 など) によるものか."""
+    return any(m in stderr for m in REFUSAL_MARKERS)
+
+
+def failure_message(rc_err: str) -> str:
+    """生成に失敗したときにチャンネルへ出す文. 音声合成の拒否は一文、それ以外は末尾 (URL とパスを消したもの)."""
+    if is_speech_refusal(rc_err):
+        return f"生成に失敗しました: {REFUSAL_MESSAGE}"
+    return f"生成に失敗しました:\n```\n{_tail(redact(rc_err))}\n```"
 
 
 # ---------------------------------------------------------------- flow
@@ -847,7 +884,7 @@ class Lessons:
             if rc != 0:
                 await channel.send(
                     f"レッスン{lesson}の結果を report できませんでした"
-                    f"（次の /lesson で送り直します）:\n```\n{_tail(err or out)}\n```"
+                    f"（次の /lesson で送り直します）:\n```\n{_tail(redact(err or out))}\n```"
                 )
                 return False
             queue.mark_reported(lesson, outcome)
@@ -950,9 +987,8 @@ class Lessons:
                 rc, out, err = await run_cli(self.cfg, args, status.update)
             await status.finish(rc == 0)
             if rc != 0:
-                await channel.send(
-                    f"生成に失敗しました:\n```\n{_tail(err or out)}\n```"
-                )
+                logging.error("生成に失敗しました (%s): %s", name, err or out)  # 全文はログへ
+                await channel.send(failure_message(err or out))
                 return
             plan_path = latest_plan(work)
             if plan_path is None:
