@@ -800,14 +800,19 @@ class Lessons:
             return
         cache = self.cfg.reading_tts_dir()
         cache.mkdir(parents=True, exist_ok=True)
-        # v2: 並べた表現のあいだに無音が入った版 (前の版のキャッシュは使わない)
-        key = hashlib.sha1(f"v2|{voice}|{card['text']}".encode()).hexdigest()
+        # 版はつなぎ方から決める (speech.PAUSE_S と TRIM): 間やクリップの切り方を変えたら、前の版のキャッシュは使わない (#106)
+        key = self.reading_cache_key(voice, card["text"])
         out = cache / f"{key}.mp3"
         if not out.exists():
             tmp = cache / f"{key}.tmp.mp3"
             await speech.synthesize(card["text"], voice, tmp)
             tmp.replace(out)
         yield out
+
+    @staticmethod
+    def reading_cache_key(voice: str, text: str) -> str:
+        """カードの音声のキャッシュキー. つなぎ方 (``speech.PAUSE_S``・``speech.TRIM``) が変わると別のキーになる."""
+        return hashlib.sha1(f"v3|{speech.PAUSE_S}|{speech.TRIM}|{voice}|{text}".encode()).hexdigest()
 
     @staticmethod
     async def guarded(channel: discord.abc.Messageable, work: Awaitable[Any]) -> None:
