@@ -45,6 +45,7 @@ from . import (
     weekly,
 )
 from .cards import CardQueue
+from .interaction import answers_on_failure
 from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, review_note
 from .review_queue import REFINE_VERSION, ReviewQueue
 
@@ -490,6 +491,7 @@ class Lessons:
             f"{head}\n{settings.describe()}", ephemeral=True
         )
 
+    @answers_on_failure("レッスンの準備に失敗しました。もう一度 /lesson を実行してください。")
     async def start(
         self,
         interaction: discord.Interaction,
@@ -522,6 +524,8 @@ class Lessons:
         self.busy[name] = time.monotonic()
         handed_to_view = False
         try:
+            # 外部処理を待つ前に、Discord の初回応答期限内に返事をする。
+            await interaction.response.send_message("レッスンを準備しています…")
             await self.flush_deferred(name)  # 進行中の記録が捨てられて残った報告 (is_busy)
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
             m = minutes or self.cfg.user_settings(name).minutes
@@ -541,8 +545,8 @@ class Lessons:
             )
             if not keys:
                 note = "（自動モード: 振り返りなし）" if auto else ""
-                await interaction.response.send_message(
-                    f"レッスンを生成しています…{note}"
+                await interaction.edit_original_response(
+                    content=f"レッスンを生成しています…{note}"
                 )
 
                 async def report_then_generate() -> None:
@@ -559,11 +563,7 @@ class Lessons:
             picked_scenes: list[dict] = []
             rq: CardQueue | None = None
             sq: CardQueue | None = None
-            responded = False
             if size.reading_cards > 0 or size.scene_cards > 0:
-                # カードは CLI から読むので、Discord の応答期限 (3 秒) に先に返事をしておく
-                await interaction.response.send_message("振り返りを準備しています…")
-                responded = True
                 sq, picked_scenes = await self.pick_scenes(
                     name, queue, today, channel, size=size
                 )
@@ -626,19 +626,10 @@ class Lessons:
             view = ReviewView(
                 session, interaction.user.id, finish, expire, speak=self.speak
             )
-            if responded:
-                view.message = await interaction.edit_original_response(
-                    content=session.render(speak=True), view=view
-                )
-                handed_to_view = True
-            else:
-                await interaction.response.send_message(
-                    session.render(speak=True), view=view
-                )
-                handed_to_view = True
-                # ここで例外なら view が busy を持ったまま (画面は出ている): view の timeout
-                # (expire → finish) か busy の上限が外す (#82)
-                view.message = await interaction.original_response()
+            view.message = await interaction.edit_original_response(
+                content=session.render(speak=True), view=view
+            )
+            handed_to_view = True
             # 前回届かなかった報告があれば、振り返りの間に送り直す (同じ queue を使うので、
             # その間に答えた分と食い違わない)
             await self.guarded(channel, self.flush_reports(channel, name, queue, path))
@@ -1316,12 +1307,10 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
         tree.add_command(command, guild=guild)
 
     async def sync() -> None:
-        try:
-            synced = await tree.sync(guild=guild)
-            logging.info(
-                f"スラッシュコマンドを同期しました: {[c.name for c in synced]}"
-            )
-        except discord.DiscordException as e:
-            logging.error(f"スラッシュコマンドの同期に失敗しました: {e}")
+        # 失敗は呼び出し元へ渡し、成功したときだけ同期済みにする。
+        synced = await tree.sync(guild=guild)
+        logging.info(
+            f"スラッシュコマンドを同期しました: {[c.name for c in synced]}"
+        )
 
     return sync

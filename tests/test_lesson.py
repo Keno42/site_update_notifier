@@ -703,18 +703,18 @@ class EndToEndTests(unittest.TestCase):
 
             async def review():
                 await lessons.start(self.interaction(channel, replies))
-                view = replies[0][1]
+                view = replies[-1][1]
                 self.assertIsNotNone(view, "a review starts")
                 new = [e for e in queued.values() if e.new]
                 self.assertGreater(len(new), 2)
                 self.assertIn(
                     f"振り返り 1/{len(new)}",
-                    replies[0][0],
+                    replies[-1][0],
                     "every new item of the last lesson, past the limit of 2",
                 )
                 self.assertIn(
                     f"これから定着度チェックです（前回までの表現、全{len(new)}問）",
-                    replies[0][0],
+                    replies[-1][0],
                 )
                 self.assertEqual(await answer_all(view, second="迷った"), len(new))
 
@@ -761,7 +761,7 @@ class EndToEndTests(unittest.TestCase):
             async def lesson_command(first="言えた"):
                 replies = []
                 await lessons.start(self.interaction(channel, replies))
-                view = replies[0][1]
+                view = replies[-1][1]
                 if view is not None:
                     await answer_all(view, first=first)
 
@@ -834,7 +834,7 @@ class EndToEndTests(unittest.TestCase):
 
             async def review():
                 await lessons.start(self.interaction(channel, replies))
-                self.assertEqual(replies[0], ("振り返りを準備しています…", None))
+                self.assertEqual(replies[0], ("レッスンを準備しています…", None))
                 text, view = replies[-1]
                 self.assertIn(f"全{len(new)}問", text)
                 self.assertIn("読みカードが3枚", text)
@@ -1011,7 +1011,7 @@ class EndToEndTests(unittest.TestCase):
         replies = []
         asyncio.run(lessons.start(self.interaction(channel, replies)))
         self.assertEqual(set(lessons.busy), {"yuki"})
-        return lessons, channel, replies[0][1]
+        return lessons, channel, replies[-1][1]
 
     def test_finish_releases_busy_even_when_the_timing_record_raises(self):
         """#82: the log is an aid. A failure in it must not stop the report and the next lesson, nor keep «in progress»."""
@@ -1071,19 +1071,10 @@ class EndToEndTests(unittest.TestCase):
             legacy_file(cfg.pending_path("yuki"), lesson=9)
             replies = []
 
-            class Response:
-                async def send_message(self, content, ephemeral=False, view=None):
-                    replies.append((content, view))
-
-            interaction = SimpleNamespace(
-                user=SimpleNamespace(id=1),
-                channel_id=5,
-                channel=channel,
-                response=Response(),
-            )
+            interaction = self.interaction(channel, replies)
             asyncio.run(lessons.start(interaction, auto=True))
-            self.assertIn("自動モード", replies[0][0])
-            self.assertIsNone(replies[0][1], "no review buttons")
+            self.assertIn("自動モード", replies[-1][0])
+            self.assertIsNone(replies[-1][1], "no review buttons")
             text, files = channel.sent[-1]
             self.assertIn("レッスン 1", text)
             self.assertNotIn("振り返り", text)

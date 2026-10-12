@@ -89,36 +89,40 @@ async def call_chatgpt_with_history(messages):
     payload = {"model": GPT_MODEL, "messages": messages}
     if REASONING_EFFORT:
         payload["reasoning_effort"] = REASONING_EFFORT
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=120, connect=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
                 result = await response.json()
                 answer = result["choices"][0]["message"]["content"].strip()
+                if not answer:
+                    raise ValueError("ChatGPT API returned an empty answer")
                 return answer
             else:
                 error = await response.text()
                 logging.error(
                     f"ChatGPT API request failed: {response.status} - {error}"
                 )
-                return ERROR_MESSAGE
+                return ERROR_MESSAGE or "今は返信できませんでした。少し待って、もう一度送ってください。"
 
 
-async def typing_loop(channel):
-    while True:
-        await channel.typing()
-        await asyncio.sleep(8)
+website_task = None
 
 
 @client.event
 async def on_ready():
-    global sync_lesson_commands
+    global sync_lesson_commands, website_task
     logging.info(f"Logged in as {client.user}")
-    if sync_lesson_commands:
-        # on_ready fires again on reconnect; the commands only need syncing once
-        sync, sync_lesson_commands = sync_lesson_commands, None
-        await sync()
+    if sync_lesson_commands is not None:
+        try:
+            await sync_lesson_commands()
+        except Exception:
+            logging.exception("スラッシュコマンドの同期に失敗しました。再接続時に再試行します。")
+        else:
+            sync_lesson_commands = None
     if CHECK_URL and CACHE_FILE and CHANNEL_ID:
-        client.loop.create_task(check_website())
+        if website_task is None or website_task.done():
+            website_task = asyncio.create_task(check_website())
     else:
         logging.info(
             "CHECK_URLまたはCACHE_FILEまたはCHANNEL_IDが設定されていないため、サイトチェックをスキップします。"
@@ -168,30 +172,33 @@ async def on_message(message):
             conversation_history.clear()
             conversation_history.append({"role": "system", "content": SYSTEM_PROMPT})
             conversation_history.append({"role": "user", "content": prompt})
-        typing_task = asyncio.create_task(typing_loop(message.channel))
-
-        if audio_files:
-            texts = []
-            for attachment in audio_files:
-                try:
-                    texts.append(await transcribe_attachment(attachment, prompt))
-                except Exception as e:
-                    logging.error(f"Failed to process audio file: {e}")
-                    await message.reply(f"音声ファイルの処理に失敗しました: {e}")
-            reply_text = (
-                "書き起こしが完了しました:\n" + "\n".join(texts) if texts else ""
-            )
-        else:
-            reply_text = await call_chatgpt_with_history(conversation_history)
-        typing_task.cancel()
         try:
-            await typing_task
-        except asyncio.CancelledError:
-            pass
-        if not reply_text:
-            return
-        conversation_history.append({"role": "assistant", "content": reply_text})
-        await message.reply(reply_text)
+            async with message.channel.typing():
+                if audio_files:
+                    texts = []
+                    for attachment in audio_files:
+                        try:
+                            texts.append(await transcribe_attachment(attachment, prompt))
+                        except Exception as e:
+                            logging.exception("音声ファイルの処理に失敗しました")
+                            await message.reply(f"音声ファイルの処理に失敗しました: {e}")
+                    reply_text = (
+                        "書き起こしが完了しました:\n" + "\n".join(texts) if texts else ""
+                    )
+                else:
+                    reply_text = await call_chatgpt_with_history(conversation_history)
+            if not reply_text:
+                return
+            await message.reply(reply_text)
+            conversation_history.append({"role": "assistant", "content": reply_text})
+        except Exception:
+            logging.exception("チャットへの返信に失敗しました")
+            try:
+                await message.reply(
+                    ERROR_MESSAGE or "返信に失敗しました。少し待って、もう一度送ってください。"
+                )
+            except Exception:
+                logging.exception("失敗の通知も送れませんでした")
         return
     if GREETINGS and HEALTH_CHECK_GREETING in message.content.lower():
         await message.channel.send(random.choice(GREETINGS))
