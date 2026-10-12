@@ -27,7 +27,7 @@ from src.lesson import (
 )
 from src.interaction import STALE_RATING
 from src.review import ReviewSession, ReviewView
-from src.review_queue import Entry
+from src.review_queue import REFINE_VERSION, Entry
 from src.review_queue import ReviewQueue
 
 D = date(2026, 9, 26)
@@ -578,7 +578,7 @@ class RefineQueueTests(unittest.TestCase):
         self.assertEqual(queue.entries["matinn"].answer, "Takk fyrir matinn.")
         self.assertTrue(queue.entries["matinn"].open)
         self.assertEqual(list(queue.entries), ["matinn", "eigdu_godan_dag+eigdu_godur"])
-        self.assertEqual((queue.refined, saved), (1, True))
+        self.assertEqual((queue.refined, saved), (REFINE_VERSION, True))
 
     def test_an_audio_side_that_cannot_refine_leaves_the_queue_as_it_was_and_tries_again(self):
         queue, calls, saved = self.run_pass(2, "")
