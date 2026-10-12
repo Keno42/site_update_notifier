@@ -46,7 +46,7 @@ from . import (
 )
 from .cards import CardQueue
 from .interaction import answers_on_failure
-from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, review_note
+from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, read_review_log, review_note
 from .review_queue import REFINE_VERSION, ReviewQueue
 
 LLA_DIR = (
@@ -476,6 +476,9 @@ class RetryView(discord.ui.View):
             await lessons.release(self.name, channel)
 
 
+# 終わった振り返りのあとにレッスンができていないとき、生成だけやり直すのは、その振り返りがこの期間内のとき. 長い休みのあとは振り返りから (#116)
+REGENERATE_WITHIN = timedelta(days=2)
+
 # ---------------------------------------------------------------- flow
 
 
@@ -500,15 +503,41 @@ class Lessons:
     def clear_generating(self, name: str) -> None:
         self.cfg.generating_path(name).unlink(missing_ok=True)
 
-    def failed_generation(self, name: str) -> float | None:
-        """今日、振り返りを済ませたあとの生成が失敗して残っているなら、その長さ (分). なければ None."""
+    def hinted_minutes(self, name: str) -> float | None:
+        """失敗した生成の長さ (分) のヒント (``generating.json``). 判断には使わない: 判断はログと記録 (``unposted_review``)."""
         try:
-            raw = json.loads(self.cfg.generating_path(name).read_text("utf-8"))
-            if raw["date"] != self.today().isoformat():
-                return None
-            return float(raw["minutes"])
+            return float(json.loads(self.cfg.generating_path(name).read_text("utf-8"))["minutes"])
         except (OSError, ValueError, KeyError, TypeError):
             return None
+
+    @staticmethod
+    def _when(text: str) -> datetime | None:
+        try:
+            when = datetime.fromisoformat(text)
+        except (TypeError, ValueError):
+            return None
+        return when if when.tzinfo else when.astimezone()  # 時刻帯のない記録はこの端末の時刻
+
+    def unposted_review(self, name: str) -> bool:
+        """終わった振り返りのあとに、まだレッスンができていないか (#116). 振り返りのログ (``review_log.jsonl``) の最後の finished の行が、
+        レッスンの記録 (``lesson_manifests``) の最後の生成より新しく、REGENERATE_WITHIN 以内なら True. 失敗が #115 より前でも、
+        振り返りが一度でも二度でも、何日またいでも同じに読める (報告はどの振り返りの生成の前にも済んでいる).
+        途中で閉じた振り返り (finished でない) は数えない: 生成は始まっていない. /lesson-auto のレッスンも記録にあるので、レッスンに数える."""
+        reviewed = max(
+            (w for r in read_review_log(self.cfg.user_dir(name)) if r.get("finished") and (w := self._when(r.get("ts", ""))) is not None),
+            default=None,
+        )
+        if reviewed is None or datetime.now().astimezone() - reviewed > REGENERATE_WITHIN:
+            return False
+        made: datetime | None = None
+        for d in (self.cfg.user_dir(name) / feedback.MANIFESTS).glob("*/manifest.json"):
+            try:
+                w = self._when(json.loads(d.read_text("utf-8")).get("created_at", ""))
+            except (OSError, ValueError):
+                continue
+            if w is not None and (made is None or w > made):
+                made = w
+        return made is None or reviewed > made
 
     def busy_limit(self) -> float:
         """/lesson の進行中でいられる上限 (秒): 振り返りの画面の待ち + 報告と生成 (それぞれ cfg.timeout_min が上限)."""
@@ -619,12 +648,12 @@ class Lessons:
             await self.flush_deferred(name)  # 進行中の記録が捨てられて残った報告 (is_busy)
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
             m = minutes or self.cfg.user_settings(name).minutes
-            if not auto and (again := self.failed_generation(name)) is not None:
-                # 今日の振り返りは済み、報告も届き、生成だけが失敗した: 振り返りをもう一度やらずに、生成だけやり直す (#110)
+            if not auto and self.unposted_review(name):
+                # 終わった振り返りのあとに、まだレッスンができていない (生成が失敗した. 一度でも二度でも): 振り返りをもう一度やらずに、生成だけやり直す (#110, #116)
                 await interaction.edit_original_response(
-                    content="今日の振り返りは済んでいます。生成だけやり直します。"
+                    content="前回の振り返りのあと、レッスンがまだできていません。生成だけやり直します。"
                 )
-                await self.guarded(channel, self.regenerate(channel, name, minutes or again))
+                await self.guarded(channel, self.regenerate(channel, name, minutes or self.hinted_minutes(name) or m))
                 return
             size = self.cfg.review_size(m)  # 振り返りの量はレッスンの長さに比例させる
             today = self.today()
