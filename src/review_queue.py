@@ -100,10 +100,10 @@ def key_for(items: list[str]) -> str:
 
 
 # language-learning-audio #239: plan.json の review_refined のうち、問いが plan から消える種類 (部分の問いが全体の問いに
-# 含まれた / 同じ答えの問いが一つにまとまった / 家のない部分が復習から外れた)
-DROPPING = ("beside_whole", "same_answer", "no_home")
+# 含まれた / 同じ答えの問いが一つにまとまった / 家のない部分が復習から外れた / 手がかりが答えそのものの問いが外れた #277)
+DROPPING = ("beside_whole", "same_answer", "no_home", "trivial")
 # キューを audiolesson refine-review で一度整えた印 (保存する). 規則が変わったら上げて、もう一度整える
-REFINE_VERSION = 1
+REFINE_VERSION = 2  # 2: 手がかりが答えそのものの問い (地名など) を外す (language-learning-audio #277)
 
 
 def _norm(text: str) -> str:
