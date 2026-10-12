@@ -99,6 +99,13 @@ def key_for(items: list[str]) -> str:
     return "+".join(items)
 
 
+# 1 回の振り返りの問いのうち、期限の来た古い問い (答えたことのある問い) に必ず回す割合の分母 (3: 3 分の 1). 新出の確認と
+# 未解決の確認が席を埋めても、古い項目が定着したかの確認が飢えないように (language-learning-audio #220)
+RETENTION_SHARE = 3
+# 期限の来た (確認待ちの) 問いの上限. 1 週間の振り返りで聞ける数 (1 日 14 問 × 7) を超えたら、すでに何度も言えた問いから外す
+BACKLOG_MAX = 100
+
+
 # language-learning-audio #239: plan.json の review_refined のうち、問いが plan から消える種類 (部分の問いが全体の問いに
 # 含まれた / 同じ答えの問いが一つにまとまった / 家のない部分が復習から外れた / 手がかりが答えそのものの問いが外れた #277)
 DROPPING = ("beside_whole", "same_answer", "no_home", "trivial")
@@ -207,7 +214,53 @@ class ReviewQueue:
         rest = kept
         if limit <= 0:
             return required + [k for k in rest if self.entries[k].tier(today) < 5]
-        return required + rest[: max(0, limit - len(required))]
+        room = max(0, limit - len(required))
+        reserve = min(room, limit // RETENTION_SHARE)
+        # 定着の確認に回す席: 期限の来た、答えたことのある問いのうち、最後に確かめてから一番長いもの (#220)
+        aged = sorted(
+            (
+                k
+                for k in rest
+                if self.entries[k].tier(today) < 5
+                and not self.entries[k].bonus
+                and self.entries[k].reviews >= 1
+            ),
+            key=lambda k: (self.entries[k].last_reviewed or "", self.entries[k].due),
+        )[:reserve]
+        picked = set(aged)
+        chosen = aged + [k for k in rest if k not in picked][: room - len(aged)]
+        return required + sorted(chosen, key=order)
+
+    def trim_backlog(self, today: date, maximum: int = BACKLOG_MAX) -> list[str]:
+        """期限の来た問いが ``maximum`` を超えたら、すでに何度も言えた問い (ok が続いている) から外す (#220).
+        1 週間の振り返りで聞けない数のまま積み上げない: 積み上がるほど新しい確認が古い問いに埋もれる. 外すのは
+        bonus・新出・未解決・言えなかった / 迷った問いではなく、確かめるほど価値の低い順 (連続 ok が長く、確認回数が多い順).
+        外した問いのキーを返す (報告は要らない: 結果はもう届いている)."""
+        due = [
+            k
+            for k, e in self.entries.items()
+            if e.tier(today) < 5 and not unaskable(e)
+        ]
+        excess = len(due) - maximum
+        if excess <= 0:
+            return []
+        trusted = sorted(
+            (
+                k
+                for k in due
+                if self.entries[k].state == "ok"
+                and not self.entries[k].open
+                and not self.entries[k].bonus
+                and not self.entries[k].new
+                and self.entries[k].reviews >= 2
+            ),
+            key=lambda k: (-self.entries[k].streak, -self.entries[k].reviews, self.entries[k].due),
+        )[:excess]
+        for k in trusted:
+            del self.entries[k]
+        if trusted:
+            logging.info(f"確認待ちが {len(due)} 件になったので、定着した問いを {len(trusted)} 件外しました")
+        return trusted
 
     def due_count(self, today: date) -> int:
         return sum(
@@ -333,6 +386,7 @@ class ReviewQueue:
         self.apply_refinement(plan.get("review", []), plan.get("review_refined") or [], today)
         if "open_items" in plan or "open_not_fitted" in plan:
             self._ask_open_items(open_ids, today)
+        self.trim_backlog(today)
         return added
 
     def apply_refinement(

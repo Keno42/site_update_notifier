@@ -569,3 +569,42 @@ class RefinementTests(unittest.TestCase):
             self.assertEqual(ReviewQueue.load(path, D).refined, 1)
             self.assertEqual(ReviewQueue().refined, 0)
 
+
+
+class RetentionShareTests(unittest.TestCase):
+    """language-learning-audio #220: a third of the day's questions go to due older items, and the backlog is bounded."""
+
+    def queue(self):
+        q = ReviewQueue()
+        # twelve fresh failures due today (tier 1) that would fill every seat, and four old ok entries due (tier 4)
+        for n in range(12):
+            q.entries[f"f{n}"] = Entry(items=[f"f{n}"], prompt="p", answer=f"a{n}", source_lesson=5, state="failed", due=D.isoformat(), last_reviewed=(D - timedelta(days=1)).isoformat(), reviews=1)
+        for n in range(4):
+            q.entries[f"o{n}"] = Entry(items=[f"o{n}"], prompt="p", answer=f"b{n}", source_lesson=2, state="ok", due=(D - timedelta(days=2)).isoformat(), last_reviewed=(D - timedelta(days=20 - n)).isoformat(), reviews=1, streak=1)
+        return q
+
+    def test_a_third_of_the_seats_go_to_old_items_even_when_failures_would_fill_them(self):
+        q = self.queue()
+        keys = q.select(D, limit=9)
+        self.assertEqual(len(keys), 9)
+        old = [k for k in keys if k.startswith("o")]
+        self.assertEqual(sorted(old), ["o0", "o1", "o2"], "three seats (a third), the longest unconfirmed first")
+
+    def test_without_old_items_the_seats_are_used_as_before(self):
+        q = self.queue()
+        for k in [k for k in q.entries if k.startswith("o")]:
+            del q.entries[k]
+        self.assertEqual(len(q.select(D, limit=9)), 9)
+
+    def test_the_backlog_is_bounded_by_dropping_what_the_learner_has_said_most_often(self):
+        q = ReviewQueue()
+        for n in range(8):
+            q.entries[f"t{n}"] = Entry(items=[f"t{n}"], prompt="p", answer="a", source_lesson=2, state="ok", due=(D - timedelta(days=1)).isoformat(), reviews=3 + n, streak=1 + n)
+        q.entries["f"] = Entry(items=["f"], prompt="p", answer="a", source_lesson=2, state="failed", due=D.isoformat(), reviews=1)
+        q.entries["n"] = Entry(items=["n"], prompt="p", answer="a", source_lesson=2, state="unseen", new=True, due=D.isoformat())
+        dropped = q.trim_backlog(D, maximum=6)
+        self.assertEqual(len(dropped), 4)
+        self.assertEqual(sorted(dropped), ["t4", "t5", "t6", "t7"], "the most-confirmed first")
+        self.assertIn("f", q.entries)
+        self.assertIn("n", q.entries)
+        self.assertEqual(q.trim_backlog(D, maximum=6), [])
