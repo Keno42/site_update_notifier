@@ -496,3 +496,19 @@ class TripArgsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CacheKeyTests(unittest.TestCase):
+    """site_update_notifier#106 (reopened): the cached card audio must change when the way clips are joined changes."""
+
+    def test_the_key_depends_on_the_pause_and_the_trim(self):
+        from src import speech
+        from src.lesson import Lessons
+
+        base = Lessons.reading_cache_key("v", "Það · Þetta")
+        self.assertEqual(base, Lessons.reading_cache_key("v", "Það · Þetta"))
+        with mock.patch.object(speech, "PAUSE_S", 1.0):
+            self.assertNotEqual(base, Lessons.reading_cache_key("v", "Það · Þetta"))
+        with mock.patch.object(speech, "TRIM", "anull"):
+            self.assertNotEqual(base, Lessons.reading_cache_key("v", "Það · Þetta"))
+        self.assertNotEqual(base, Lessons.reading_cache_key("w", "Það · Þetta"))
