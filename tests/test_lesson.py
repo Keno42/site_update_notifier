@@ -21,6 +21,7 @@ from src.lesson import (
     LessonConfig,
     Lessons,
     StatusMessage,
+    RetryView,
     cleanup,
     run_cli,
     setup,
@@ -469,6 +470,102 @@ class ProgressTests(unittest.TestCase):
         self.assertTrue(edits[0].startswith("生成中…"))
         self.assertIn("音声合成 120/450", edits[1])
         self.assertTrue(edits[2].startswith("生成できませんでした"))
+
+
+class RetryGenerationTests(unittest.TestCase):
+    """site_update_notifier#110: a failed generation is retried without the review being done again."""
+
+    def config(self, td):
+        return LessonConfig(root=Path(td), users={1: "yuki"}, default_minutes=5, default_new_list="after", default_order="spread")
+
+    def interaction(self, channel, replies, user=1):
+        class Response:
+            async def send_message(self, content=None, ephemeral=False, view=None):
+                replies.append((content, view, ephemeral))
+
+        async def edit_original_response(content=None, view=None):
+            replies.append((content, view, False))
+
+        return SimpleNamespace(user=SimpleNamespace(id=user), channel_id=5, channel=channel, response=Response(), edit_original_response=edit_original_response)
+
+    def test_lesson_after_a_failed_generation_the_same_day_skips_the_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td)
+            lessons = Lessons(cfg, today=lambda: D)
+            cfg.user_dir("yuki").mkdir(parents=True)
+            lessons.mark_generating("yuki", 7.0)
+            calls = []
+
+            async def fake_generate(channel, name, auto=False, minutes=None):
+                calls.append((name, auto, minutes))
+
+            channel, replies = FakeChannel(), []
+            with mock.patch.object(Lessons, "generate_and_post", side_effect=fake_generate):
+                asyncio.run(lessons.start(self.interaction(channel, replies)))
+            self.assertEqual(calls, [("yuki", False, 7.0)], "generation only, the same length")
+            self.assertIn("今日の振り返りは済んでいます。生成だけやり直します。", replies[-1][0])
+            self.assertIsNone(replies[-1][1], "no review buttons")
+            self.assertEqual(lessons.busy, {})
+
+    def test_another_day_or_no_marker_starts_the_review_as_today(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td)
+            cfg.user_dir("yuki").mkdir(parents=True)
+            lessons = Lessons(cfg, today=lambda: D)
+            self.assertIsNone(lessons.failed_generation("yuki"))
+            lessons.mark_generating("yuki", 7.0)
+            self.assertEqual(lessons.failed_generation("yuki"), 7.0)
+            later = Lessons(cfg, today=lambda: D + timedelta(days=1))
+            self.assertIsNone(later.failed_generation("yuki"), "a marker of another day is ignored")
+            lessons.clear_generating("yuki")
+            self.assertIsNone(lessons.failed_generation("yuki"))
+
+    def test_the_retry_button_regenerates_without_a_review_and_only_for_its_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td)
+            lessons = Lessons(cfg, today=lambda: D)
+            cfg.user_dir("yuki").mkdir(parents=True)
+            calls = []
+
+            async def fake_generate(channel, name, auto=False, minutes=None):
+                calls.append((name, auto, minutes))
+
+            channel, replies = FakeChannel(), []
+
+            async def scenario():
+                view = RetryView(lessons, "yuki", 6.0)
+                button = {b.label: b for b in view.children}["もう一度生成"]
+                await button.callback(self.interaction(channel, replies, user=2))
+                refused = (list(calls), replies[-1][2])
+                lessons.busy["yuki"] = __import__("time").monotonic()
+                await button.callback(self.interaction(channel, replies))
+                busy_calls = list(calls)
+                lessons.busy.clear()
+                await button.callback(self.interaction(channel, replies))
+                return refused, busy_calls
+
+            with mock.patch.object(Lessons, "generate_and_post", side_effect=fake_generate):
+                refused, busy_calls = asyncio.run(scenario())
+            self.assertEqual(refused, ([], True), "someone else is turned away, privately")
+            self.assertEqual(busy_calls, [], "not while a /lesson is in progress")
+            self.assertEqual(calls, [("yuki", False, 6.0)])
+            self.assertEqual(lessons.busy, {})
+
+    def test_a_posted_lesson_clears_the_marker_and_a_failed_one_leaves_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td)
+            lessons = Lessons(cfg, today=lambda: D)
+            cfg.user_dir("yuki").mkdir(parents=True)
+            lessons.mark_generating("yuki", 5.0)
+            channel = FakeChannel()
+
+            async def failing(cfg_, args, on_progress=None, stdin=None):
+                return 1, "", "WSServerHandshakeError: 403"
+
+            with mock.patch("src.lesson.run_cli", failing):
+                asyncio.run(lessons.generate_and_post(channel, "yuki", minutes=5.0))
+            self.assertEqual(lessons.failed_generation("yuki"), 5.0, "the marker stays after a failure")
+            self.assertIsInstance(channel.views[-1], RetryView, "the failure message carries the button")
 
 
 class FakeMessage:
