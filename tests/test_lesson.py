@@ -23,6 +23,8 @@ from src.lesson import (
     StatusMessage,
     RetryView,
     cleanup,
+    failure_message,
+    redact,
     run_cli,
     setup,
 )
@@ -470,6 +472,61 @@ class ProgressTests(unittest.TestCase):
         self.assertTrue(edits[0].startswith("生成中…"))
         self.assertIn("音声合成 120/450", edits[1])
         self.assertTrue(edits[2].startswith("生成できませんでした"))
+
+
+class SpeechRefusalTests(unittest.TestCase):
+    """site_update_notifier#111 (language-learning-audio#296): the status shows the retries, and a refusal is one sentence."""
+
+    def run_lines(self, lines):
+        edits = []
+
+        class Message:
+            async def edit(self, content):
+                edits.append(content)
+
+        class Channel:
+            async def send(self, content):
+                edits.append(content)
+                return Message()
+
+        async def scenario():
+            status = StatusMessage(Channel(), interval=0)
+            await status.start()
+            for line in lines:
+                await status.update(line)
+
+        asyncio.run(scenario())
+        return edits
+
+    def test_a_retry_line_updates_the_status_and_keeps_the_last_count(self):
+        edits = self.run_lines(["  synthesized 120/450 new lines", "edge-tts: WSServerHandshakeError, retrying in 20s (2/3)"])
+        self.assertIn("音声合成 120/450・再試行中（403、2/3）", edits[-1])
+
+    def test_the_new_refusal_form_is_read_too_and_progress_clears_it(self):
+        edits = self.run_lines(["edge-tts: service refusing (403), waiting 2 min (2/5)"])
+        self.assertIn("音声合成・再試行中（403、2/5）", edits[-1])
+        edits = self.run_lines(["edge-tts: service refusing (403), waiting 2 min (2/5)", "  synthesized 130/450 new lines"])
+        self.assertIn("音声合成 130/450", edits[-1])
+        self.assertNotIn("再試行", edits[-1])
+
+    def test_a_speech_refusal_is_one_sentence_not_the_traceback(self):
+        err = (
+            "Traceback (most recent call last):\n  File \"/home/user/venv/lib/edge_tts/communicate.py\", line 1\n"
+            "aiohttp.WSServerHandshakeError: 403, message='Invalid response status', url='wss://speech.example/edge/v1?TrustedClientToken=abc&ConnectionId=def'"
+        )
+        msg = failure_message(err)
+        self.assertIn("音声合成のサービスが応答を拒否しています", msg)
+        self.assertNotIn("Traceback", msg)
+        self.assertNotIn("Token", msg)
+
+    def test_other_failures_keep_the_tail_without_urls_query_strings_or_server_paths(self):
+        err = "boom at /home/user/app/lib/thing.py\nGET https://x.example/a?TrustedClientToken=abc failed\nvalue?ConnectionId=zz"
+        msg = failure_message(err)
+        self.assertIn("boom at", msg)
+        self.assertNotIn("/home/user/app", msg)
+        self.assertNotIn("https://", msg)
+        self.assertNotIn("abc", msg)
+        self.assertNotIn("ConnectionId=zz", redact(err))
 
 
 class RetryGenerationTests(unittest.TestCase):
