@@ -23,8 +23,12 @@ def profile_voice(profile: Path, default: str = "is-IS-GudrunNeural") -> str:
     return voice if isinstance(voice, str) and voice else default
 
 
-# 「Það · Þetta · Því miður」のように並べた表現のあいだの無音 (秒)
-PAUSE_S = 1.0
+# 「Það · Þetta · Því miður」のように並べた表現のあいだの無音 (秒). 各クリップの前後の無音は切り落とす
+# (``TRIM``) ので、聞こえる間はこの値そのもの. 区切りが聞こえて、人が読み上げる並びに聞こえる長さ
+PAUSE_S = 0.5
+# 先頭の無音を落とし、反転して先頭 (= 元の末尾) の無音を落とし、元に戻す (edge-tts のクリップは前後に数十〜数百 ms の無音を持つ)
+_TRIM = "silenceremove=start_periods=1:start_threshold=-50dB"
+TRIM = f"{_TRIM},areverse,{_TRIM},areverse"
 TTS = Callable[[str, str, Path], Awaitable[None]]
 
 
@@ -63,7 +67,7 @@ async def synthesize(
 
 
 def join_args(clips: list[Path], pause: float, out: Path) -> list[str]:
-    """clips を ``pause`` 秒の無音を挟んでつなぐ ffmpeg の引数 (edge-tts は 24kHz モノラル)."""
+    """clips を ``pause`` 秒の無音を挟んでつなぐ ffmpeg の引数 (edge-tts は 24kHz モノラル). 各クリップは前後の無音を切り落としてからつなぐ."""
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     for n, clip in enumerate(clips):
         if n:
@@ -78,7 +82,9 @@ def join_args(clips: list[Path], pause: float, out: Path) -> list[str]:
         args += ["-i", str(clip)]
     inputs = 2 * len(clips) - 1
     graph = "".join(
-        f"[{i}:a]aformat=sample_rates=24000:channel_layouts=mono[a{i}];"
+        f"[{i}:a]aformat=sample_rates=24000:channel_layouts=mono"
+        + (f",{TRIM}" if i % 2 == 0 else "")  # 偶数番が音声クリップ、奇数番が挟む無音
+        + f"[a{i}];"
         for i in range(inputs)
     )
     graph += "".join(f"[a{i}]" for i in range(inputs))

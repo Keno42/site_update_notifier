@@ -16,7 +16,7 @@ from src.cards import CardQueue
 from src.lesson import LessonConfig, Lessons
 from src.reading import parse_deck, render_card
 from src.review import ReviewSession, ReviewView
-from src.speech import join_args, profile_voice, synthesize
+from src.speech import PAUSE_S, TRIM, join_args, profile_voice, synthesize
 from src.review_queue import ReviewQueue
 
 D = date(2026, 9, 26)
@@ -233,7 +233,8 @@ class SynthesizeTests(unittest.TestCase):
     def test_listed_expressions_are_read_one_by_one_and_joined_with_a_pause(self):
         data, calls, joins = self.run_synth("Það · Þetta · Því miður")
         self.assertEqual(calls, ["Það", "Þetta", "Því miður"])
-        self.assertEqual(joins, [(3, 1.0)])
+        self.assertEqual(joins, [(3, PAUSE_S)])
+        self.assertEqual(PAUSE_S, 0.5)
         self.assertEqual(data, b"joined")
 
     def test_without_ffmpeg_sentences_keep_them_apart(self):
@@ -247,6 +248,9 @@ class SynthesizeTests(unittest.TestCase):
         self.assertEqual(args.count("anullsrc=r=24000:cl=mono"), 2)
         self.assertEqual(args[args.index("-filter_complex") + 1].count("concat=n=5"), 1)
         self.assertEqual(args[-1], "o.mp3")
+        graph = args[args.index("-filter_complex") + 1]
+        self.assertEqual(graph.count(TRIM), 3, "each clip, and only the clips, is trimmed at both ends")
+        self.assertIn("areverse", TRIM)
 
     @unittest.skipUnless(
         shutil.which("ffmpeg") and shutil.which("ffprobe"), "no ffmpeg"
@@ -269,7 +273,33 @@ class SynthesizeTests(unittest.TestCase):
                     capture_output=True, text=True, check=True,
                 ).stdout
             )  # fmt: skip
-        self.assertAlmostEqual(seconds, 3 * 0.3 + 2 * 1.0, delta=0.3)
+        self.assertAlmostEqual(seconds, 3 * 0.3 + 2 * PAUSE_S, delta=0.3)
+
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"), "no ffmpeg"
+    )
+    def test_the_padding_of_each_clip_is_cut_so_the_gap_is_the_pause(self):
+        """edge-tts clips carry silence at both ends: a 0.3 s word with 0.5 s before and after it must not add 2 s to a card of three."""
+
+        async def tts(text, voice, out):
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=0.3",
+                "-af", "adelay=500,apad=pad_dur=0.5", "-ar", "24000", "-ac", "1", str(out),
+            )  # fmt: skip
+            await proc.wait()
+
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "card.mp3"
+            asyncio.run(synthesize("A · B · C", "v", out, tts=tts))
+            seconds = float(
+                subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(out)],
+                    capture_output=True, text=True, check=True,
+                ).stdout
+            )  # fmt: skip
+        self.assertAlmostEqual(seconds, 3 * 0.3 + 2 * PAUSE_S, delta=0.35)
 
 
 class SessionTests(unittest.TestCase):
