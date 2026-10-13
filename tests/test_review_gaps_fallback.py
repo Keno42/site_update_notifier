@@ -48,9 +48,16 @@ class GapsFallbackTests(unittest.TestCase):
         self.assertIn("--gaps", calls[0])
         self.assertNotIn("--gaps", calls[1])
         self.assertIn("a,b", calls[1][calls[1].index("--recalled") + 1])
-        self.assertEqual(queue.pending_gaps, {4: {"a": 14, "b": 9}}, "kept for the next time")
+        self.assertEqual(queue.pending_gaps, {}, "a gap belongs to the answer it was measured on: dropped with it")
         self.assertEqual(queue.reports(), [])
         self.assertEqual(channel.sent, [])
+
+    def test_the_next_answer_with_a_short_gap_sends_no_stale_long_gap(self):
+        from datetime import date, timedelta
+        ok, calls, queue, _ = self.run_flush(accepts_gaps=False)
+        self.assertTrue(ok)
+        queue.pending_reports[4] = {"failed": [], "shaky": [], "ok": ["a"]}
+        self.assertNotIn(4, queue.pending_gaps, "nothing left that the next report could carry")
 
     def test_a_current_generator_gets_the_gaps_once_and_they_are_cleared(self):
         ok, calls, queue, _ = self.run_flush(accepts_gaps=True)

@@ -983,22 +983,19 @@ class Lessons:
             rc, out, err = await run_cli(self.cfg, args)
             sent_gaps = bool(queue.pending_gaps.get(lesson))
             if rc != 0 and sent_gaps and "unrecognized arguments: --gaps" in f"{err}\n{out}":
-                # 生成側が --gaps をまだ知らない (submodule が遅れている): 結果だけ送り、日数は次のために残す (レッスン生成は止めない)
-                logging.warning("audiolesson report は --gaps を受け付けません: 日数なしで送り直します (日数は残します)")
+                # 生成側が --gaps をまだ知らない (submodule が遅れている): 結果だけ送り、その日数は手放す (レッスン生成は止めない)
+                logging.warning("audiolesson report は --gaps を受け付けません: 日数なしで送り直します (その日数は手放します)")
                 args = self.cfg.report_args(
                     name, outcome["failed"], lesson=lesson, hesitated=outcome["shaky"], recalled=outcome["ok"]
                 )
                 rc, out, err = await run_cli(self.cfg, args)
-                keep = True
-            else:
-                keep = False
             if rc != 0:
                 await channel.send(
                     f"レッスン{lesson}の結果を report できませんでした"
                     f"（次の /lesson で送り直します）:\n```\n{_tail(redact(err or out))}\n```"
                 )
                 return False
-            queue.mark_reported(lesson, outcome, keep_gaps=keep)
+            queue.mark_reported(lesson, outcome)
             queue.save(path)
         return True
 
