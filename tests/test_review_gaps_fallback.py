@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest import mock
 
 from src.lesson import LessonConfig, Lessons
-from src.review_queue import ReviewQueue
+from datetime import date
+
+from src.review_queue import Entry, ReviewQueue
 
 
 class FakeChannel:
@@ -48,9 +50,28 @@ class GapsFallbackTests(unittest.TestCase):
         self.assertIn("--gaps", calls[0])
         self.assertNotIn("--gaps", calls[1])
         self.assertIn("a,b", calls[1][calls[1].index("--recalled") + 1])
-        self.assertEqual(queue.pending_gaps, {4: {"a": 14, "b": 9}}, "kept for the next time")
+        self.assertEqual(queue.pending_gaps, {}, "a gap belongs to the answer it was measured on: dropped with it")
         self.assertEqual(queue.reports(), [])
         self.assertEqual(channel.sent, [])
+
+    def test_the_next_answer_with_a_short_gap_sends_no_stale_long_gap(self):
+        from datetime import date, timedelta
+        ok, calls, queue, _ = self.run_flush(accepts_gaps=False)
+        self.assertTrue(ok)
+        day = date(2026, 10, 10)
+        queue.entries["a"] = Entry(["a"], "a?", "a", 4, state="ok", reviews=2, due=day.isoformat(), last_reviewed=(day - timedelta(days=1)).isoformat())
+        queue.record("a", "ok", day)
+        self.assertNotIn("a", queue.pending_gaps.get(4, {}), "a one-day gap is no gap, and no old one is left to be sent")
+
+    def test_a_queue_file_with_gaps_for_already_reported_items_loads_without_them(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "pending.json"
+            q = self.queue()
+            q.pending_gaps[4] = {"a": 14, "b": 9, "gone": 20}  # «gone» has no outcome waiting
+            q.pending_gaps[3] = {"old": 11}  # lesson 3 has nothing waiting at all
+            q.save(path)
+            loaded = ReviewQueue.load(path, date(2026, 10, 10))
+        self.assertEqual(loaded.pending_gaps, {4: {"a": 14, "b": 9}})
 
     def test_a_current_generator_gets_the_gaps_once_and_they_are_cleared(self):
         ok, calls, queue, _ = self.run_flush(accepts_gaps=True)

@@ -362,14 +362,13 @@ class ReviewQueue:
             for n, r in sorted(self.pending_reports.items())
         ]
 
-    def mark_reported(self, lesson: int, sent: Report, keep_gaps: bool = False) -> None:
-        """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す.
-        ``keep_gaps``: 日数 (--gaps) を付けずに送った (古い生成側が受け付けなかった) ときは、日数は次のために残す."""
+    def mark_reported(self, lesson: int, sent: Report) -> None:
+        """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す. 日数 (--gaps) は、付けずに送ったときも手放す (#127):
+        日数はその答えについて測ったもので、答えの結果が日数なしで届いたら、もう何も表さない (残すと、次の短い日数に古い長い日数が居座る)."""
         gaps = self.pending_gaps.get(lesson, {})
         for ids in sent.values():
             for i in ids:
-                if not keep_gaps:
-                    gaps.pop(i, None)
+                gaps.pop(i, None)
         if not gaps:
             self.pending_gaps.pop(lesson, None)
         pending = self.pending_reports.get(lesson, empty_report())
@@ -589,11 +588,19 @@ class ReviewQueue:
             path.replace(broken)
             return cls()
         if raw.get("format") == FORMAT:
+            reports = {int(n): _report(r) for n, r in raw.get("pending_reports", {}).items()}
+            # #127: a gap is valid only for the answer it was measured on: drop any whose item has no outcome waiting in its lesson's report
+            gaps = {}
+            for n, g in raw.get("pending_gaps", {}).items():
+                waiting = {i for ids in reports.get(int(n), empty_report()).values() for i in ids}
+                kept = {i: int(v) for i, v in g.items() if i in waiting}
+                if kept:
+                    gaps[int(n)] = kept
             return cls(
                 {k: Entry(**v) for k, v in raw.get("items", {}).items()},
-                {int(n): _report(r) for n, r in raw.get("pending_reports", {}).items()},
+                reports,
                 int(raw.get("refined", 0)),
-                {int(n): {i: int(g) for i, g in gaps.items()} for n, gaps in raw.get("pending_gaps", {}).items()},
+                gaps,
             )
         queue = cls.from_legacy(raw, today)
         shutil.copyfile(path, path.with_name(path.name + ".v1.bak"))
