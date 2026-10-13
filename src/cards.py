@@ -37,8 +37,10 @@ class CardQueue:
     cards: dict[str, CardState] = field(default_factory=dict)
 
     def select(self, deck: list[dict], today: date, n: int) -> list[dict]:
-        """今回出すカード (最大 n 枚): 期限の来たカードを先に、残りをデッキ順の新しい
-        カードで埋める. デッキにないカード (消えたカード) は出さない."""
+        """今回出すカード (最大 n 枚): 新しいカード (デッキ順) に一枠を確保し、残りを期限の来たカードで埋める (#132).
+        期限のカードだけで枠が埋まると、まだ見ていないカードがいつまでも後ろで待つ (「同じ場面や読みが何回も出る」).
+        デッキに新しいカードがある間は、毎回一枚は新しいカード. 枠が一つの日は、新しいカードと期限のカードを一日おきに.
+        期限のカードが足りなければ新しいカードで埋める. デッキにないカード (消えたカード) は出さない."""
         if n <= 0:
             return []
         by_id = {c["id"]: c for c in deck}
@@ -49,12 +51,15 @@ class CardQueue:
         ]
         due.sort(key=lambda k: (RANK.get(self.cards[k].state, 3), self.cards[k].due))
         new = [c["id"] for c in deck if c["id"] not in self.cards]
-        return [by_id[k] for k in (due + new)[:n]]
+        new_seat = bool(new) and (n > 1 or today.toordinal() % 2 == 0)
+        picked_due = due[: n - 1] if new_seat else due[:n]
+        picked_new = new[: n - len(picked_due)]
+        return [by_id[k] for k in picked_due + picked_new]
 
     def record(self, card_id: str, result: str, today: date, skip_first_ok: bool = False) -> None:
-        """``skip_first_ok``: 場面カードを初めて見て「言えた」ときは、「言えた」の最初の段 (1 日) を飛ばして 3 日後から
-        始める (language-learning-audio の場面カード: 翌朝また出ると繰り返しに感じる, site_update_notifier#95). 言えなかった・迷った
-        の 1 日、読みカードと項目の問いの間隔は変えない."""
+        """``skip_first_ok``: カードを初めて見て「言えた」ときは、「言えた」の最初の段 (1 日) を飛ばして 3 日後から
+        始める (場面カード: 翌朝また出ると繰り返しに感じる, site_update_notifier#95. 読みカードも, #132). 言えなかった・迷った
+        の 1 日は変えない."""
         if result not in INTERVALS:
             raise ValueError(result)
         first = card_id not in self.cards
