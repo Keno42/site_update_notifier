@@ -254,6 +254,7 @@ class LessonConfig:
         recalled: list[str] | None = None,
         sooner: list[str] | None = None,
         load: str | None = None,
+        gaps: dict[str, int] | None = None,
     ) -> list[str]:
         """lesson を省くと最新のレッスンへの報告になる. 振り返りでは出題元のレッスンを
         必ず渡す (flush_reports). 迷った / 言えたも送る: 音声レッスン側は言えなかった・
@@ -271,6 +272,8 @@ class LessonConfig:
                 args += [flag, ",".join(ids)]
         if load:
             args += ["--load", load]
+        if gaps:
+            args += ["--gaps", ",".join(f"{i}={g}" for i, g in gaps.items())]  # 前回確かめてからの日数 (language-learning-audio #220)
         return args
 
 
@@ -975,15 +978,27 @@ class Lessons:
                 lesson=lesson,
                 hesitated=outcome["shaky"],
                 recalled=outcome["ok"],
+                gaps=queue.pending_gaps.get(lesson),
             )
             rc, out, err = await run_cli(self.cfg, args)
+            sent_gaps = bool(queue.pending_gaps.get(lesson))
+            if rc != 0 and sent_gaps and "unrecognized arguments: --gaps" in f"{err}\n{out}":
+                # 生成側が --gaps をまだ知らない (submodule が遅れている): 結果だけ送り、日数は次のために残す (レッスン生成は止めない)
+                logging.warning("audiolesson report は --gaps を受け付けません: 日数なしで送り直します (日数は残します)")
+                args = self.cfg.report_args(
+                    name, outcome["failed"], lesson=lesson, hesitated=outcome["shaky"], recalled=outcome["ok"]
+                )
+                rc, out, err = await run_cli(self.cfg, args)
+                keep = True
+            else:
+                keep = False
             if rc != 0:
                 await channel.send(
                     f"レッスン{lesson}の結果を report できませんでした"
                     f"（次の /lesson で送り直します）:\n```\n{_tail(redact(err or out))}\n```"
                 )
                 return False
-            queue.mark_reported(lesson, outcome)
+            queue.mark_reported(lesson, outcome, keep_gaps=keep)
             queue.save(path)
         return True
 

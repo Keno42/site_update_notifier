@@ -102,6 +102,8 @@ def key_for(items: list[str]) -> str:
 # 1 回の振り返りの問いのうち、期限の来た古い問い (答えたことのある問い) に必ず回す割合の分母 (3: 3 分の 1). 新出の確認と
 # 未解決の確認が席を埋めても、古い項目が定着したかの確認が飢えないように (language-learning-audio #220)
 RETENTION_SHARE = 3
+# 前回確かめてからこれだけ (日) 空いた答えは、間隔つきで音声レッスン側へ報告する (#220)
+MIN_GAP_DAYS = 3
 # 期限の来た (確認待ちの) 問いの上限. 1 週間の振り返りで聞ける数 (1 日 14 問 × 7) を超えたら、すでに何度も言えた問いの期限を先へ送る
 BACKLOG_MAX = 100
 
@@ -125,6 +127,9 @@ class ReviewQueue:
     pending_reports: dict[int, Report] = field(default_factory=dict)
     # 古い plan の問いを audiolesson refine-review で整えた版 (0: まだ). REFINE_VERSION に届くまで一度やる (#96)
     refined: int = 0
+    # 出題元レッスン → 項目 → その問いを前回確かめてから答えるまでの日数 (3 日以上). 音声レッスン側の ease が長い間隔のあとの「言えた」から
+    # 学び、3 / 7 / 14 日後の定着率を数えるために、報告と一緒に送る (language-learning-audio #220)
+    pending_gaps: dict[int, dict[str, int]] = field(default_factory=dict)
 
     # ---- 選ぶ ---------------------------------------------------------
 
@@ -280,6 +285,12 @@ class ReviewQueue:
         if result not in INTERVALS:
             raise ValueError(result)
         e = self.entries[key]
+        if e.last_reviewed:
+            gap = (today - date.fromisoformat(e.last_reviewed)).days
+            if gap >= MIN_GAP_DAYS:
+                gaps = self.pending_gaps.setdefault(e.source_lesson, {})
+                for i in e.items:
+                    gaps[i] = gap
         e.streak = e.streak + 1 if e.state == result else 1
         e.open = False
         e.state = result
@@ -318,8 +329,16 @@ class ReviewQueue:
             for n, r in sorted(self.pending_reports.items())
         ]
 
-    def mark_reported(self, lesson: int, sent: Report) -> None:
-        """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す."""
+    def mark_reported(self, lesson: int, sent: Report, keep_gaps: bool = False) -> None:
+        """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す.
+        ``keep_gaps``: 日数 (--gaps) を付けずに送った (古い生成側が受け付けなかった) ときは、日数は次のために残す."""
+        gaps = self.pending_gaps.get(lesson, {})
+        for ids in sent.values():
+            for i in ids:
+                if not keep_gaps:
+                    gaps.pop(i, None)
+        if not gaps:
+            self.pending_gaps.pop(lesson, None)
         pending = self.pending_reports.get(lesson, empty_report())
         left = {
             k: [i for i in ids if i not in sent.get(k, [])]
@@ -541,6 +560,7 @@ class ReviewQueue:
                 {k: Entry(**v) for k, v in raw.get("items", {}).items()},
                 {int(n): _report(r) for n, r in raw.get("pending_reports", {}).items()},
                 int(raw.get("refined", 0)),
+                {int(n): {i: int(g) for i, g in gaps.items()} for n, gaps in raw.get("pending_gaps", {}).items()},
             )
         queue = cls.from_legacy(raw, today)
         shutil.copyfile(path, path.with_name(path.name + ".v1.bak"))
@@ -570,6 +590,7 @@ class ReviewQueue:
             "items": {k: asdict(e) for k, e in self.entries.items()},
             "pending_reports": {str(n): v for n, v in self.pending_reports.items()},
             "refined": self.refined,
+            **({"pending_gaps": {str(n): g for n, g in self.pending_gaps.items()}} if self.pending_gaps else {}),
         }
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
