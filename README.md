@@ -22,10 +22,20 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
    続けて場面カードと読みカードを数枚ずつ出す（下の「場面カード」「読みカード」）
 2. 答えた結果を `audiolesson report --recalled … --hesitated … --failed …` で送る
 3. 次のレッスンを生成し、その問いをキューに足して、音声と transcript をチャンネルに投稿する
-   （「Discord 振り返り: 次回 15問（確認待ち 43件）」のように次回の見通しも添える）
+   （「Discord 振り返り: 次回 15問（確認待ち 43件: 未出題 …・1回 …・言えた×2+ …）」のように次回の見通しと、
+   確認待ちの内訳も添える。内訳は `/lesson-week` と、レッスンの記録の `review_backlog.json` にも残る。#123）
 4. 生成物を消す（残るのは `learner.json`、振り返りキュー `pending_review.json`、場面カード・読みカードの
    予定 `scene_queue.json` / `reading_queue.json`、フィードバック用のレッスンの記録 `lesson_manifests/` と
    `lesson_feedback.jsonl`）
+
+**生成に失敗したとき**（#110, #111, #116）:
+
+- 音声合成のサービスが断った（403 など）ときは一文で知らせ、トレースバックやサーバのパスはチャンネルに出さない（全文はログへ）。
+  生成中の表示には「音声合成 120/450・再試行中（403、2/4）」のように再試行の様子が出る
+- 失敗の知らせに「もう一度生成」ボタンが付く（本人だけ）。振り返りはやり直さず、同じ長さで生成だけをやり直す
+- ボタンを使わずに `/lesson` を打っても、**終わった振り返りのあとにレッスンがまだできていなければ**（振り返りのログ
+  `review_log.jsonl` の最後の終わった振り返りが、最後に生成したレッスンより新しく、2 日以内なら）、振り返りを飛ばして生成だけを
+  やり直す。振り返りが一度でも二度でも、何日またいでも同じ。途中で閉じた振り返りは数えない
 
 ### 振り返りキュー
 
@@ -65,6 +75,13 @@ submodule (`external/language-learning-audio`) として取り込み、Discord �
   それを含む文の問いが入っていなければ入れる（外した問いの期限と未解決の印を引き継ぐ）。#254 より前の plan の問いは、最初の
   `/lesson` で一度だけ `audiolesson refine-review` にかけて整える（`pending_review.json` の `refined` が済んだ印。
   読めなければ、保存したままにして次にもう一度試す）。
+- 1 回の振り返りの 3 分の 1 は、期限の来た、前に答えたことのある「言えた / 迷った」の問いに回す（最後に確かめてから一番長いもの
+  から。新出の確認と未解決が席を埋めても、定着の確認が飢えないように。language-learning-audio #220, #109）
+- 期限の来た問いが 100 件（`BACKLOG_MAX`、1 週間で聞ける数）を超えたら、何度も言えた問いの期限を 14〜27 日先へ送る
+  （消さない: 履歴はそのまま。新出・未解決・言えなかった / 迷った・試しの文は送らない）
+- 前回確かめてから 3 日以上空いた答えは、その日数を `report --gaps 項目=日数` で一緒に送る（#118）。音声レッスン側は、
+  7 日以上空いて「言えた」項目の ease を上げて間隔を伸ばし、3–6 / 7–13 / 14+ 日ごとの定着率を数える（language-learning-audio
+  #298）。生成側が `--gaps` をまだ知らなければ日数なしで送り直し、その日数は手放す（#128: 日数はその答えについて測ったもの）
 - 旧形式の `pending_review.json`（`{"lesson", "questions"}`）は最初に読んだときに変換する。
   変換した問いはすべて未回答・当日期限で、元のファイルは `pending_review.json.v1.bak` に残る
 
@@ -348,6 +365,25 @@ lesson_manifests/lesson-012/
   を忘れていると、bot のコミットが新しくてもこちらは古いまま、と分かる）
 - 日時はサーバーのローカル時刻。git で読めないときは「不明」
 - `/lesson` と同じく `LESSON_ROOT` / `LESSON_USERS` があるときだけ登録される
+- 封じた secrets（下）が開けたかを「secrets: azure ✓ / –」で示す（値は出さない）
+
+### 音声合成の鍵を SSH なしで渡す（Azure Speech, #119）
+
+edge-tts の無料の窓口が断る（403）と、レッスンは Azure Speech の公式 API（同じ声）に切り替わる（language-learning-audio
+#299: 同梱の `profiles/edge-*.toml` の `fallback = "azure"`）。その鍵は、bot の機械に入らずにリポジトリの secrets から渡せる:
+CI で bot の公開鍵宛てに封じ（libsodium の sealed box）、`main` を通して届け、bot の機械だけが開ける。
+
+1. bot が起動時に鍵対を作る（`LESSON_ROOT` の下の `.bot_secret_key`、mode 600。秘密鍵は機械の外に出ない。PyNaCl が要るので
+   `update_and_restart.sh` が `pip install -r requirements.txt` していること）
+2. Discord で `/bot-public-key`（登録したユーザーにだけ見える）→ 公開鍵をリポジトリの**変数** `BOT_PUBLIC_KEY` に入れる
+3. リポジトリの **secrets** に `AZURE_SPEECH_KEY` と `AZURE_SPEECH_REGION` を入れる。Settings → Actions → General →
+   「Allow GitHub Actions to create and approve pull requests」を有効にする
+4. Actions タブから「Seal secrets」を実行し、開いた PR（`sealed/secrets.sealed` だけ）をマージする
+5. 次の自動更新と再起動で bot が開き、値はメモリにだけ置く。レッスン生成のサブプロセスの環境と、読みカードの 🔊 にだけ使う
+   （`os.environ`・ログ・Discord には出さない）。`/version` が「secrets: azure ✓」になる
+
+鍵を変えるときは `.bot_secret_key` を消して再起動し、新しい公開鍵で 2〜4 をやり直す。封じたファイルはリポジトリにあっても
+bot の機械でしか開けない。
 
 ### language-learning-audio を更新する
 
