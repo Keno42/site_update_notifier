@@ -329,12 +329,14 @@ class ReviewQueue:
             for n, r in sorted(self.pending_reports.items())
         ]
 
-    def mark_reported(self, lesson: int, sent: Report) -> None:
-        """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す."""
+    def mark_reported(self, lesson: int, sent: Report, keep_gaps: bool = False) -> None:
+        """``lesson`` の報告が届いた. 送った後に増えた分 (報告中に答えた問い) は残す.
+        ``keep_gaps``: 日数 (--gaps) を付けずに送った (古い生成側が受け付けなかった) ときは、日数は次のために残す."""
         gaps = self.pending_gaps.get(lesson, {})
         for ids in sent.values():
             for i in ids:
-                gaps.pop(i, None)
+                if not keep_gaps:
+                    gaps.pop(i, None)
         if not gaps:
             self.pending_gaps.pop(lesson, None)
         pending = self.pending_reports.get(lesson, empty_report())
