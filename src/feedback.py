@@ -163,14 +163,15 @@ class Ledger:
         )
         return d
 
-    def annotate_manifest(self, ref: str, extra: dict) -> bool:
-        """生成後にわかったことを manifest.json に足す (確認待ちの内訳 #123 など). 数だけ. 失敗しても投稿は止めない (False)."""
-        path = self.manifests / ref / "manifest.json"
+    def save_extra(self, ref: str, name: str, data: dict) -> bool:
+        """生成後にわかったことを、記録のディレクトリに別のファイルとして足す (確認待ちの内訳 ``review_backlog.json`` #123 など). 数だけ.
+        manifest.json は生成したときのまま変えない. エクスポートは記録のディレクトリの全ファイルを持つので、そのまま載る. 失敗しても投稿は止めない (False)."""
+        d = self.manifests / ref
         try:
-            manifest = json.loads(path.read_text("utf-8"))
-            manifest.update(extra)
-            path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), "utf-8")
-        except (OSError, ValueError):
+            if not d.is_dir():
+                return False
+            (d / name).write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+        except OSError:
             return False
         return True
 

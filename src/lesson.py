@@ -1109,8 +1109,8 @@ class Lessons:
             queue.add_from_plan(plan, today)
             queue.save(path)
             tomorrow = today + timedelta(days=1)
-            if manifest:  # 確認待ちの内訳を記録に足す (数だけ, #123): サーバに入らなくても日々の読みで追える
-                feedback.Ledger(self.cfg.user_dir(name)).annotate_manifest(manifest, {"review_backlog": queue.backlog_summary(tomorrow)})
+            if manifest:  # 確認待ちの内訳を記録のディレクトリに別ファイルで足す (数だけ, #123. manifest は変えない): サーバに入らなくても日々の読みで追える
+                feedback.Ledger(self.cfg.user_dir(name)).save_extra(manifest, "review_backlog.json", queue.backlog_summary(tomorrow))
             # 次の振り返りは、その人の既定の長さで見積もる
             size = self.cfg.review_size(settings.minutes)
             note = (

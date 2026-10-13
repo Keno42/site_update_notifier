@@ -60,10 +60,13 @@ class BacklogTests(unittest.TestCase):
             ledger = Ledger(Path(td))
             d = ledger.manifests / "lesson-001"
             d.mkdir(parents=True)
-            (d / "manifest.json").write_text(json.dumps({"lesson": 1}), "utf-8")
-            self.assertTrue(ledger.annotate_manifest("lesson-001", {"review_backlog": summary}))
-            self.assertEqual(json.loads((d / "manifest.json").read_text("utf-8"))["review_backlog"], summary)
-            self.assertFalse(ledger.annotate_manifest("lesson-404", {"x": 1}), "a missing record is not an error")
+            manifest = json.dumps({"lesson": 1})
+            (d / "manifest.json").write_text(manifest, "utf-8")
+            self.assertTrue(ledger.save_extra("lesson-001", "review_backlog.json", summary))
+            self.assertEqual(json.loads((d / "review_backlog.json").read_text("utf-8")), summary)
+            self.assertEqual((d / "manifest.json").read_text("utf-8"), manifest, "the manifest stays as it was generated")
+            self.assertIn("review_backlog.json", [p.name for p in sorted(d.iterdir())], "the export takes every file of the record directory")
+            self.assertFalse(ledger.save_extra("lesson-404", "review_backlog.json", {"x": 1}), "a missing record is not an error")
 
 
 if __name__ == "__main__":
