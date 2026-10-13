@@ -19,6 +19,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -48,6 +49,7 @@ from .cards import CardQueue
 from .interaction import answers_on_failure
 from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, read_review_log, review_note
 from .review_queue import REFINE_VERSION, ReviewQueue
+from . import secrets_box
 
 LLA_DIR = (
     Path(__file__).resolve().parent.parent / "external" / "language-learning-audio"
@@ -322,6 +324,7 @@ async def run_cli(
     args: list[str],
     on_progress: Callable[[str], Awaitable[None]] | None = None,
     stdin: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """CLI を実行する。stderr の進捗行 (「synthesized 120/450 …」) を on_progress に渡し、
     cfg.timeout_min を超えたら止めて rc=-1 を返す."""
@@ -331,6 +334,7 @@ async def run_cli(
         "audiolesson.cli",
         *args,
         cwd=str(cfg.lla_dir),
+        env={**os.environ, **env} if env else None,  # 足す env はこのサブプロセスだけ (os.environ は変えない. issue #119)
         stdin=asyncio.subprocess.PIPE if stdin is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -1076,7 +1080,7 @@ class Lessons:
             status = StatusMessage(channel)
             await status.start()
             async with channel.typing():
-                rc, out, err = await run_cli(self.cfg, args, status.update)
+                rc, out, err = await run_cli(self.cfg, args, status.update, env=secrets_box.environment())
             await status.finish(rc == 0)
             if rc != 0:
                 logging.error("生成に失敗しました (%s): %s", name, err or out)  # 全文はログへ
@@ -1329,6 +1333,7 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
     if cfg is None:
         logging.info("LESSON_ROOT / LESSON_USERS が未設定のため /lesson は無効です。")
         return None
+    secrets_box.load(cfg.root)  # 封じた secrets (issue #119): 鍵がなければ作り、開けたらメモリに置く
     lessons = Lessons(cfg)
     fb = feedback.Feedback(
         cfg.users, cfg.user_dir, cfg.channel_id, report_feedback=lessons.report_feedback
@@ -1343,6 +1348,22 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
     minute_choices = [
         app_commands.Choice(name=f"{m}分", value=m) for m in usersettings.MINUTES_CHOICES
     ]
+
+    async def bot_public_key(interaction: discord.Interaction) -> None:
+        """登録されたユーザーだけに、自分にだけ見える形で bot の公開鍵を出す. 公開鍵は秘密ではないが、渡す相手は絞る (issue #119)."""
+        if interaction.user.id not in cfg.users:
+            await interaction.response.send_message(
+                "このコマンドは登録されたユーザーだけが使えます。", ephemeral=True
+            )
+            return
+        try:
+            text = secrets_box.public_key_b64(secrets_box.load_or_create_key(cfg.root))
+        except ImportError:
+            await interaction.response.send_message("PyNaCl が入っていないので鍵を作れません。", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"bot の公開鍵（リポジトリの変数 `BOT_PUBLIC_KEY` に入れます）:\n`{text}`", ephemeral=True
+        )
 
     @app_commands.describe(
         minutes="今回だけのレッスンの長さ（省略すると /lesson-configure の設定）"
@@ -1448,6 +1469,11 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
             ),
         ),
         version.command(),
+        app_commands.Command(
+            name="bot-public-key",
+            description="bot の公開鍵を表示します（secrets を封じて渡すためのもの。秘密ではありません）",
+            callback=bot_public_key,
+        ),
     ):
         tree.add_command(command, guild=guild)
 

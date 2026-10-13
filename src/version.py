@@ -14,6 +14,8 @@ from pathlib import Path
 import discord
 from discord import app_commands
 
+from . import secrets_box
+
 REPO_DIR = Path(__file__).resolve().parent.parent
 LLA_DIR = REPO_DIR / "external" / "language-learning-audio"
 SUBJECT_MAX = 72
@@ -108,7 +110,7 @@ INFO = VersionInfo.capture()
 
 def command() -> app_commands.Command:
     async def version(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(INFO.text(), ephemeral=True)
+        await interaction.response.send_message(INFO.text() + "\n" + secrets_box.status(), ephemeral=True)
 
     return app_commands.Command(
         name="version",

@@ -154,7 +154,7 @@ class GenerateTests(unittest.TestCase):
             )
             seen = []
 
-            async def fake_cli(cfg, args, on_progress=None):
+            async def fake_cli(cfg, args, on_progress=None, env=None):
                 seen.append(args)
                 return 1, "", "stop"
 
