@@ -47,7 +47,7 @@ from . import (
 )
 from .cards import CardQueue
 from .interaction import answers_on_failure
-from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, log_review, read_review_log, review_note
+from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, backlog_detail, log_review, read_review_log, review_note
 from .review_queue import REFINE_VERSION, ReviewQueue
 from . import secrets_box
 
@@ -1124,6 +1124,8 @@ class Lessons:
             queue.add_from_plan(plan, today)
             queue.save(path)
             tomorrow = today + timedelta(days=1)
+            if manifest:  # 確認待ちの内訳を記録のディレクトリに別ファイルで足す (数だけ, #123. manifest は変えない): サーバに入らなくても日々の読みで追える
+                feedback.Ledger(self.cfg.user_dir(name)).save_extra(manifest, "review_backlog.json", queue.backlog_summary(tomorrow))
             # 次の振り返りは、その人の既定の長さで見積もる
             size = self.cfg.review_size(settings.minutes)
             note = (
@@ -1203,6 +1205,9 @@ class Lessons:
         await interaction.response.defer(ephemeral=True, thinking=True)
         days = min(max(days, 1), 60)
         text = weekly.build(self.cfg.user_dir(name), self.today(), days)
+        detail = backlog_detail(ReviewQueue.load(self.cfg.pending_path(name), self.today()), self.today())
+        if detail:
+            text += f"\n確認待ちの内訳{detail}"
         await interaction.followup.send(text, ephemeral=True)
         with trip.resolve(self.cfg.trip_path(name), interaction.channel) as (source, _):
             readiness = await self.readiness_text(name, source)

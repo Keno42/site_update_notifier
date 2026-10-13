@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import shutil
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -277,6 +278,38 @@ class ReviewQueue:
         return sum(
             1 for e in self.entries.values() if e.tier(today) < 5 and not unaskable(e)
         )
+
+    def backlog_parts(self, today: date) -> dict[str, int]:
+        """期限の来た (確認待ちの) 問いの内訳 (#123). 合計は ``due_count`` と一致する. 数だけで項目は含まない.
+        一つの問いは一つの部分にだけ数える: 新出の確認 → 未解決 → 迷った/言えなかった → bonus → 未出題 → 1回 → 言えた×2+."""
+        parts: Counter[str] = Counter()
+        for e in self.entries.values():
+            if e.tier(today) >= 5 or unaskable(e):
+                continue
+            if e.new and e.state == "unseen":
+                parts["新出"] += 1
+            elif e.open:
+                parts["未解決"] += 1
+            elif e.state in ("shaky", "failed"):
+                parts["迷った/言えなかった"] += 1
+            elif e.bonus:
+                parts["試しの文"] += 1
+            elif e.reviews == 0:
+                parts["未出題"] += 1
+            elif e.reviews == 1:
+                parts["1回"] += 1
+            else:
+                parts["言えた×2+"] += 1
+        order = ("未出題", "1回", "言えた×2+", "迷った/言えなかった", "未解決", "新出", "試しの文")
+        return {k: parts[k] for k in order if parts[k]}
+
+    def backlog_summary(self, today: date) -> dict:
+        """エクスポート用: 期限の来た数、内訳、全体の数 (これから先に回した分を含む). 数だけ."""
+        return {
+            "due": self.due_count(today),
+            "parts": self.backlog_parts(today),
+            "total": len(self.entries),
+        }
 
     # ---- 更新する -------------------------------------------------------
 
