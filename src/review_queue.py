@@ -258,13 +258,14 @@ class ReviewQueue:
         if excess <= 0:
             return []
         def candidates(min_reviews: int, max_reviews: int | None = None) -> list[str]:
+            # ``new`` is not an exclusion: it is set when a new item's question enters the queue and never cleared, so an answered one (state ok) is exactly the
+            # next-day check that has been confirmed; an unanswered new-item check is not ``ok`` (#133 review)
             return [
                 k
                 for k in due
                 if self.entries[k].state == "ok"
                 and not self.entries[k].open
                 and not self.entries[k].bonus
-                and not self.entries[k].new
                 and self.entries[k].reviews >= min_reviews
                 and (max_reviews is None or self.entries[k].reviews <= max_reviews)
             ]
@@ -330,7 +331,7 @@ class ReviewQueue:
                 gaps = self.pending_gaps.setdefault(e.source_lesson, {})
                 for i in e.items:
                     gaps[i] = gap
-        first = e.reviews == 0
+        first = e.reviews == 0  # also an open item's first question: LLA closes the item on that answer either way, so the 3 days cost nothing
         e.streak = e.streak + 1 if e.state == result else 1
         if first and result == "ok":
             e.streak = 2  # #133: the next-day check of a new item is the first answer; its «言えた» starts at the second step (3 days, then 7), as scene cards do (#95)
