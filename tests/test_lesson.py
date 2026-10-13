@@ -357,6 +357,7 @@ class ViewTests(unittest.TestCase):
                 "lesson-feedback-export",
                 "lesson-week",
                 "version",
+                "bot-public-key",
             ],
         )
 
@@ -367,7 +368,7 @@ class ReportTests(unittest.TestCase):
     def test_old_lessons_are_reported_as_themselves_not_as_the_latest(self):
         calls = []
 
-        async def fake_cli(cfg, args, on_progress=None):
+        async def fake_cli(cfg, args, on_progress=None, env=None):
             calls.append(args)
             return 0, "", ""
 
@@ -670,7 +671,7 @@ class RetryGenerationTests(unittest.TestCase):
             lessons.mark_generating("yuki", 5.0)
             channel = FakeChannel()
 
-            async def failing(cfg_, args, on_progress=None, stdin=None):
+            async def failing(cfg_, args, on_progress=None, stdin=None, env=None):
                 return 1, "", "WSServerHandshakeError: 403"
 
             with mock.patch("src.lesson.run_cli", failing):
@@ -762,7 +763,7 @@ class RefineQueueTests(unittest.TestCase):
     def run_pass(self, rc, out):
         calls = []
 
-        async def fake_run_cli(cfg, args, on_progress=None, stdin=None):
+        async def fake_run_cli(cfg, args, on_progress=None, stdin=None, env=None):
             calls.append((args, stdin))
             return rc, out, ""
 
@@ -960,7 +961,7 @@ class EndToEndTests(unittest.TestCase):
             day["today"] = D + timedelta(days=1)
             reports = {"left_to_fail": 1}
 
-            async def flaky_cli(cfg_, args, on_progress=None):
+            async def flaky_cli(cfg_, args, on_progress=None, env=None):
                 if args[0] == "report" and reports["left_to_fail"]:
                     reports["left_to_fail"] -= 1
                     return 1, "", "disk full"
@@ -1557,7 +1558,7 @@ class OpenItemWordingTests(unittest.TestCase):
     def test_the_stored_wording_is_replaced_by_the_courses_current_cue(self):
         calls = []
 
-        async def fake_cli(cfg, args, on_progress=None):
+        async def fake_cli(cfg, args, on_progress=None, env=None):
             calls.append(args)
             return 0, json.dumps({"sofa": {"prompt": "「寝る」と言ってください。", "answer": "sofa", "cues": ["「寝る」と言ってください。"]}}), ""
 
@@ -1575,7 +1576,7 @@ class OpenItemWordingTests(unittest.TestCase):
         self.queue.entries["tvo"] = Entry(["tvo"], "「2000クローナです」と言ってください。", "Það kostar tvö þúsund krónur.", 4, due=D.isoformat())
         self.queue.entries["gott"] = Entry(["gott"], "「良い」と言ってください。", "gott", 4, due=D.isoformat())
 
-        async def fake_cli(cfg, args, on_progress=None):
+        async def fake_cli(cfg, args, on_progress=None, env=None):
             return 0, json.dumps({
                 "tvo": {"prompt": "「2」と言ってください。", "answer": "tvö", "cues": ["「2」と言ってください。"]},
                 "gott": {"prompt": "「良い」(状況0)", "answer": "gott", "cues": ["「良い」(状況0)", "「良い」と言ってください。"]},
@@ -1593,7 +1594,7 @@ class OpenItemWordingTests(unittest.TestCase):
         self.queue.entries["gott"] = Entry(["gott"], "「良い」と言ってください。", "gott", 4, due=D.isoformat())
         self.queue.entries["klukkan_er"] = Entry(["klukkan_er"], "Klukkan er {hour}.", "Klukkan er tvö.", 4, due=D.isoformat())
 
-        async def fake_cli(cfg, args, on_progress=None):
+        async def fake_cli(cfg, args, on_progress=None, env=None):
             return 0, json.dumps({
                 "gott": {"prompt": "「良い」(状況0)", "answer": "gott"},
                 "sofa": {"prompt": "「寝る」", "answer": "sofa"},
@@ -1606,10 +1607,10 @@ class OpenItemWordingTests(unittest.TestCase):
         self.assertEqual(self.queue.entries["klukkan_er"].prompt, "「2時です」")
 
     def test_the_stored_wording_stays_when_the_cli_fails(self):
-        async def failing(cfg, args, on_progress=None):
+        async def failing(cfg, args, on_progress=None, env=None):
             return 2, "", "error: invalid choice: 'questions'"
 
-        async def garbage(cfg, args, on_progress=None):
+        async def garbage(cfg, args, on_progress=None, env=None):
             return 0, "not json", ""
 
         for fake in (failing, garbage):
@@ -1620,7 +1621,7 @@ class OpenItemWordingTests(unittest.TestCase):
         self.queue.entries["klukkan_er"] = Entry(["klukkan_er"], "Klukkan er {hour}.", "Klukkan er tvö.", 4, due=D.isoformat())
         self.assertNotIn("klukkan_er", self.queue.select(D, 10))
 
-        async def fake_cli(cfg, args, on_progress=None):
+        async def fake_cli(cfg, args, on_progress=None, env=None):
             return 0, json.dumps({"klukkan_er": {"prompt": "「今は2時です」と言ってください。", "answer": "Klukkan er tvö."}}), ""
 
         self.refresh(fake_cli)
@@ -1695,7 +1696,7 @@ class OpenItemsEndToEndTests(unittest.TestCase):
                 session.rate("failed" if key == "takk" else "ok")
             sent = []
 
-            async def real_cli(cfg_, args, on_progress=None):
+            async def real_cli(cfg_, args, on_progress=None, env=None):
                 sent.append(args)
                 return await run_cli(cfg_, args, on_progress)
 
