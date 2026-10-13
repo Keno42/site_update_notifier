@@ -247,7 +247,8 @@ class ReviewQueue:
         確認回数もそのままで、plan が出しても ``add_from_plan`` は足し直さない.
 
         送る先は 14 日後から 14 日幅にずらす (一日に戻ってこない). 対象は bonus・新出・未解決・言えなかった / 迷った問いではなく、
-        確かめるほど価値の低い順 (連続 ok が長く、確認回数が多い順). 送った問いのキーを返す."""
+        確かめるほど価値の低い順 (連続 ok が長く、確認回数が多い順). そのあとに、1回だけ言えた問い (新出の翌日の確認が答えになったもの。
+        直近に答えた順: 古いものは期限のまま残し、振り返りの席が長い間隔を測る) も送る (#133). 送った問いのキーを返す."""
         due = [
             k
             for k, e in self.entries.items()
@@ -256,22 +257,27 @@ class ReviewQueue:
         excess = len(due) - maximum
         if excess <= 0:
             return []
-        trusted = sorted(
-            (
+        def candidates(min_reviews: int, max_reviews: int | None = None) -> list[str]:
+            return [
                 k
                 for k in due
                 if self.entries[k].state == "ok"
                 and not self.entries[k].open
                 and not self.entries[k].bonus
                 and not self.entries[k].new
-                and self.entries[k].reviews >= 2
-            ),
-            key=lambda k: (-self.entries[k].streak, -self.entries[k].reviews, self.entries[k].due),
-        )[:excess]
+                and self.entries[k].reviews >= min_reviews
+                and (max_reviews is None or self.entries[k].reviews <= max_reviews)
+            ]
+
+        trusted = sorted(candidates(2), key=lambda k: (-self.entries[k].streak, -self.entries[k].reviews, self.entries[k].due))
+        # #133: then the ones answered once (the next-day check was the answer: 109 of 151 in lesson 25's export), the most recent first;
+        # the oldest stay due, so the retention seats keep sampling long gaps
+        once = sorted(candidates(1, 1), key=lambda k: self.entries[k].last_reviewed or "", reverse=True)
+        trusted = (trusted + once)[:excess]
         for n, k in enumerate(trusted):
             self.entries[k].due = (today + timedelta(days=14 + n % 14)).isoformat()
         if trusted:
-            logging.info(f"確認待ちが {len(due)} 件になったので、定着した問いの期限を {len(trusted)} 件先へ送りました")
+            logging.info(f"確認待ちが {len(due)} 件になったので、定着した問い (言えた×2+ と、1回で言えた問い) の期限を {len(trusted)} 件先へ送りました")
         return trusted
 
     def due_count(self, today: date) -> int:
@@ -324,7 +330,10 @@ class ReviewQueue:
                 gaps = self.pending_gaps.setdefault(e.source_lesson, {})
                 for i in e.items:
                     gaps[i] = gap
+        first = e.reviews == 0
         e.streak = e.streak + 1 if e.state == result else 1
+        if first and result == "ok":
+            e.streak = 2  # #133: the next-day check of a new item is the first answer; its «言えた» starts at the second step (3 days, then 7), as scene cards do (#95)
         e.open = False
         e.state = result
         e.reviews += 1
