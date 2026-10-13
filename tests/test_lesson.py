@@ -897,7 +897,7 @@ class EndToEndTests(unittest.TestCase):
             self.assertTrue({"lesson-001.wav", "lesson-001.mp3"} & set(files), files)
             self.assertIn("lesson-001.transcript.md", files)
             # every new item is asked next time, past the limit of 2
-            self.assertIn("Discord 振り返り: 次回 3問（確認待ち 3件）", text)
+            self.assertIn("Discord 振り返り: 次回 3問（確認待ち 3件: 新出 3）", text)
             user = Path(td) / "yuki"
             self.assertTrue((user / "learner.json").exists())
             # the lesson guides to the feedback button; the GPT Voice check is gone (#129)

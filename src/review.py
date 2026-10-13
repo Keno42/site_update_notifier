@@ -305,7 +305,13 @@ def review_note(
     # 直前のレッスンの新出は上限を超えても全部出る (ReviewQueue.select)
     required = len(queue.must_answer(day, open_limit))
     asked = max(required, min(pending, limit)) if limit > 0 else pending
-    return f"Discord 振り返り: 次回 {asked}問（確認待ち {pending}件）"
+    return f"Discord 振り返り: 次回 {asked}問（確認待ち {pending}件{backlog_detail(queue, day)}）"
+
+
+def backlog_detail(queue: ReviewQueue, day: date) -> str:
+    """確認待ちの内訳 (#123): «: 未出題 98・1回 21・…». 0 の部分は出さない. 内訳が出せなければ空."""
+    parts = queue.backlog_parts(day)
+    return ": " + "・".join(f"{k} {n}" for k, n in parts.items()) if parts else ""
 
 
 class ReviewView(discord.ui.View):

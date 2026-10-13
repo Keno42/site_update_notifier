@@ -163,6 +163,17 @@ class Ledger:
         )
         return d
 
+    def annotate_manifest(self, ref: str, extra: dict) -> bool:
+        """生成後にわかったことを manifest.json に足す (確認待ちの内訳 #123 など). 数だけ. 失敗しても投稿は止めない (False)."""
+        path = self.manifests / ref / "manifest.json"
+        try:
+            manifest = json.loads(path.read_text("utf-8"))
+            manifest.update(extra)
+            path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), "utf-8")
+        except (OSError, ValueError):
+            return False
+        return True
+
     def _dirs(self) -> list[tuple[tuple[int, int], Path]]:
         if not self.manifests.exists():
             return []
