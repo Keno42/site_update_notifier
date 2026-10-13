@@ -30,6 +30,15 @@ class KeyTests(unittest.TestCase):
 
 
 @unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl is not installed")
+class UnwritableRootTests(unittest.TestCase):
+    def test_a_root_that_cannot_be_written_only_warns(self):
+        with mock.patch.object(Path, "mkdir", side_effect=PermissionError(13, "Permission denied")), \
+                self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(secrets_box.load(Path("/nonexistent-root")), {})
+        self.assertEqual(len(logs.output), 1)
+
+
+@unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl is not installed")
 class SealTests(unittest.TestCase):
     def test_a_sealed_value_opens_to_the_allowlisted_names_only(self):
         with tempfile.TemporaryDirectory() as td:

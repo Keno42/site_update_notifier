@@ -81,6 +81,9 @@ def load(root: Path, sealed: Path | None = None) -> dict[str, str]:
     except ImportError:
         logging.warning("PyNaCl が入っていないので、封じた secrets は開けません")
         return SECRETS
+    except OSError as e:
+        logging.warning("secrets の鍵を置けませんでした (%s): 封じた secrets は使いません", e)
+        return SECRETS
     path = sealed or SEALED_PATH
     if not path.exists():
         return SECRETS
