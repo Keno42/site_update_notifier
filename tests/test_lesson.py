@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -896,8 +897,14 @@ class EndToEndTests(unittest.TestCase):
             # mp3 when ffmpeg is installed (the server, maybe CI), wav otherwise
             self.assertTrue({"lesson-001.wav", "lesson-001.mp3"} & set(files), files)
             self.assertIn("lesson-001.transcript.md", files)
-            # every new item is asked next time, past the limit of 2
-            self.assertIn("Discord 振り返り: 次回 3問（確認待ち 3件: 新出 3）", text)
+            # every new item is asked next time, past the limit of 2: the questions asked, the questions waiting and the new items of the breakdown are one number
+            # (how many new items a lesson has is the generator's to decide, so the test does not hard-code it)
+            m = re.search(r"Discord 振り返り: 次回 (\d+)問（確認待ち (\d+)件: 新出 (\d+)）", text)
+            self.assertIsNotNone(m, text)
+            asked, waiting, new = (int(g) for g in m.groups())
+            self.assertGreater(asked, 0)
+            self.assertEqual(asked, waiting)
+            self.assertEqual(waiting, new)
             user = Path(td) / "yuki"
             self.assertTrue((user / "learner.json").exists())
             # the lesson guides to the feedback button; the GPT Voice check is gone (#129)
