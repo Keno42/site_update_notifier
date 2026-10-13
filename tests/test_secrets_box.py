@@ -1,5 +1,6 @@
 """Keno42/site_update_notifier#119: secrets from the repository's Actions secrets, sealed in CI and opened on the bot's machine."""
 import asyncio
+import importlib.util
 import io
 import json
 import logging
@@ -16,6 +17,7 @@ from src import lesson, secrets_box, seal_secrets, speech
 VALUES = {"AZURE_SPEECH_KEY": "SECRET-KEY-123", "AZURE_SPEECH_REGION": "northeurope", "OTHER": "not allowed"}
 
 
+@unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl is not installed")
 class KeyTests(unittest.TestCase):
     def test_the_key_is_created_once_with_mode_600_and_reloaded(self):
         with tempfile.TemporaryDirectory() as td:
@@ -27,6 +29,7 @@ class KeyTests(unittest.TestCase):
             self.assertEqual(secrets_box.public_key_b64(key), secrets_box.public_key_b64(again))
 
 
+@unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl is not installed")
 class SealTests(unittest.TestCase):
     def test_a_sealed_value_opens_to_the_allowlisted_names_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -66,6 +69,7 @@ class SealTests(unittest.TestCase):
             self.assertEqual(secrets_box.SECRETS, {})
 
 
+@unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl is not installed")
 class WorkflowStepTests(unittest.TestCase):
     def test_the_sealing_step_opens_back_to_the_same_json_and_prints_no_value(self):
         with tempfile.TemporaryDirectory() as td:
