@@ -55,11 +55,12 @@ class PolicyTests(unittest.TestCase):
     def test_record_updates_only_that_entry(self):
         q = ReviewQueue({"a": entry(), "b": entry()})
         q.record("a", "ok", D)
+        self.assertEqual(q.entries["a"].due, (D + timedelta(days=3)).isoformat(), "#133: the first ok starts at the second step: 3 days")
         q.record("a", "ok", D + timedelta(days=1))
         a, b = q.entries["a"], q.entries["b"]
-        self.assertEqual((a.state, a.streak, a.reviews), ("ok", 2, 2))
+        self.assertEqual((a.state, a.streak, a.reviews), ("ok", 3, 2))
         self.assertEqual(
-            a.due, (D + timedelta(days=4)).isoformat(), "second ok: 3 days"
+            a.due, (D + timedelta(days=8)).isoformat(), "second ok: 7 days"
         )
         self.assertEqual(a.last_reviewed, (D + timedelta(days=1)).isoformat())
         self.assertEqual((b.state, b.reviews, b.due), ("unseen", 0, D.isoformat()))
@@ -612,6 +613,57 @@ class RetentionShareTests(unittest.TestCase):
         self.assertIn("f", q.entries)
         self.assertIn("n", q.entries)
         self.assertEqual(q.defer_backlog(D, maximum=6), [])
+
+    def test_a_first_failure_or_hesitation_stays_at_one_day_and_an_ok_after_it_does_too(self):
+        q = ReviewQueue({"f": entry(), "s": entry(), "r": entry()})
+        q.record("f", "failed", D)
+        q.record("s", "shaky", D)
+        self.assertEqual((q.entries["f"].due, q.entries["s"].due), ((D + timedelta(days=1)).isoformat(),) * 2)
+        q.record("r", "failed", D)
+        q.record("r", "ok", D + timedelta(days=1))
+        self.assertEqual(q.entries["r"].due, (D + timedelta(days=2)).isoformat(), "an ok after a failure is not a first answer: 1 day")
+
+    def test_the_backlog_also_defers_what_was_answered_once_the_most_recent_first(self):
+        """#133: 151 due, 109 of them answered «言えた» once: the bound can come back under the maximum."""
+        q = ReviewQueue()
+        day = lambda n: (D - timedelta(days=n)).isoformat()
+        for n in range(10):  # answered once, the next-day check: n days ago
+            q.entries[f"o{n}"] = Entry(items=[f"o{n}"], prompt="p", answer="a", source_lesson=2, state="ok", due=day(1), reviews=1, streak=1, last_reviewed=day(n + 1), new=True)  # as real ones are: they came in as a new item's next-day check
+        for n in range(2):
+            q.entries[f"t{n}"] = Entry(items=[f"t{n}"], prompt="p", answer="a", source_lesson=2, state="ok", due=day(1), reviews=4, streak=4, last_reviewed=day(5))
+        q.entries["f"] = Entry(items=["f"], prompt="p", answer="a", source_lesson=2, state="failed", due=day(1), reviews=1)
+        q.entries["n"] = Entry(items=["n"], prompt="p", answer="a", source_lesson=2, state="unseen", new=True, due=day(1))
+        q.entries["op"] = Entry(items=["op"], prompt="p", answer="a", source_lesson=2, state="ok", due=day(1), reviews=1, last_reviewed=day(1), open=True)
+        total = q.due_count(D)
+        self.assertEqual(total, 15)
+        moved = q.defer_backlog(D, maximum=8)
+        self.assertEqual(q.due_count(D), 8)
+        self.assertEqual(sorted(moved[:2]), ["t0", "t1"], "the twice-confirmed first")
+        once = [k for k in moved if k.startswith("o")]
+        self.assertEqual(sorted(once), ["o0", "o1", "o2", "o3", "o4"], "then the answered-once, the most recent answer first; the oldest stay due")
+        for k in ("f", "n", "op"):
+            self.assertLessEqual(q.entries[k].due, D.isoformat(), f"{k} stays due")
+        for k in moved:
+            self.assertGreaterEqual(date.fromisoformat(q.entries[k].due), D + timedelta(days=14))
+
+    def test_a_queue_shaped_like_lesson_25s_comes_back_to_the_maximum(self):
+        """#134 review: entries enter as a new item's next-day check (new=True, never cleared); answered ok, they are what the bound defers."""
+        q = ReviewQueue()
+        past = (D - timedelta(days=1)).isoformat()
+        for n in range(109):
+            q.entries[f"a{n}"] = Entry(items=[f"a{n}"], prompt="p", answer="a", source_lesson=2, state="ok", due=past, reviews=1, streak=1, new=True, last_reviewed=(D - timedelta(days=2 + n % 10)).isoformat())
+        for n in range(18):
+            q.entries[f"b{n}"] = Entry(items=[f"b{n}"], prompt="p", answer="a", source_lesson=2, state="ok", due=past, reviews=2, streak=2, new=True)
+        for n in range(13):
+            q.entries[f"s{n}"] = Entry(items=[f"s{n}"], prompt="p", answer="a", source_lesson=2, state="shaky", due=past, reviews=1)
+        for n in range(9):
+            q.entries[f"n{n}"] = Entry(items=[f"n{n}"], prompt="p", answer="a", source_lesson=3, state="unseen", new=True, due=past)
+        for n in range(2):
+            q.entries[f"u{n}"] = Entry(items=[f"u{n}"], prompt="p", answer="a", source_lesson=3, state="unseen", due=past)
+        self.assertEqual(q.due_count(D), 151)
+        q.defer_backlog(D)
+        self.assertEqual(q.due_count(D), 100)
+        self.assertEqual(q.backlog_parts(D)["新出"], 9, "the new-item checks stay due")
 
     def test_a_deferred_entry_is_not_re_added_as_a_new_question_by_the_next_plan(self):
         q = ReviewQueue()
