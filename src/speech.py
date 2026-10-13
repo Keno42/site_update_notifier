@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import tomllib
 from pathlib import Path
 from typing import Awaitable, Callable
+
+from . import secrets_box
 
 
 def profile_voice(profile: Path, default: str = "is-IS-GudrunNeural") -> str:
@@ -44,13 +47,46 @@ async def edge_tts_save(text: str, voice: str, out: Path) -> None:
     await edge_tts.Communicate(text, voice, rate="-10%").save(str(out))
 
 
+async def azure_tts_save(text: str, voice: str, out: Path) -> None:
+    """Azure Speech の公式 REST API で ``text`` を mp3 にする (language-learning-audio の ``AzureProvider`` と同じ声・同じ呼び方. issue #119).
+    鍵は secrets_box (メモリ) から、ヘッダにだけ載せる: ログにも URL にもエラーメッセージにも出さない."""
+    import aiohttp
+    from xml.sax.saxutils import escape
+
+    key, region = secrets_box.SECRETS["AZURE_SPEECH_KEY"], secrets_box.SECRETS["AZURE_SPEECH_REGION"]
+    locale = "-".join(voice.split("-")[:2]) or "is-IS"
+    ssml = (
+        f"<speak version='1.0' xml:lang='{locale}'><voice name='{escape(voice)}'>"
+        f"<prosody rate='-10%'>{escape(text)}</prosody></voice></speak>"
+    )
+    url = os.environ.get("AZURE_SPEECH_ENDPOINT") or f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    headers = {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+        "User-Agent": "site_update_notifier",
+    }
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        async with session.post(url, data=ssml.encode("utf-8"), headers=headers) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Azure Speech failed (HTTP {resp.status})")  # 鍵は含めない
+            out.write_bytes(await resp.read())
+
+
+def default_tts() -> TTS:
+    """封じた secrets で Azure の鍵があれば Azure (edge-tts が断られていても読める), なければ edge-tts."""
+    if all(secrets_box.SECRETS.get(k) for k in secrets_box.ALLOWLIST):
+        return azure_tts_save
+    return edge_tts_save
+
+
 async def synthesize(
     text: str, voice: str, out: Path, tts: TTS | None = None, pause: float = PAUSE_S
 ) -> None:
     """カードの 🔊 の mp3. 「·」で並べた表現は 1 つずつ読み上げ、あいだに ``pause`` 秒の
     無音を入れてつなぐ (ffmpeg). 1 回で読ませると続けて読んでしまい、区切りが聞こえない.
     ffmpeg が使えなければ「. 」でつないで 1 回で読む (文の区切りの短い間になる)."""
-    tts = tts or edge_tts_save
+    tts = tts or default_tts()
     words = expressions(text)
     if len(words) <= 1:
         await tts(text, voice, out)
