@@ -113,7 +113,7 @@ BACKLOG_MAX = 100
 # 含まれた / 同じ答えの問いが一つにまとまった / 家のない部分が復習から外れた / 手がかりが答えそのものの問いが外れた #277)
 DROPPING = ("beside_whole", "same_answer", "no_home", "trivial")
 # キューを audiolesson refine-review で一度整えた印 (保存する). 規則が変わったら上げて、もう一度整える
-REFINE_VERSION = 2  # 2: 手がかりが答えそのものの問い (地名など) を外す (language-learning-audio #277)
+REFINE_VERSION = 3  # 2: 手がかりが答えそのものの問い (地名など) を外す (language-learning-audio #277). 3: 振り返りの問いからレッスン用の聞き方を外す (language-learning-audio #312)
 
 
 def _norm(text: str) -> str:
