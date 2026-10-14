@@ -671,10 +671,11 @@ class Lessons:
             if not auto:
                 await self.refine_queue(name, queue, today, path)
                 await self.refresh_wording(queue, today, path)
+            savings = None if auto else await self.review_savings(channel, name, m)
             keys = (
                 []
                 if auto
-                else queue.select(today, size.questions, open_limit=size.open_limit)
+                else queue.select(today, size.questions, open_limit=size.open_limit, savings=savings)
             )
             if not keys:
                 note = "（自動モード: 振り返りなし）" if auto else ""
@@ -714,7 +715,7 @@ class Lessons:
                 if shown and size.questions > 0:
                     # 問いをカードの分だけ減らす: 振り返りの時間は増やさない
                     keys = queue.select(
-                        today, size.questions - shown, open_limit=size.open_limit
+                        today, size.questions - shown, open_limit=size.open_limit, savings=savings
                     )
             session = ReviewSession(
                 queue,
@@ -1185,6 +1186,35 @@ class Lessons:
         met = await self._scene_deck(name, source, learner=True)
         queue = CardQueue.load(self.cfg.scene_path(name))
         return scenes.readiness(every, {c["id"] for c in met}, queue)
+
+    async def review_savings(self, channel: discord.abc.Messageable, name: str, minutes: float) -> dict[str, float] | None:
+        """#220: 次のレッスンを振り返りなしで作った dry run (`generate --dry-run --no-audio`) の plan.json の ``review_savings``: 項目 → 「言えた」でレッスンから削れる秒数.
+        振り返りで定着を確かめる問いを、削れる時間の多い順に選ぶのに使う. 学習者の状態は書き換えない. 作れなかった (古い language-learning-audio、失敗、時間切れ)
+        ときは None: 選び方は今まで通り (古い順)."""
+        learner = self.cfg.learner_path(name)
+        if not learner.exists():
+            return None
+        settings = self.cfg.user_settings(name)
+        tmp = Path(tempfile.mkdtemp(prefix="review-savings-"))
+        try:
+            lever_args, _ = levers.from_topic(channel)
+            with trip.resolve(self.cfg.trip_path(name), channel) as (source, _warning):
+                args = self.cfg.generate_args(name, False, source.path if source else None, lever_args, minutes=minutes, order=settings.order)
+            args = [*args, "--dry-run", "--no-audio"]
+            if "--out" in args:
+                args[args.index("--out") + 1] = str(tmp)
+            rc, out, err = await asyncio.wait_for(run_cli(self.cfg, args, env=secrets_box.environment()), timeout=120)
+            plan_path = latest_plan(tmp)
+            if rc != 0 or plan_path is None:
+                logging.warning("振り返りの順位づけ (dry run) を作れませんでした: %s", _tail(redact(err or out)))
+                return None
+            savings = json.loads(plan_path.read_text("utf-8")).get("review_savings")
+            return {str(k): float(v) for k, v in savings.items()} if isinstance(savings, dict) else None
+        except (asyncio.TimeoutError, OSError, ValueError):
+            logging.warning("振り返りの順位づけ (dry run) を作れませんでした", exc_info=True)
+            return None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     async def week(self, interaction: discord.Interaction, days: int = 7) -> None:
         """/lesson-week: 直近の信号を並べたレポート (src/weekly.py). 本人にだけ見える."""

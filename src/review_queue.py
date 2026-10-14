@@ -105,6 +105,10 @@ def key_for(items: list[str]) -> str:
 RETENTION_SHARE = 3
 # 前回確かめてからこれだけ (日) 空いた答えは、間隔つきで音声レッスン側へ報告する (#220)
 MIN_GAP_DAYS = 3
+# #220: 削れる時間で順位をつけるとき、1 問が削れるレッスン時間のこれ以上 (秒) を条件にする (1 問を確かめる手間は 15 秒ほど: それ以下なら確かめても得にならない)
+SAVINGS_MIN = 15.0
+# 定着の確認の席のうち、削れる時間の順ではなく古い順のままにする割合の分母 (3: 3 分の 1). 7 日・14 日の定着の測定に偏らない標本を残す
+RETENTION_MEASURE = 3
 # 期限の来た (確認待ちの) 問いの上限. 1 週間の振り返りで聞ける数 (1 日 14 問 × 7) を超えたら、すでに何度も言えた問いの期限を先へ送る
 BACKLOG_MAX = 100
 
@@ -184,11 +188,18 @@ class ReviewQueue:
         return stale
 
     def select(
-        self, today: date, limit: int = 0, open_limit: int | None = None
+        self,
+        today: date,
+        limit: int = 0,
+        open_limit: int | None = None,
+        savings: dict[str, float] | None = None,
     ) -> list[str]:
         """今回の振り返りで出す問いのキー. 必ず出す問い (must_answer: 直前のレッスンの未回答の新出と、期限の来た未解決項目) は
         limit を超えても全部、先頭に. limit > 0 なら残りを最大 limit 問まで、期限の来ている
-        問いが足りなければ期限前の問いで埋める. limit = 0 なら期限の来ている問いすべて."""
+        問いが足りなければ期限前の問いで埋める. limit = 0 なら期限の来ている問いすべて.
+        ``savings`` (#220): 項目 → 「言えた」でレッスンから削れる秒数 (次のレッスンを振り返りなしで作った dry run の plan.json ``review_savings``).
+        あれば、定着の確認の席の 3 分の 2 は削れる時間の多い順 (SAVINGS_MIN 秒以上のもの) に、残りの 3 分の 1 は今まで通り一番長く確かめていない順に出す:
+        削れる順だけでは計画のある項目に偏り、7 日・14 日の定着の測定 (#218) の標本が偏る."""
 
         def order(k: str) -> tuple:
             e = self.entries[k]
@@ -223,18 +234,26 @@ class ReviewQueue:
         room = max(0, limit - len(required))
         reserve = min(room, limit // RETENTION_SHARE)
         # 定着の確認に回す席: 期限の来た、答えたことのある問いのうち、最後に確かめてから一番長いもの (#220)
-        aged = sorted(
-            (
-                k
-                for k in rest
-                if self.entries[k].tier(today) < 5
-                and not self.entries[k].bonus
-                and not self.entries[k].open
-                and self.entries[k].state in ("ok", "shaky")  # 言えなかった問いは tier で先に出る: この席は定着の確認のため
-                and self.entries[k].reviews >= 1
-            ),
-            key=lambda k: (self.entries[k].last_reviewed or "", self.entries[k].due),
-        )[:reserve]
+        def holds_retention(k: str) -> bool:
+            e = self.entries[k]
+            return (
+                e.tier(today) < 5
+                and not e.bonus
+                and not e.open
+                and e.state in ("ok", "shaky")  # 言えなかった問いは tier で先に出る: この席は定着の確認のため
+                and e.reviews >= 1
+            )
+
+        oldest = sorted((k for k in rest if holds_retention(k)), key=lambda k: (self.entries[k].last_reviewed or "", self.entries[k].due))
+        aged = oldest[:reserve]
+        if savings:
+            def saved(k: str) -> float:
+                return max((savings.get(i, 0.0) for i in self.entries[k].items), default=0.0)
+
+            ranked = sorted((k for k in oldest if saved(k) >= SAVINGS_MIN), key=lambda k: (-saved(k), self.entries[k].last_reviewed or ""))
+            n_ranked = min(len(ranked), reserve - reserve // RETENTION_MEASURE)  # 席の 3 分の 1 は測定のために古い順のまま
+            aged = ranked[:n_ranked]
+            aged += [k for k in oldest if k not in set(aged)][: reserve - n_ranked]
         picked = set(aged)
         chosen = aged + [k for k in rest if k not in picked][: room - len(aged)]
         return required + sorted(chosen, key=order)
