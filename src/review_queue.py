@@ -107,8 +107,10 @@ RETENTION_SHARE = 3
 MIN_GAP_DAYS = 3
 # #220: 削れる時間で順位をつけるとき、1 問が削れるレッスン時間のこれ以上 (秒) を条件にする (1 問を確かめる手間は 15 秒ほど: それ以下なら確かめても得にならない)
 SAVINGS_MIN = 15.0
-# 定着の確認の席のうち、削れる時間の順ではなく古い順のままにする割合の分母 (3: 3 分の 1). 7 日・14 日の定着の測定に偏らない標本を残す
-RETENTION_MEASURE = 3
+# 定着の確認の席のうち、削れる時間の順にする割合の分母 (3: 3 分の 1 まで). 残りは古い順のまま: 7 日・14 日の定着の測定に偏らない標本を残す.
+# 音声側の「間隔を延ばす」(language-learning-audio #331) を入れても、確かめた項目がレッスンで練習される回数は 10 レッスンで 14 → 13 回にしか減らなかった:
+# 順位づけの得は 1 回分ほどなので、席の大半は測定に残す (bot #139 の確認)
+RANKED_SHARE = 3
 # 期限の来た (確認待ちの) 問いの上限. 1 週間の振り返りで聞ける数 (1 日 14 問 × 7) を超えたら、すでに何度も言えた問いの期限を先へ送る
 BACKLOG_MAX = 100
 
@@ -198,7 +200,7 @@ class ReviewQueue:
         limit を超えても全部、先頭に. limit > 0 なら残りを最大 limit 問まで、期限の来ている
         問いが足りなければ期限前の問いで埋める. limit = 0 なら期限の来ている問いすべて.
         ``savings`` (#220): 項目 → 「言えた」でレッスンから削れる秒数 (次のレッスンを振り返りなしで作った dry run の plan.json ``review_savings``).
-        あれば、定着の確認の席の 3 分の 2 は削れる時間の多い順 (SAVINGS_MIN 秒以上のもの) に、残りの 3 分の 1 は今まで通り一番長く確かめていない順に出す:
+        あれば、定着の確認の席の 3 分の 1 までを削れる時間の多い順 (SAVINGS_MIN 秒以上のもの) に、残りは今まで通り一番長く確かめていない順に出す:
         削れる順だけでは計画のある項目に偏り、7 日・14 日の定着の測定 (#218) の標本が偏る."""
 
         def order(k: str) -> tuple:
@@ -251,7 +253,7 @@ class ReviewQueue:
                 return max((savings.get(i, 0.0) for i in self.entries[k].items), default=0.0)
 
             ranked = sorted((k for k in oldest if saved(k) >= SAVINGS_MIN), key=lambda k: (-saved(k), self.entries[k].last_reviewed or ""))
-            n_ranked = min(len(ranked), reserve - reserve // RETENTION_MEASURE)  # 席の 3 分の 1 は測定のために古い順のまま
+            n_ranked = min(len(ranked), reserve // RANKED_SHARE)  # 席の 3 分の 2 以上は測定のために古い順のまま
             aged = ranked[:n_ranked]
             aged += [k for k in oldest if k not in set(aged)][: reserve - n_ranked]
         picked = set(aged)

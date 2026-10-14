@@ -20,14 +20,15 @@ class RankingTests(unittest.TestCase):
         keys = queue().select(D, 9)
         self.assertEqual({"e11", "e10", "e9"}, {k for k in keys if k in ("e11", "e10", "e9")}, "the three seats of a third: the oldest")
 
-    def test_with_savings_two_thirds_of_the_seats_go_to_the_items_that_pay_and_a_third_stays_oldest_first(self):
-        q = queue()
+    def test_with_savings_a_third_of_the_seats_go_to_the_items_that_pay_and_the_rest_stays_oldest_first(self):
+        q = queue(30)
         savings = {"i2": 40.0, "i5": 30.0, "i1": 20.0, "i7": 5.0}  # i7 is under the threshold: its check costs about what it saves
-        keys = q.select(D, 9, savings=savings)
-        retention = [k for k in keys if k in q.entries]
-        self.assertTrue({"e2", "e5"} <= set(retention), "the two that save most: two thirds of three seats")
-        self.assertIn("e11", retention, "and one seat stays with the oldest, for an unbiased sample")
-        self.assertNotIn("e7", retention[:3], "an item under the threshold is not ranked")
+        keys = q.select(D, 18, savings=savings)  # six retention seats
+        self.assertTrue({"e2", "e5"} <= set(keys), "the two that save most: a third of six seats")
+        self.assertTrue({"e29", "e28", "e27", "e26"} <= set(keys), "and four seats stay with the oldest, for an unbiased sample")
+        self.assertEqual(len(keys), 18)
+        self.assertNotIn("e7", keys, "an item under the threshold is not ranked")
+        self.assertNotIn("e1", keys, "a third of the seats: the third-best saving waits")
 
     def test_savings_that_name_no_due_item_change_nothing(self):
         q = queue()
@@ -38,13 +39,13 @@ class RankingTests(unittest.TestCase):
         q = queue()
         q.entries["e3"].items = ["i3", "i3b"]
         keys = q.select(D, 9, savings={"i3b": 50.0, "i4": 49.0})
-        self.assertTrue({"e3", "e4"} <= set(keys))
+        self.assertIn("e3", keys)
 
     def test_open_new_and_failed_entries_are_not_retention_seats(self):
         q = queue(4)
         q.entries["e0"].open = True
         q.entries["e1"].state = "failed"
-        keys = q.select(D, 3, savings={"i0": 99.0, "i1": 98.0, "i2": 40.0})
+        keys = q.select(D, 9, savings={"i0": 99.0, "i1": 98.0, "i2": 40.0})
         self.assertIn("e2", keys)
 
 
