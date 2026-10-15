@@ -950,10 +950,10 @@ class EndToEndTests(unittest.TestCase):
             for item_id in only_shaky:
                 # issue #119: hesitation reaches the audio lesson too
                 self.assertEqual(learner["items"][item_id]["hesitated"], 1)
-            unseen_before = {k for k, e in queued.items()} - {
-                k for k, e in queue.entries.items() if e.state != "unseen"
-            }
-            self.assertTrue(unseen_before <= set(queue.entries), "nothing dropped")
+            # nothing dropped: every item queued before is still asked. A question may change its key: when the next plan asks
+            # the same answer for more items, the queue moves it to that key (language-learning-audio #239, #349: «Ég þarf vegabréf.»)
+            before = {i for e in queued.values() for i in e.items}
+            self.assertTrue(before <= {i for e in queue.entries.values() for i in e.items}, "nothing dropped")
             self.assertGreater(
                 len(queue.entries), len(queued), "lesson 2 questions added"
             )
