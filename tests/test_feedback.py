@@ -656,6 +656,7 @@ class ReasonAndExplainTests(unittest.TestCase):
                     selects[1]._values = reasons
                     await selects[1].callback(interaction(log))
                 await submit_form(self, log, kw, "right")
+                await asyncio.gather(*fb.explanations)
 
             asyncio.run(run())
             events = ledger.events()
@@ -679,6 +680,44 @@ class ReasonAndExplainTests(unittest.TestCase):
         self.assertEqual(self._run([], [])[1:], ([], []))
         events, sent, _ = self._run(["takk_fyrir"], ["hear"], fail=True)
         self.assertEqual((len(events), sent), (1, []))
+
+    def test_the_button_is_answered_and_the_form_closed_before_the_llm_answers(self):
+        """Review of #150: the explanation was awaited inside the submit, so the button was answered only after the LLM: past Discord's 3 seconds the
+        interaction fails, and the form stayed open for a second submit."""
+        with tempfile.TemporaryDirectory() as td:
+            saved(Path(td))
+            release = asyncio.Event()
+            sent = []
+
+            async def explain(messages):
+                await release.wait()
+                return "解説"
+
+            class Channel:
+                async def send(self, content=None, **kw):
+                    sent.append(content)
+
+            fb = Feedback({1: "yuki"}, lambda n: Path(td) / n, 0, lambda: NOW, explain=explain, wants_explain=lambda name: True)
+
+            async def run():
+                log = []
+                inter = interaction(log)
+                inter.channel = Channel()
+                await fb.open_form(inter)
+                kw = log[-1][2]
+                view = kw["view"]
+                selects = [c for c in view.children if hasattr(c, "options")]
+                selects[0]._values = ["takk_fyrir"]
+                await selects[0].callback(interaction(log))
+                await submit_form(self, log, kw, "right")
+                self.assertIn("記録しました", log[-1][1] or "", "answered while the LLM still works")
+                self.assertTrue(view.is_finished(), "the form is closed")
+                self.assertEqual(sent, [])
+                release.set()
+                await asyncio.gather(*fb.explanations)
+                self.assertEqual(len(sent), 1)
+
+            asyncio.run(run())
 
     def test_explain_messages_carry_no_note(self):
         from src.feedback import Answers, explain_messages

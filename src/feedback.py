@@ -21,6 +21,7 @@ cron の自動更新 (git pull) で消えたり上書きされたりしない:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -688,6 +689,7 @@ class Feedback:
         # /lesson-configure の「フィードバック後の解説」: 選んだ表現を、選んだ理由に合わせて LLM が解説する (チャットと同じ LLM: messages → 返答)
         self.explain = explain
         self.wants_explain = wants_explain
+        self.explanations: set[asyncio.Task] = set()  # the explanations still waiting for the LLM (held so they are not collected while they run)
 
     def ledger(self, name: str) -> Ledger:
         return Ledger(self.user_dir(name))
@@ -786,7 +788,11 @@ class Feedback:
             pending = newlist.PendingLists(ledger.user_dir).take(record.dir.name)
             if pending is not None and interaction.channel is not None:
                 await newlist.release(interaction.channel, [pending])
-            await self._explain(interaction, name, record, answers)
+            # the explanation waits for the LLM: started here and not awaited, so the button is answered and the form closed within Discord's 3 seconds
+            # (review of #150); it is posted to the channel when it comes
+            task = asyncio.create_task(self._explain(interaction, name, record, answers))
+            self.explanations.add(task)
+            task.add_done_callback(self.explanations.discard)
 
         compact = lesson_minutes(record) < usersettings.COMPACT_FEEDBACK_BELOW
         await interaction.response.send_message(
