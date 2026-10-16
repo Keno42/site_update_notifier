@@ -50,6 +50,17 @@ class SettingsFileTests(unittest.TestCase):
             self.assertEqual(usersettings.SETTINGS_FILE, "lesson_settings.json")
             self.assertFalse((d / "settings.json").exists())
 
+    def test_the_explanation_after_feedback_is_off_unless_chosen(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "u"
+            default = US(5, "before", "spread")
+            self.assertEqual(usersettings.load(d, default, default).explain, "off")
+            usersettings.save(d, US(15, "after", "new-first", "on"))
+            self.assertEqual(usersettings.load(d, default, default).explain, "on")
+            self.assertIn("フィードバック後の解説: フィードバックで選んだ表現を解説する", usersettings.load(d, default, default).describe())
+            (d / usersettings.SETTINGS_FILE).write_text(json.dumps({"explain": "maybe"}), "utf-8")
+            self.assertEqual(usersettings.load(d, default, default).explain, "off", "an unknown value falls back")
+
     def test_a_broken_file_or_value_falls_back_to_the_default(self):
         default, legacy = US(5, "before", "new-first"), US(30, "after", "spread")
         with tempfile.TemporaryDirectory() as td:

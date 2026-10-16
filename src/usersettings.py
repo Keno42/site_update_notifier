@@ -24,6 +24,10 @@ ORDER = {
     "new-first": "新出をまとめて先に → 既出",
     "spread": "新出と既出を混ぜる（今まで）",
 }
+EXPLAIN = {
+    "on": "フィードバックで選んだ表現を解説する",
+    "off": "解説しない",
+}
 # これより短いレッスンのフィードバックは「量・難しさ」「練習が足りなかった」と送信だけ
 COMPACT_FEEDBACK_BELOW = 15
 # 必須にする未解決項目の確認の、BASE_MINUTES での目安 (短いレッスンだけに使う上限)
@@ -35,11 +39,14 @@ class UserSettings:
     minutes: float
     new_list: str  # NEW_LIST のキー
     order: str  # ORDER のキー
+    # EXPLAIN のキー: フィードバックの「練習が足りなかった」表現を、選んだ理由に合わせて LLM が解説する (language-learning-audio,
+    # 2026-10-16 の owner の案). 既定は今までどおり出さない
+    explain: str = "off"
 
     def describe(self) -> str:
         return (
             f"レッスンの長さ: {self.minutes:g}分 / 新出表現の一覧: {NEW_LIST[self.new_list]}"
-            f" / 並び順: {ORDER[self.order]}"
+            f" / 並び順: {ORDER[self.order]} / フィードバック後の解説: {EXPLAIN[self.explain]}"
         )
 
 
@@ -67,6 +74,7 @@ def load(user_dir: Path, default: UserSettings, legacy: UserSettings) -> UserSet
             raw["new_list"] if raw.get("new_list") in NEW_LIST else default.new_list
         ),
         order=raw["order"] if raw.get("order") in ORDER else default.order,
+        explain=raw["explain"] if raw.get("explain") in EXPLAIN else default.explain,
     )
 
 

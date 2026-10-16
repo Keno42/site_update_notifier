@@ -21,6 +21,7 @@ cron の自動更新 (git pull) で消えたり上書きされたりしない:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -68,6 +69,14 @@ FRICTIONS = {
     "unclear": "何を答えればいいか分からない問いがあった",
     "pacing": "テンポが合わない（答える時間・話す速さ）",
     "other": "その他（「メモを書く」で）",
+}
+# 「練習が足りなかった」表現が難しかった理由 (language-learning-audio, lesson 27: «Við erum fjögur» は聞き取りが、«Ég nenni ekki að sofa» は
+# 使う場面が難しかった. 理由がメモにしかないと音声レッスンに届かない). レッスン単位で、選んだ表現すべてに当てはまるものを選ぶ
+REASONS = {
+    "say": "発音しにくい",
+    "hear": "聞き取りにくい",
+    "scene": "意味・使う場面が浮かばない",
+    "remember": "覚えにくい",
 }
 MAX_CANDIDATES = 15  # 候補 + FRICTIONS が Discord の選択肢の上限 25 に収まるように
 MESSAGE_MAX = 1900  # Discord の本文は 2000 字まで
@@ -349,6 +358,7 @@ class Answers:
         default_factory=list
     )  # 以前のフォームの項目. 欄は外した (#81) が、記録の形は変えない: 常に []
     sooner: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)  # REASONS のキー: 「練習が足りなかった」表現が難しかった理由
     load: str | None = None
     concerns: list[str] = field(default_factory=list)  # "c<番号>" / "f:<種類>"
     note: str = ""
@@ -385,6 +395,7 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
         **record.digests(),
         "unheard": answers.unheard,
         "sooner": answers.sooner,
+        "sooner_reasons": [r for r in answers.reasons if r in REASONS],
         "load": answers.load,
         "load_effective": effective_load(record, answers),
         "friction": [v[2:] for v in answers.concerns if v.startswith("f:")],
@@ -392,6 +403,29 @@ def build_event(record: Record, answers: Answers, user: str, now: datetime) -> d
         "candidates_confirmed": confirmed,
         "note": answers.note,
     }
+
+
+EXPLAIN_SYSTEM = (
+    "あなたは、アイスランド旅行の準備をしている日本語話者の大人に、アイスランド語を教える先生です。"
+    "音声レッスンのあとで学習者が「練習が足りなかった」と選んだ表現を、日本語で短く解説してください。"
+    "表現ごとに、意味と、旅行者がその表現を言いそうな具体的な場面を一つ。"
+    "理由に「発音しにくい」「聞き取りにくい」があれば、その表現の音のつながりや、聞き取りのコツを一言。"
+    "「意味・使う場面が浮かばない」があれば場面を丁寧に。実際には言いそうにない組み合わせなら、そうはっきり書いてください。"
+    "全体で 1200 字以内、見出しは表現そのもの。"
+)
+
+
+def explain_messages(record: "Record", answers: "Answers") -> list[dict]:
+    """「練習が足りなかった」表現の解説を LLM に頼む messages. 表現と意味と選んだ理由だけを送る (メモや学習者の記録は送らない).
+    何も選ばなければ []."""
+    items = record.items()
+    chosen = [items.get(i) or {"id": i} for i in dict.fromkeys(answers.sooner)]
+    if not chosen:
+        return []
+    lines = [f"・{c.get('target') or c['id']}（{c.get('meaning') or ''}）" for c in chosen]
+    reasons = [REASONS[r] for r in answers.reasons if r in REASONS]
+    user = "選んだ表現:\n" + "\n".join(lines) + "\n難しかった理由: " + ("、".join(reasons) if reasons else "（選んでいない）")
+    return [{"role": "system", "content": EXPLAIN_SYSTEM}, {"role": "user", "content": user}]
 
 
 def form_text(
@@ -526,6 +560,12 @@ class FeedbackView(discord.ui.View):
                 ],
                 min_values=0,
             )
+            self._select(
+                "reasons",
+                "選んだ表現が難しかった理由（複数可・選ばなくてOK）",
+                [discord.SelectOption(label=v, value=k) for k, v in REASONS.items()],
+                min_values=0,
+            )
         self._select(
             "load",
             "今日のレッスンの量・難しさ（必須）",
@@ -635,6 +675,8 @@ class Feedback:
         channel_id: int = 0,
         now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
         report_feedback: Callable[[str, int, list[str], str | None], Awaitable[bool]] | None = None,
+        explain: Callable[[list[dict]], Awaitable[str]] | None = None,
+        wants_explain: Callable[[str], bool] = lambda name: False,
     ) -> None:
         self.users = users
         self.user_dir = user_dir
@@ -644,6 +686,10 @@ class Feedback:
         # 早めにもう一度出す依頼 (`--sooner`: 間隔の半分以内に。結果としては数えない, language-learning-audio #222)、
         # 負荷はペースの入力 (`--load`, #218). (名前, レッスン番号, 項目, 実効の負荷) → 受け付けたか
         self.report_feedback = report_feedback
+        # /lesson-configure の「フィードバック後の解説」: 選んだ表現を、選んだ理由に合わせて LLM が解説する (チャットと同じ LLM: messages → 返答)
+        self.explain = explain
+        self.wants_explain = wants_explain
+        self.explanations: set[asyncio.Task] = set()  # the explanations still waiting for the LLM (held so they are not collected while they run)
 
     def ledger(self, name: str) -> Ledger:
         return Ledger(self.user_dir(name))
@@ -713,6 +759,19 @@ class Feedback:
             except Exception:
                 logging.exception("報告失敗の通知も送れませんでした")
 
+    async def _explain(self, interaction: discord.Interaction, name: str, record: Record, answers: Answers) -> None:
+        """設定で解説を選んだ人に、「練習が足りなかった」表現の解説をチャンネルに出す. 記録の後なので、失敗しても記録は成功のまま."""
+        messages = explain_messages(record, answers)
+        channel = getattr(interaction, "channel", None)
+        if self.explain is None or not messages or channel is None or not self.wants_explain(name):
+            return
+        try:
+            text = (await self.explain(messages)).strip()
+            if text:
+                await channel.send(_clip(f"**{record.title} で選んだ表現の解説**\n{text}", MESSAGE_MAX))
+        except Exception:
+            logging.exception("フィードバックの解説を出せませんでした")
+
     @answers_on_failure()
     async def open_form(
         self, interaction: discord.Interaction, ref: str | int | None = None
@@ -729,6 +788,11 @@ class Feedback:
             pending = newlist.PendingLists(ledger.user_dir).take(record.dir.name)
             if pending is not None and interaction.channel is not None:
                 await newlist.release(interaction.channel, [pending])
+            # the explanation waits for the LLM: started here and not awaited, so the button is answered and the form closed within Discord's 3 seconds
+            # (review of #150); it is posted to the channel when it comes
+            task = asyncio.create_task(self._explain(interaction, name, record, answers))
+            self.explanations.add(task)
+            task.add_done_callback(self.explanations.discard)
 
         compact = lesson_minutes(record) < usersettings.COMPACT_FEEDBACK_BELOW
         await interaction.response.send_message(
