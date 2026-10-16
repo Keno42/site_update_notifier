@@ -39,7 +39,7 @@ logging.basicConfig(
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
-sync_lesson_commands = lesson.setup(client, config)
+sync_lesson_commands = lesson.setup(client, config, explain=lambda messages: call_chatgpt_with_history(messages))  # フィードバック後の解説 (/lesson-configure)
 
 # Slack setup
 bot_token = getattr(config, "XOXB_TOKEN", "")

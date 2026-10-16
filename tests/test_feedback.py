@@ -320,7 +320,7 @@ class ViewTests(unittest.TestCase):
                 view = FeedbackView(record, 1, submit)
                 selects = [c for c in view.children if hasattr(c, "options")]
                 self.assertEqual(
-                    len(selects), 3, "the item select, the load, the concerns"
+                    len(selects), 4, "the item select, its reasons, the load, the concerns"
                 )
                 self.assertFalse(
                     [c for c in selects if "見かけなかった" in (c.placeholder or "")],
@@ -331,10 +331,13 @@ class ViewTests(unittest.TestCase):
                 self.assertFalse(await view.interaction_check(interaction(log, user=2)))
                 await buttons["送信"].callback(interaction(log))
                 self.assertEqual(submitted, [], "the load is required")
-                sooner, load, concerns = selects
+                sooner, reasons, load, concerns = selects
                 self.assertIn("練習が足りなかった・覚えていない", sooner.placeholder)
                 sooner._values = ["takk_fyrir"]
                 await sooner.callback(interaction(log))
+                self.assertIn("理由", reasons.placeholder)
+                reasons._values = ["hear", "scene"]
+                await reasons.callback(interaction(log))
                 load._values = ["heavy"]
                 await load.callback(interaction(log))
                 concerns._values = ["c0", "f:pacing"]
@@ -352,6 +355,7 @@ class ViewTests(unittest.TestCase):
             (answers,) = submitted
             self.assertEqual(answers.unheard, [])
             self.assertEqual(answers.sooner, ["takk_fyrir"])
+            self.assertEqual(answers.reasons, ["hear", "scene"])
             self.assertEqual(answers.load, "heavy")
             self.assertEqual(answers.concerns, ["c0", "f:pacing"])
             self.assertEqual(answers.note, "例文がほしい")
@@ -390,9 +394,7 @@ def submit_form(test, log, kw, load="right"):
 
     async def run():
         view = kw["view"]
-        select = [c for c in view.children if hasattr(c, "options")][
-            1
-        ]  # sooner, load, concerns
+        select = next(c for c in view.children if hasattr(c, "options") and "量・難しさ" in (c.placeholder or ""))  # sooner, reasons, load, concerns
         select._values = [load]
         await select.callback(interaction(log))
         send = [c for c in view.children if getattr(c, "label", "") == "送信"]
@@ -618,6 +620,75 @@ class StrugglingItemsTests(unittest.TestCase):
         self.assertEqual(args[args.index("--sooner") + 1], "a,b")
         for outcome in ("--failed", "--hesitated", "--recalled"):
             self.assertNotIn(outcome, args, "a request, not an outcome (#222)")
+
+
+class ReasonAndExplainTests(unittest.TestCase):
+    """Lesson 27 of language-learning-audio: «Við erum fjögur» was hard to hear and «Ég nenni ekki að sofa» hard to picture, said only in a note. The form
+    asks why, and a learner who wants it gets an explanation of the items they chose (/lesson-configure)."""
+
+    def _run(self, sooner, reasons, wants=True, explain_text="**Við erum fjögur.** …", fail=False):
+        sent, asked = [], []
+        with tempfile.TemporaryDirectory() as td:
+            ledger = saved(Path(td))
+
+            async def explain(messages):
+                asked.append(messages)
+                if fail:
+                    raise RuntimeError("down")
+                return explain_text
+
+            class Channel:
+                async def send(self, content=None, **kw):
+                    sent.append(content)
+
+            fb = Feedback({1: "yuki"}, lambda n: Path(td) / n, 0, lambda: NOW, explain=explain, wants_explain=lambda name: wants)
+
+            async def run():
+                log = []
+                inter = interaction(log)
+                inter.channel = Channel()
+                await fb.open_form(inter)
+                kw = log[-1][2]
+                selects = [c for c in kw["view"].children if hasattr(c, "options")]
+                if sooner:
+                    selects[0]._values = sooner
+                    await selects[0].callback(interaction(log))
+                    selects[1]._values = reasons
+                    await selects[1].callback(interaction(log))
+                await submit_form(self, log, kw, "right")
+
+            asyncio.run(run())
+            events = ledger.events()
+        return events, sent, asked
+
+    def test_the_reasons_are_recorded_with_the_items(self):
+        events, _, _ = self._run(["takk_fyrir"], ["hear", "scene"], wants=False)
+        self.assertEqual((events[-1]["sooner"], events[-1]["sooner_reasons"]), (["takk_fyrir"], ["hear", "scene"]))
+
+    def test_the_explanation_asks_about_the_items_and_reasons_only_and_is_posted(self):
+        events, sent, asked = self._run(["takk_fyrir"], ["scene"])
+        self.assertEqual(len(events), 1, "recorded first")
+        (messages,) = asked
+        user = messages[-1]["content"]
+        self.assertIn("Takk fyrir", user)
+        self.assertIn("意味・使う場面が浮かばない", user)
+        self.assertEqual(sent, ["**レッスン 12 で選んだ表現の解説**\n**Við erum fjögur.** …"])
+
+    def test_no_explanation_when_not_wanted_or_nothing_chosen_and_a_failure_keeps_the_record(self):
+        self.assertEqual(self._run(["takk_fyrir"], ["hear"], wants=False)[1:], ([], []))
+        self.assertEqual(self._run([], [])[1:], ([], []))
+        events, sent, _ = self._run(["takk_fyrir"], ["hear"], fail=True)
+        self.assertEqual((len(events), sent), (1, []))
+
+    def test_explain_messages_carry_no_note(self):
+        from src.feedback import Answers, explain_messages
+
+        with tempfile.TemporaryDirectory() as td:
+            record = saved(Path(td)).load()
+            assert record is not None
+            msgs = explain_messages(record, Answers(sooner=["takk_fyrir"], reasons=["say"], note="private"))
+            self.assertNotIn("private", json.dumps(msgs, ensure_ascii=False))
+            self.assertEqual(explain_messages(record, Answers()), [])
 
 
 class FailureTests(unittest.TestCase):

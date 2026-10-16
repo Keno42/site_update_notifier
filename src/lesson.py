@@ -594,6 +594,7 @@ class Lessons:
         minutes: float | None = None,
         new_list: str | None = None,
         order: str | None = None,
+        explain: str | None = None,
     ) -> None:
         """/lesson-configure: 指定した項目だけ変えて保存し、今の設定を本人にだけ見せる."""
         name = self.cfg.users.get(interaction.user.id)
@@ -605,7 +606,7 @@ class Lessons:
         settings = self.cfg.user_settings(name)
         changed = {
             k: v
-            for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order))
+            for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order), ("explain", explain))
             if v is not None
         }
         for k, v in changed.items():
@@ -1372,7 +1373,9 @@ class Lessons:
                 f.close()
 
 
-def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] | None:
+def setup(
+    client: discord.Client, config: Any, explain: Callable[[list[dict]], Awaitable[str]] | None = None
+) -> Callable[[], Awaitable[None]] | None:
     """config に LESSON_ROOT と LESSON_USERS があれば /lesson, /lesson-configure, /lesson-auto,
     /lesson-feedback (-report, -export), /version と、レッスン投稿のボタン (フィードバック・新出表現をすぐ表示)
     を登録し、スラッシュコマンドを Discord に同期する関数を返す (on_ready で一度呼ぶ)."""
@@ -1383,7 +1386,12 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
     secrets_box.load(cfg.root)  # 封じた secrets (issue #119): 鍵がなければ作り、開けたらメモリに置く
     lessons = Lessons(cfg)
     fb = feedback.Feedback(
-        cfg.users, cfg.user_dir, cfg.channel_id, report_feedback=lessons.report_feedback
+        cfg.users,
+        cfg.user_dir,
+        cfg.channel_id,
+        report_feedback=lessons.report_feedback,
+        explain=explain,
+        wants_explain=lambda name: cfg.user_settings(name).explain == "on",
     )
     feedback.FeedbackButton.handler = fb
     newlist.NewListButton.users = cfg.users
@@ -1426,6 +1434,7 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
         minutes="レッスンの長さの目安",
         new_list="新出表現の一覧を出すタイミング",
         order="新出と既出の並び順",
+        explain="フィードバックで「練習が足りなかった」表現を選んだあと、理由に合わせた解説を出すか",
     )
     @app_commands.choices(
         minutes=minute_choices,
@@ -1435,18 +1444,23 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
         order=[
             app_commands.Choice(name=v, value=k) for k, v in usersettings.ORDER.items()
         ],
+        explain=[
+            app_commands.Choice(name=v, value=k) for k, v in usersettings.EXPLAIN.items()
+        ],
     )
     async def lesson_configure(
         interaction: discord.Interaction,
         minutes: app_commands.Choice[int] | None = None,
         new_list: app_commands.Choice[str] | None = None,
         order: app_commands.Choice[str] | None = None,
+        explain: app_commands.Choice[str] | None = None,
     ) -> None:
         await lessons.configure(
             interaction,
             minutes.value if minutes else None,
             new_list.value if new_list else None,
             order.value if order else None,
+            explain.value if explain else None,
         )
 
     async def lesson_auto(interaction: discord.Interaction) -> None:
@@ -1485,7 +1499,7 @@ def setup(client: discord.Client, config: Any) -> Callable[[], Awaitable[None]] 
         ),
         app_commands.Command(
             name="lesson-configure",
-            description="レッスンの長さ・新出表現の一覧のタイミング・並び順を設定します",
+            description="レッスンの長さ・新出表現の一覧のタイミング・並び順・フィードバック後の解説を設定します",
             callback=lesson_configure,
         ),
         app_commands.Command(
