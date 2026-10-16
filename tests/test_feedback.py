@@ -332,7 +332,7 @@ class ViewTests(unittest.TestCase):
                 await buttons["送信"].callback(interaction(log))
                 self.assertEqual(submitted, [], "the load is required")
                 sooner, reasons, load, concerns = selects
-                self.assertIn("練習が足りなかった・覚えていない", sooner.placeholder)
+                self.assertIn("練習が足りなかった・言えなかった", sooner.placeholder)
                 sooner._values = ["takk_fyrir"]
                 await sooner.callback(interaction(log))
                 self.assertIn("理由", reasons.placeholder)
@@ -728,6 +728,58 @@ class ReasonAndExplainTests(unittest.TestCase):
             msgs = explain_messages(record, Answers(sooner=["takk_fyrir"], reasons=["say"], note="private"))
             self.assertNotIn("private", json.dumps(msgs, ensure_ascii=False))
             self.assertEqual(explain_messages(record, Answers()), [])
+
+
+class ReviewedItemsTests(unittest.TestCase):
+    """Lesson 28 of language-learning-audio: a reviewed item the learner could not say in the lesson could not be reported; only the new items were in
+    the select. The reviewed items the lesson asked are there too, after the new ones, and go to the same report."""
+
+    PLAN = dict(
+        PLAN,
+        reviewed_items=[
+            {"id": "takk", "target": "Takk.", "meaning": "ありがとう。"},
+            {"id": "heard_only", "target": "Já.", "meaning": "はい。"},
+            {"id": "open_one", "target": "Nei.", "meaning": "いいえ。"},
+        ],
+        open_items=["open_one"],
+        exercises=[
+            {"kind": "recall", "items": ["takk"]},
+            {"kind": "dialogue", "items": ["heard_only"]},
+            {"kind": "generative", "items": ["open_one", "takk_fyrir"]},
+        ],
+    )
+
+    def record(self, td):
+        root = Path(td)
+        write_lesson(root / "work", self.PLAN)
+        ledger = Ledger(root / "yuki")
+        learner = root / "yuki" / "learner.json"
+        learner.parent.mkdir(parents=True, exist_ok=True)
+        learner.write_text("{}", "utf-8")
+        ledger.save_manifest(root / "work", self.PLAN, b"{}", learner, {"bot": "a" * 40, "lla": "b" * 40}, ["generate"], NOW)
+        return ledger.load()
+
+    def test_the_reviewed_items_the_lesson_asked_follow_the_new_ones_open_first(self):
+        with tempfile.TemporaryDirectory() as td:
+            record = self.record(td)
+            self.assertEqual([i["id"] for i in record.reviewed_choices(25)], ["open_one", "takk"], "asked only; an open item first; not one only heard")
+            self.assertEqual(record.reviewed_choices(0), [])
+
+            async def build():
+                return FeedbackView(record, 1, None)  # type: ignore[arg-type]
+
+            view = asyncio.run(build())
+            sooner = next(c for c in view.children if hasattr(c, "options"))
+            self.assertEqual([o.value for o in sooner.options], ["takk_fyrir", "eg_var_ad_inf", "open_one", "takk"])
+            self.assertTrue(sooner.options[2].description.startswith("復習: "))
+
+    def test_a_chosen_reviewed_item_is_reported_and_does_not_make_the_load_heavy(self):
+        from src.feedback import Answers, effective_load
+
+        with tempfile.TemporaryDirectory() as td:
+            record = self.record(td)
+            self.assertEqual(effective_load(record, Answers(sooner=["takk", "open_one"], load="light")), "light", "the share counts new items only")
+            self.assertEqual(effective_load(record, Answers(sooner=["takk_fyrir", "eg_var_ad_inf"], load="light")), "heavy")
 
 
 class FailureTests(unittest.TestCase):
