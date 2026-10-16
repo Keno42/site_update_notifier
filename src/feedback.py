@@ -301,9 +301,12 @@ class Record:
         )
 
     def items(self) -> dict[str, dict]:
+        """id → {id, target, meaning, kind}: every item the plan describes. ``exercise_items`` (language-learning-audio, every item an exercise names) is
+        absent from an older plan, which describes only the new and the reviewed items."""
         return {
             i["id"]: i
-            for i in self.plan.get("reviewed_items", [])
+            for i in self.plan.get("exercise_items", [])
+            + self.plan.get("reviewed_items", [])
             + self.plan.get("new_items", [])
         }
 
@@ -312,22 +315,23 @@ class Record:
         return newlist.unique_items(list(self.plan.get("new_items", [])))
 
     def reviewed_choices(self, limit: int) -> list[dict]:
-        """復習した項目のうち、このレッスンで言わせた (recall / connect / generative の問いに入った) もの. 未解決 (open) の項目を先に、
+        """新出以外で、このレッスンで言わせた (recall / connect / generative の問いに入った) 項目. 未解決 (open) の項目を先に、
         あとはレッスンで最初に問われた順に、``limit`` 件まで (language-learning-audio, lesson 28: 復習で言えなかった表現を選べなかった).
-        新出は含めない (それは new_items の欄)."""
+        対象は問いから決める: reviewed_items (復習に選ばれた項目) だけでは、つなぎの問いの «Hæ.» や文の中の «japönsku» が抜ける (#151 review).
+        説明 (target) のない id は出さない (exercise_items のない古い plan). 新出は含めない (それは new_items の欄)."""
         if limit <= 0:
             return []
         new = {i["id"] for i in self.new_items()}
-        reviewed = {i["id"]: i for i in self.plan.get("reviewed_items", []) if i.get("id") not in new}
+        described = self.items()
         asked: list[str] = []
         for e in self.plan.get("exercises", []):
             if e.get("kind") in ("recall", "connect", "generative"):
                 for i in e.get("items", []):
-                    if i in reviewed and i not in asked:
+                    if i not in new and i in described and i not in asked:
                         asked.append(i)
         open_ids = set(self.plan.get("open_items") or [])
         order = [i for i in asked if i in open_ids] + [i for i in asked if i not in open_ids]
-        return [reviewed[i] for i in order[:limit]]
+        return [described[i] for i in order[:limit]]
 
     def candidates(self) -> list[dict]:
         """カードに出す候補 (MAX_CANDIDATES 件まで). 同じ場面の繰り返し (古いレッスンの
