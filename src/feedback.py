@@ -301,15 +301,37 @@ class Record:
         )
 
     def items(self) -> dict[str, dict]:
+        """id → {id, target, meaning, kind}: every item the plan describes. ``exercise_items`` (language-learning-audio, every item an exercise names) is
+        absent from an older plan, which describes only the new and the reviewed items."""
         return {
             i["id"]: i
-            for i in self.plan.get("reviewed_items", [])
+            for i in self.plan.get("exercise_items", [])
+            + self.plan.get("reviewed_items", [])
             + self.plan.get("new_items", [])
         }
 
     def new_items(self) -> list[dict]:
         """今日の新出 (同じ id は 1 つ, #78)."""
         return newlist.unique_items(list(self.plan.get("new_items", [])))
+
+    def reviewed_choices(self, limit: int) -> list[dict]:
+        """新出以外で、このレッスンで言わせた (recall / connect / generative の問いに入った) 項目. 未解決 (open) の項目を先に、
+        あとはレッスンで最初に問われた順に、``limit`` 件まで (language-learning-audio, lesson 28: 復習で言えなかった表現を選べなかった).
+        対象は問いから決める: reviewed_items (復習に選ばれた項目) だけでは、つなぎの問いの «Hæ.» や文の中の «japönsku» が抜ける (#151 review).
+        説明 (target) のない id は出さない (exercise_items のない古い plan). 新出は含めない (それは new_items の欄)."""
+        if limit <= 0:
+            return []
+        new = {i["id"] for i in self.new_items()}
+        described = self.items()
+        asked: list[str] = []
+        for e in self.plan.get("exercises", []):
+            if e.get("kind") in ("recall", "connect", "generative"):
+                for i in e.get("items", []):
+                    if i not in new and i in described and i not in asked:
+                        asked.append(i)
+        open_ids = set(self.plan.get("open_items") or [])
+        order = [i for i in asked if i in open_ids] + [i for i in asked if i not in open_ids]
+        return [described[i] for i in order[:limit]]
 
     def candidates(self) -> list[dict]:
         """カードに出す候補 (MAX_CANDIDATES 件まで). 同じ場面の繰り返し (古いレッスンの
@@ -373,7 +395,8 @@ def effective_load(record: "Record", answers: "Answers") -> str | None:
     「重い」として数える: 何も覚えていないのは、その人にとって量の合図であって、項目ごとの事実ではない
     (#81). ペースへの入力にするのは language-learning-audio #218 で、ここでは記録するだけ."""
     new = record.new_items()
-    if new and len(set(answers.sooner)) / len(new) >= HEAVY_SHARE:
+    new_ids = {i["id"] for i in new}
+    if new and len(set(answers.sooner) & new_ids) / len(new) >= HEAVY_SHARE:  # 新出のうちの割合: 復習の項目は数えない
         return "heavy"
     return answers.load
 
@@ -543,13 +566,14 @@ class FeedbackView(discord.ui.View):
         self.submit = submit
         self.answers = Answers()
         new = record.new_items()[:25]
-        if new:
+        reviewed = record.reviewed_choices(25 - len(new))
+        if new or reviewed:
             # 「ほとんど見かけなかった」の欄は外した (一度も使われず、問いの意図が伝わらなかった, #81). 残るのは否定側
             # だけ: 聞いた直後の「覚えた」はあてにならない (次の日の振り返りが確かめる) が、「思い出せない」は当てになる.
             # 選ばなかった項目は「不満なし」で、「十分」ではない
             self._select(
                 "sooner",
-                "練習が足りなかった・覚えていない表現（複数可・なければ選ばなくてOK）",
+                "練習が足りなかった・言えなかった表現（新出・復習、複数可・なければ選ばなくてOK）",
                 [
                     discord.SelectOption(
                         label=_clip(i.get("target") or i["id"]),
@@ -557,6 +581,15 @@ class FeedbackView(discord.ui.View):
                         description=_clip(i.get("meaning") or "") or None,
                     )
                     for i in new
+                ]
+                + [
+                    # 復習で言えなかった表現も選べる (lesson 28). 印は説明の頭に付ける: ラベルは表現そのまま
+                    discord.SelectOption(
+                        label=_clip(i.get("target") or i["id"]),
+                        value=i["id"],
+                        description=_clip("復習: " + (i.get("meaning") or "")),
+                    )
+                    for i in reviewed
                 ],
                 min_values=0,
             )

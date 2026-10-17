@@ -332,7 +332,7 @@ class ViewTests(unittest.TestCase):
                 await buttons["送信"].callback(interaction(log))
                 self.assertEqual(submitted, [], "the load is required")
                 sooner, reasons, load, concerns = selects
-                self.assertIn("練習が足りなかった・覚えていない", sooner.placeholder)
+                self.assertIn("練習が足りなかった・言えなかった", sooner.placeholder)
                 sooner._values = ["takk_fyrir"]
                 await sooner.callback(interaction(log))
                 self.assertIn("理由", reasons.placeholder)
@@ -728,6 +728,112 @@ class ReasonAndExplainTests(unittest.TestCase):
             msgs = explain_messages(record, Answers(sooner=["takk_fyrir"], reasons=["say"], note="private"))
             self.assertNotIn("private", json.dumps(msgs, ensure_ascii=False))
             self.assertEqual(explain_messages(record, Answers()), [])
+
+
+class ReviewedItemsTests(unittest.TestCase):
+    """Lesson 28 of language-learning-audio: a reviewed item the learner could not say in the lesson could not be reported; only the new items were in
+    the select. The reviewed items the lesson asked are there too, after the new ones, and go to the same report."""
+
+    PLAN = dict(
+        PLAN,
+        reviewed_items=[
+            {"id": "takk", "target": "Takk.", "meaning": "ありがとう。"},
+            {"id": "heard_only", "target": "Já.", "meaning": "はい。"},
+            {"id": "open_one", "target": "Nei.", "meaning": "いいえ。"},
+        ],
+        open_items=["open_one"],
+        exercises=[
+            {"kind": "recall", "items": ["takk"]},
+            {"kind": "dialogue", "items": ["heard_only"]},
+            {"kind": "generative", "items": ["open_one", "takk_fyrir"]},
+        ],
+    )
+
+    def record(self, td):
+        root = Path(td)
+        write_lesson(root / "work", self.PLAN)
+        ledger = Ledger(root / "yuki")
+        learner = root / "yuki" / "learner.json"
+        learner.parent.mkdir(parents=True, exist_ok=True)
+        learner.write_text("{}", "utf-8")
+        ledger.save_manifest(root / "work", self.PLAN, b"{}", learner, {"bot": "a" * 40, "lla": "b" * 40}, ["generate"], NOW)
+        return ledger.load()
+
+    def test_the_reviewed_items_the_lesson_asked_follow_the_new_ones_open_first(self):
+        with tempfile.TemporaryDirectory() as td:
+            record = self.record(td)
+            self.assertEqual([i["id"] for i in record.reviewed_choices(25)], ["open_one", "takk"], "asked only; an open item first; not one only heard")
+            self.assertEqual(record.reviewed_choices(0), [])
+
+            async def build():
+                return FeedbackView(record, 1, None)  # type: ignore[arg-type]
+
+            view = asyncio.run(build())
+            sooner = next(c for c in view.children if hasattr(c, "options"))
+            self.assertEqual([o.value for o in sooner.options], ["takk_fyrir", "eg_var_ad_inf", "open_one", "takk"])
+            self.assertTrue(sooner.options[2].description.startswith("復習: "))
+
+    def test_a_chosen_reviewed_item_is_reported_and_does_not_make_the_load_heavy(self):
+        from src.feedback import Answers, effective_load
+
+        with tempfile.TemporaryDirectory() as td:
+            record = self.record(td)
+            self.assertEqual(effective_load(record, Answers(sooner=["takk", "open_one"], load="light")), "light", "the share counts new items only")
+            self.assertEqual(effective_load(record, Answers(sooner=["takk_fyrir", "eg_var_ad_inf"], load="light")), "heavy")
+
+
+    def test_an_item_described_only_by_the_exercises_is_offered(self):
+        """#151 review: the eligible items come from the exercises that asked them, not from reviewed_items (the items picked for review)."""
+        from src.feedback import Record
+
+        plan = dict(self.PLAN, exercise_items=[{"id": "hae", "target": "Hæ.", "meaning": "やあ。"}], exercises=[*self.PLAN["exercises"], {"kind": "connect", "items": ["hae"]}])
+        self.assertEqual([i["id"] for i in Record(Path("."), {"lesson": 12}, plan).reviewed_choices(25)], ["open_one", "takk", "hae"])
+        self.assertEqual([i["id"] for i in Record(Path("."), {"lesson": 12}, dict(plan, exercise_items=[])).reviewed_choices(25)], ["open_one", "takk"], "an older plan: no description, not offered")
+
+
+COURSE_CODE = """
+import json, sys
+from datetime import date, timedelta
+from audiolesson.cli import _plan
+from audiolesson.content import load_curriculum
+from audiolesson.learner import LearnerState
+from audiolesson.planner import PlanConfig, Planner, apply_to_learner
+from audiolesson.prompts import Prompts
+from audiolesson.timing import Timing
+
+cur = load_curriculum("curricula/is-en", known_lang="ja")
+learner, day, plans = LearnerState("is", "ja", "A1"), date(2026, 9, 1), []
+for _ in range(int(sys.argv[1])):
+    sc = Planner(cur, learner, Prompts.load("ja"), Timing(level="A1"), PlanConfig(minutes=30, seed=1, new_target=8.0), today=day).build()
+    plans.append(_plan(sc, cur))
+    apply_to_learner(sc, learner, day)
+    day += timedelta(days=1)
+print(json.dumps(plans, ensure_ascii=False))
+"""
+
+
+@unittest.skipUnless((LLA_DIR / "audiolesson").exists(), "submodule not checked out")
+class ReviewedItemsOfARealCourseTests(unittest.TestCase):
+    """#151 review: in a simulated course the lessons asked learned items that were not in reviewed_items («Hæ.» in a connection, lesson 5;
+    «japönsku» in «Ég tala japönsku.», lesson 10), so the form could not offer them. Through the pinned language-learning-audio, every learned
+    item a lesson asked is offered, with its target."""
+
+    def test_every_learned_item_a_lesson_asked_can_be_reported(self):
+        import subprocess
+        import sys
+
+        from src.feedback import Record
+
+        out = subprocess.run([sys.executable, "-c", COURSE_CODE, "10"], cwd=LLA_DIR, capture_output=True, text=True, check=True)
+        beyond_review = set()
+        for n, plan in enumerate(json.loads(out.stdout), 1):
+            new = {i["id"] for i in plan["new_items"]}
+            asked = {i for e in plan["exercises"] if e["kind"] in ("recall", "connect", "generative") for i in e["items"]} - new
+            offered = Record(Path("."), {"lesson": n}, plan).reviewed_choices(1000)
+            self.assertEqual({i["id"] for i in offered}, asked, f"lesson {n}")
+            self.assertTrue(all(i["target"] for i in offered), f"lesson {n}")
+            beyond_review |= asked - {i["id"] for i in plan["reviewed_items"]}
+        self.assertTrue(beyond_review, "the course asks learned items outside reviewed_items: what this test is about")
 
 
 class FailureTests(unittest.TestCase):
