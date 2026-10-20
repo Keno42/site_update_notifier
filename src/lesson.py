@@ -884,6 +884,9 @@ class Lessons:
             logging.warning(f"キューの問いを整えられませんでした ({type(e).__name__})")
             return
         queue.apply_refinement(questions, rows, today, rewrite=True)
+        unresolved = [row for row in rows if row.get("kind") == "transform_source_unresolved"]
+        if unresolved:
+            logging.warning("変換元を一意に復元できない復習問題が %d 件あります。要確認。", len(unresolved))
         queue.refined = REFINE_VERSION
         queue.save(path)
 
