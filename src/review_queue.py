@@ -119,7 +119,7 @@ BACKLOG_MAX = 100
 # 含まれた / 同じ答えの問いが一つにまとまった / 家のない部分が復習から外れた / 手がかりが答えそのものの問いが外れた #277)
 DROPPING = ("beside_whole", "same_answer", "no_home", "trivial")
 # キューを audiolesson refine-review で一度整えた印 (保存する). 規則が変わったら上げて、もう一度整える
-REFINE_VERSION = 5  # 4: 変換問題に元の文を復元する。5: 答えに女性形・男性形のある問いに、期待する形を書く (language-learning-audio#375)。対応するLLA修正の導入後に上げる。
+REFINE_VERSION = 6  # 4: 変換問題に元の文を復元する。5: 答えに女性形・男性形のある問いに、期待する形を書く (language-learning-audio#375)。6: パターンだけで保存した文にも形を書き、話しかける相手に一致する文 («Ertu þreytt?») には書かず、答えも意味どおりの形に直す (language-learning-audio#385)。対応するLLA修正の導入後に上げる。
 
 
 def _norm(text: str) -> str:
