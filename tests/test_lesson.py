@@ -732,7 +732,8 @@ async def answer_all(view, first="言えなかった", second="言えた", rest=
             FakeInteraction(1)
         )
         label = first if n == 0 else second if n == 1 else rest
-        await {b.label: b for b in view.children}[label].callback(FakeInteraction(1))
+        buttons = {b.label: b for b in view.children}
+        await buttons.get(label, buttons.get("次へ")).callback(FakeInteraction(1))  # 「読んでみよう」は「次へ」だけ
         n += 1
     return n
 
@@ -1053,7 +1054,7 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(replies[0], ("レッスンを準備しています…", None))
                 text, view = replies[-1]
                 self.assertIn(f"全{len(new)}問", text)
-                self.assertIn("読みカードが3枚", text)
+                self.assertIn("「読んでみよう」が3枚", text)
                 return await answer_all(view, first="言えた", second="言えなかった")
 
             answered = asyncio.run(review())

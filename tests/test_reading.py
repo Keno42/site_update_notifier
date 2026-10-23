@@ -15,7 +15,7 @@ from unittest import mock
 from src.cards import CardQueue
 from src.lesson import LessonConfig, Lessons
 from src.reading import parse_deck, render_card
-from src.review import ReviewSession, ReviewView
+from src.review import SEEN, ReviewSession, ReviewView
 from src.speech import PAUSE_S, TRIM, join_args, profile_voice, synthesize
 from src.review_queue import ReviewQueue
 
@@ -307,18 +307,18 @@ class SessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             s = session_with_cards(td)
             self.assertEqual(s.total, 4)
-            self.assertIn("読みカードが2枚", s.render())
+            self.assertIn("「読んでみよう」が2枚", s.render())
             s.rate("failed")
             s.rate("ok")
             self.assertEqual(s.current_card()["id"], "opid")
-            self.assertIn("**読み 1/2**", s.render())
-            s.rate("failed")
-            s.rate("shaky")
+            self.assertIn("**読んでみよう 1/2**", s.render())
+            s.rate(SEEN)
+            s.rate(SEEN)
             self.assertTrue(s.done)
             self.assertEqual(s.failed_ids(), ["takk"], "cards are not curriculum items")
             saved = CardQueue.load(s.reading_path).cards
             self.assertEqual(
-                (saved["opid"].state, saved["lokad"].state), ("failed", "shaky")
+                (saved["opid"].state, saved["lokad"].state), ("ok", "ok"), "a card seen comes back as one read"
             )
             states = sorted(
                 e.state for e in ReviewQueue.load(s.path, D).entries.values()
@@ -326,7 +326,8 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(states, ["failed", "ok"])
             summary = s.summary()
             self.assertIn("2/2問に回答", summary)
-            self.assertIn("**読み**: 2/2枚（迷った 1・言えなかった 1）", summary)
+            self.assertIn("**読んでみよう**: 2/2枚", summary)
+            self.assertNotIn("言えなかった 1）", summary, "a card is not rated")
 
     def test_unanswered_cards_are_not_recorded(self):
         with tempfile.TemporaryDirectory() as td:
@@ -388,7 +389,7 @@ class SpeakButtonTests(unittest.TestCase):
                 return {b.label: b for b in view.children}
 
             seen = []
-            for step in ("答えを見る", "言えた", "答えを見る", "言えた", "答えを見る"):
+            for step in ("答えを見る", "言えた", "答えを見る", "言えた", "答えを見る"):  # two questions, then the card
                 seen.append(sorted(labels()))
                 await labels()[step].callback(FakeInteraction())
             seen.append(sorted(labels()))
@@ -405,6 +406,7 @@ class SpeakButtonTests(unittest.TestCase):
         self.assertNotIn("🔊", seen[1], "no 🔊 on a question")
         self.assertEqual(seen[4], ["答えを見る"], "none before the card is revealed")
         self.assertIn("🔊", seen[5])
+        self.assertEqual(seen[5], ["次へ", "🔊"], "a revealed card is not rated: «次へ» and 🔊 only")
 
     def test_a_failed_synthesis_is_reported_privately(self):
         async def scenario(td):

@@ -26,7 +26,7 @@ def render_card(card: dict, n: int, total: int, revealed: bool, speak: bool) -> 
     文字と音のカード (letters) の meaning は綴りのきまりなので「読み方のきまり」として出し、
     並べた単語の意味は words (language-learning-audio のデッキ) から出す."""
     text = (
-        f"**読み {n}/{total}**（声に出して読んでから「答えを見る」）\n"
+        f"**読んでみよう {n}/{total}**（声に出して読んでみてから「答えを見る」）\n"
         f"## {card['text']}"
     )
     if not revealed:
