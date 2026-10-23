@@ -38,7 +38,13 @@ REVIEW_INTRO = (
 )
 SCENE_INTRO = "続けて場面カードが{n}枚"
 BONUS_NOTE = "聞いただけの文です。言えたらボーナス（言えなくて大丈夫）"
-READING_INTRO = "続けて読みカードが{n}枚あります（書いてあるものを声に出して読む）。"
+READING_INTRO = (
+    "続けて「読んでみよう」が{n}枚あります（書いてあるものを声に出して読んでみる。"
+    "レッスンに出ていない言葉もあるので、うまく読めなくても大丈夫）。"
+)
+# 「読んでみよう」は評価しない: レッスンに出ていない言葉もあり、発音を教える場がないので、言えた／言えなかったは聞かない.
+# 見たカードは「言えた」と同じ間隔で次に回す (別のユーザーの声, 2026-10-23)
+SEEN = "seen"
 
 
 @dataclass
@@ -107,7 +113,7 @@ class ReviewSession:
         return self.cards[n] if kind == "card" else None
 
     def rate(self, result: str) -> None:
-        if result not in RESULTS:
+        if result not in RESULTS and result != SEEN:
             raise ValueError(result)
         if self.done:
             return
@@ -130,7 +136,8 @@ class ReviewSession:
                 else (self.cards, self.reading_queue, self.reading_path)
             )
             if queue is not None and path is not None:
-                queue.record(cards[n]["id"], result, self.today, skip_first_ok=True)  # 場面カードも読みカードも最初の「言えた」を 3 日後から (#95, #132)
+                # 場面カードも読みカードも最初の「言えた」を 3 日後から (#95, #132). 「読んでみよう」の「次へ」は「言えた」と同じ間隔
+                queue.record(cards[n]["id"], "ok" if result == SEEN else result, self.today, skip_first_ok=True)
                 queue.save(path)
         self.results.append(result)
 
@@ -251,7 +258,7 @@ class ReviewSession:
             lines.append(f"未回答の {left} 問は次回に回します。")
         for label, done, total in (
             ("場面", self.scene_results, len(self.scenes)),
-            ("読み", self.card_results, len(self.cards)),
+            ("読んでみよう", self.card_results, len(self.cards)),
         ):
             if done:
                 counts = "・".join(
@@ -259,7 +266,7 @@ class ReviewSession:
                     for r in ("ok", "shaky", "failed")
                     if r in done
                 )
-                lines.append(f"**{label}**: {len(done)}/{total}枚（{counts}）")
+                lines.append(f"**{label}**: {len(done)}/{total}枚" + (f"（{counts}）" if counts else ""))
         return "\n".join(lines)
 
 
@@ -357,7 +364,12 @@ class ReviewView(discord.ui.View):
         """答えの前は「答えを見る」、答えの後は評価ボタン. 読み上げるものがあれば 🔊 も."""
         self.clear_items()
         self.revealed = revealed
-        if revealed:
+        if revealed and self.session.current_card() is not None:
+            # 「読んでみよう」は評価しない: 「次へ」だけ
+            nxt: discord.ui.Button = discord.ui.Button(label="次へ", style=discord.ButtonStyle.primary)
+            nxt.callback = self._rate_callback(SEEN, len(self.session.results))  # type: ignore[method-assign]
+            self.add_item(nxt)
+        elif revealed:
             for result, style in (
                 ("ok", discord.ButtonStyle.success),
                 ("shaky", discord.ButtonStyle.secondary),

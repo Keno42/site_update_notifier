@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from src.cards import CardQueue
 from src.lesson import LessonConfig, Lessons
-from src.review import ReviewSession, ReviewView
+from src.review import SEEN, ReviewSession, ReviewView
 from src.review_queue import ReviewQueue
 from src.scenes import parse_scenes, readiness, render_scene, speak_target
 
@@ -113,26 +113,26 @@ class SessionTests(unittest.TestCase):
             s = session_with(td, [RESPOND, INITIATE], [card])
             self.assertEqual(s.total, 4)
             self.assertIn(
-                "続けて場面カードが2枚、読みカードが1枚あります", s.render(speak=True)
+                "続けて場面カードが2枚、「読んでみよう」が1枚あります", s.render(speak=True)
             )
             s.rate("ok")
             self.assertEqual(s.current_scene()["id"], "a3_bag")
             s.rate("failed")
             s.rate("shaky")
             self.assertEqual(s.current_card()["id"], "opid")
-            s.rate("ok")
+            s.rate(SEEN)  # «読んでみよう» is not rated: «次へ»
             self.assertTrue(s.done)
             saved = CardQueue.load(s.scene_path).cards
             self.assertEqual(
                 (saved["a3_bag"].state, saved["a8_toilet"].state), ("failed", "shaky")
             )
             self.assertEqual(list(CardQueue.load(s.reading_path).cards), ["opid"])
-            # the reading card answered ok on its first showing waits three days, as a scene card does (#95, #132)
+            # the reading card seen on its first showing waits three days, as a scene card said on its first does (#95, #132)
             self.assertEqual(CardQueue.load(s.reading_path).cards["opid"].due, (D + timedelta(days=3)).isoformat())
             self.assertEqual(s.failed_ids(), [], "scene cards are not curriculum items")
             summary = s.summary()
             self.assertIn("**場面**: 2/2枚（迷った 1・言えなかった 1）", summary)
-            self.assertIn("**読み**: 1/1枚（言えた 1）", summary)
+            self.assertIn("**読んでみよう**: 1/1枚", summary)
 
 
 class FakeInteraction:
