@@ -407,17 +407,28 @@ class ReviewView(discord.ui.View):
             view=self,
         )
 
+    def _speak_label(self, target: dict) -> str:
+        """🔊 の返信に書く、どのカードの何の音声か (#175). Discord の返信の引用は振り返り本体の
+        「今の」カードを映すので、引用だけでは前に送った音声がどのカードのものか分からない."""
+        if self.session.current_scene() is not None:
+            head = f"場面 {len(self.session.scene_results) + 1}/{len(self.session.scenes)}"
+        else:
+            head = f"読んでみよう {len(self.session.card_results) + 1}/{len(self.session.cards)}"
+        return f"🔊 {head}「{target['text']}」"
+
     @answers_on_failure(SHOW_FAILED)
     async def _speak(self, interaction: discord.Interaction) -> None:
-        """今のカードの音声を、押した本人にだけ mp3 で送る. 振り返りは進めない."""
+        """今のカードの音声を、押した本人にだけ mp3 で送る. 振り返りは進めない.
+        どのカードの音声かは押したときに決めて返信に書く: 音声ができる前に次へ進んでも、元のカードのまま (#175)."""
         card = self._speak_target()
         if self.is_finished() or card is None or self.speak is None:
             return
+        label = self._speak_label(card)
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             async with self.speak(card) as mp3:
                 await interaction.followup.send(
-                    file=discord.File(mp3, filename="reading.mp3"), ephemeral=True
+                    label, file=discord.File(mp3, filename="reading.mp3"), ephemeral=True
                 )
         except Exception as e:
             logging.warning(f"カードの音声を作れませんでした ({type(e).__name__})")
