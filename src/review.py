@@ -409,11 +409,14 @@ class ReviewView(discord.ui.View):
 
     def _speak_label(self, target: dict) -> str:
         """🔊 の返信に書く、どのカードの何の音声か (#175). Discord の返信の引用は振り返り本体の
-        「今の」カードを映すので、引用だけでは前に送った音声がどのカードのものか分からない."""
+        「今の」カードを映すので、引用だけでは前に送った音声がどのカードのものか分からない.
+        答えの前の場面カードは相手の言葉を聞き取る練習なので、その文字は書かない (#176 review)."""
         if self.session.current_scene() is not None:
             head = f"場面 {len(self.session.scene_results) + 1}/{len(self.session.scenes)}"
-        else:
-            head = f"読んでみよう {len(self.session.card_results) + 1}/{len(self.session.cards)}"
+            if not self.revealed:
+                return f"🔊 {head}（相手の音声）"
+            return f"🔊 {head}（答えの例）「{target['text']}」"
+        head = f"読んでみよう {len(self.session.card_results) + 1}/{len(self.session.cards)}"
         return f"🔊 {head}「{target['text']}」"
 
     @answers_on_failure(SHOW_FAILED)
