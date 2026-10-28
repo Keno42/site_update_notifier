@@ -397,7 +397,7 @@ class SpeakButtonTests(unittest.TestCase):
             await labels()["🔊"].callback(it)
             self.assertEqual(spoken, ["gullfoss"])
             self.assertEqual(it.deferred, [True])
-            self.assertEqual(it.followups, [(None, "reading.mp3", True)])
+            self.assertEqual(it.followups, [("🔊 読んでみよう 1/1「Gullfoss」", "reading.mp3", True)])
             self.assertEqual(len(s.results), 2, "listening does not advance the review")
             return seen
 
@@ -407,6 +407,44 @@ class SpeakButtonTests(unittest.TestCase):
         self.assertEqual(seen[4], ["答えを見る"], "none before the card is revealed")
         self.assertIn("🔊", seen[5])
         self.assertEqual(seen[5], ["次へ", "🔊"], "a revealed card is not rated: «次へ» and 🔊 only")
+
+    def test_each_audio_reply_names_its_own_card_even_when_the_review_moves_on(self):
+        """#175 (lesson 39): Discord shows an ephemeral reply with a preview of the review message, which is edited as the review advances, so every
+        earlier audio reply seemed to follow the card on screen. Each reply names its card and the text spoken, fixed when 🔊 is pressed."""
+
+        async def scenario(td):
+            view = None
+
+            @contextlib.asynccontextmanager
+            async def speak(card):
+                if card["text"] == "Opið":
+                    await labels()["次へ"].callback(FakeInteraction())  # the learner moves on before the first clip is ready
+                mp3 = Path(td) / "x.mp3"
+                mp3.write_bytes(b"ID3")
+                yield mp3
+
+            async def noop(*_):
+                pass
+
+            s = session_with_cards(td, DECK[:2])
+            view = ReviewView(s, 1, noop, noop, speak=speak)
+
+            def labels():
+                return {b.label: b for b in view.children}
+
+            for step in ("答えを見る", "言えた", "答えを見る", "言えた", "答えを見る"):  # two questions, then the first card
+                await labels()[step].callback(FakeInteraction())
+            first = FakeInteraction()
+            await labels()["🔊"].callback(first)
+            await labels()["答えを見る"].callback(FakeInteraction())  # the second card, reached while the first clip was made
+            second = FakeInteraction()
+            await labels()["🔊"].callback(second)
+            return first.followups, second.followups
+
+        with tempfile.TemporaryDirectory() as td:
+            first, second = asyncio.run(scenario(td))
+        self.assertEqual(first, [("🔊 読んでみよう 1/2「Opið」", "reading.mp3", True)], "still card 1, though the review moved on before it was ready")
+        self.assertEqual(second, [("🔊 読んでみよう 2/2「Lokað」", "reading.mp3", True)])
 
     def test_a_failed_synthesis_is_reported_privately(self):
         async def scenario(td):

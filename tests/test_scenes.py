@@ -171,6 +171,8 @@ class SpeakerTests(unittest.TestCase):
             self.assertEqual(len(saved), 2)
 
     def test_a_respond_card_plays_the_partner_before_and_the_reply_after(self):
+        replies = []
+
         async def scenario(td):
             spoken = []
 
@@ -194,11 +196,14 @@ class SpeakerTests(unittest.TestCase):
             await labels()["答えを見る"].callback(FakeInteraction())
             await labels()["言えた"].callback(FakeInteraction())
             seen.append(sorted(labels()))  # the respond card, before the answer
-            await labels()["🔊"].callback(FakeInteraction())
+            before = FakeInteraction()
+            await labels()["🔊"].callback(before)
             await labels()["答えを見る"].callback(FakeInteraction())
-            await labels()["🔊"].callback(FakeInteraction())
+            after = FakeInteraction()
+            await labels()["🔊"].callback(after)
             await labels()["言えた"].callback(FakeInteraction())
             seen.append(sorted(labels()))  # the initiate card, before the answer
+            replies.extend([before.followups, after.followups])
             return seen, spoken
 
         with tempfile.TemporaryDirectory() as td:
@@ -206,6 +211,10 @@ class SpeakerTests(unittest.TestCase):
         self.assertNotIn("🔊", seen[0], "no 🔊 on a question")
         self.assertIn("🔊", seen[1], "the partner is heard before answering")
         self.assertEqual(spoken, ["Viltu poka?", "Nei, takk."])
+        # #176 review: before the answer the reply names the card, not the partner's words, which the card hides for listening
+        self.assertEqual(replies[0], [("🔊 場面 1/2（相手の音声）", True)])
+        self.assertNotIn("Viltu poka?", replies[0][0][0])
+        self.assertEqual(replies[1], [("🔊 場面 1/2（答えの例）「Nei, takk.」", True)])
         self.assertEqual(
             seen[2], ["答えを見る"], "nothing to hear before an initiate answer"
         )
