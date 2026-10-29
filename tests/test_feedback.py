@@ -931,6 +931,39 @@ class SupportRequestTests(unittest.TestCase):
         self.assertEqual(lesson_sentences(record, "eg_var_ad_inf"), ["Ég var að borða."])
         self.assertIn("レッスンで使った文: Ég var að borða.", support_messages(record, {"kind": "grammar", "item_id": "eg_var_ad_inf"})[-1]["content"])
 
+    def test_the_lesson_sentence_is_what_was_said_not_the_labels_note(self):
+        """Review of #183: a word taught inside a sentence has the label «new: Hvar er sjúkrahúsið? (sjúkrahúsið)», and the note was read
+        aloud. The sentence comes from the saved script's spoken lines that hold the expression (a cue cut short, «Ég er…», is not one);
+        without a script, from the label without its note."""
+        from src.feedback import Record, lesson_sentences
+
+        plan = dict(PLAN, new_items=[
+            {"id": "sjukrahusid", "target": "sjúkrahúsið", "meaning": "the hospital"},
+            {"id": "thrjatiu", "target": "þrjátíu", "meaning": "thirty"},
+            {"id": "eg_er_ara", "target": "Ég er {age} ára.", "meaning": "I am … years old."},
+        ], exercises=[
+            {"index": 3, "kind": "intro", "items": ["sjukrahusid"], "label": "new: Hvar er sjúkrahúsið? (sjúkrahúsið)"},
+            {"index": 4, "kind": "intro", "items": ["thrjatiu"], "label": "new: Ég er þrjátíu ára. (þrjátíu)"},
+            {"index": 5, "kind": "recall", "items": ["eg_er_ara", "thrjatiu"], "label": "cloze: Ég er þrjátíu ára."},
+        ])  # fmt: skip
+        script = {"segments": [
+            {"type": "narrate", "text": "A new word: the hospital.", "lang": "en", "exercise": 3},
+            {"type": "speak", "text": "Hvar er sjúkrahúsið?", "lang": "is", "exercise": 3},
+            {"type": "speak", "text": "sjúkrahúsið", "lang": "is", "exercise": 3},
+            {"type": "speak", "text": "Ég er þrjátíu ára.", "lang": "is", "exercise": 4},
+            {"type": "speak", "text": "Ég er…", "lang": "is", "exercise": 5},
+            {"type": "answer", "text": "Ég er þrjátíu ára.", "lang": "is", "exercise": 5},
+        ]}  # fmt: skip
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "lesson-012.script.json").write_text(json.dumps(script), "utf-8")
+            record = Record(Path(td), {"lesson": 12}, plan)
+            self.assertEqual(lesson_sentences(record, "sjukrahusid"), ["Hvar er sjúkrahúsið?"])
+            self.assertEqual(lesson_sentences(record, "thrjatiu"), ["Ég er þrjátíu ára."])
+            self.assertEqual(lesson_sentences(record, "eg_er_ara"), ["Ég er þrjátíu ára."], "the cue cut short is not the sentence")
+        no_script = Record(Path("."), {"lesson": 12}, plan)
+        self.assertEqual(lesson_sentences(no_script, "sjukrahusid"), ["Hvar er sjúkrahúsið?"], "the label without its note")
+        self.assertEqual(lesson_sentences(no_script, "thrjatiu"), ["Ég er þrjátíu ára."])
+
     def test_the_automatic_explanation_skips_an_expression_already_asked_about(self):
         from src.feedback import Answers, Record, explain_messages
 
