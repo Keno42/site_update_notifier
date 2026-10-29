@@ -735,11 +735,15 @@ class SupportRequestTests(unittest.TestCase):
     two expressions × two kinds asked four explanations), with an optional question; saved on its own, answered at once, explained by the LLM,
     with a follow-up and a retry; no outcome, no load and no schedule changes."""
 
-    def _run(self, item, kind, question="", replies=("**Ég var að.** …",), explain_on=True, then_submit=True, submit_first=False, follow=None):
+    def _run(self, item, kind, question="", replies=("**Ég var að.** …",), explain_on=True, then_submit=True, submit_first=False, follow=None, sent_before=False):
         sent, asked, log = [], [], []
         replies = list(replies)
         with tempfile.TemporaryDirectory() as td:
             ledger = saved(Path(td))
+            if sent_before:  # the feedback was sent before the bot restarted: only the ledger knows
+                from src.feedback import Answers, build_event
+
+                ledger.append(build_event(ledger.load(), Answers(load="right"), "yuki", NOW))
 
             async def explain(messages):
                 asked.append(messages)
@@ -863,6 +867,46 @@ class SupportRequestTests(unittest.TestCase):
     def test_after_the_feedback_the_answer_does_not_say_it_still_waits(self):
         _, _, _, _, acks, _ = self._run("takk_fyrir", "grammar", submit_first=True)
         self.assertNotIn("まだ送信されていません", acks[0][1])
+
+    def test_after_a_restart_the_ledger_says_the_feedback_was_sent(self):
+        _, _, _, _, acks, _ = self._run("takk_fyrir", "grammar", then_submit=False, sent_before=True)
+        self.assertIn("受け付けました", acks[0][1])
+        self.assertNotIn("まだ送信されていません", acks[0][1])
+
+    def test_a_request_made_while_the_automatic_explanation_is_written_supersedes_it(self):
+        """Review of #180: the automatic explanation checked the requests before the LLM wrote; a request for one of its expressions made
+        meanwhile gave the expression two explanations. It is written again without that expression, and not posted when none is left."""
+        from src.feedback import Answers
+
+        for requested, expect in ((["takk_fyrir"], ["Ég var að"]), (["takk_fyrir", "eg_var_ad_inf"], None)):
+            sent, asked = [], []
+            with tempfile.TemporaryDirectory() as td:
+                ledger = saved(Path(td))
+                path = ledger.user_dir / "support_requests.jsonl"
+                record = ledger.load()
+
+                async def explain(messages):
+                    asked.append(messages[-1]["content"])
+                    if len(asked) == 1:  # the learner asks for help while the LLM writes
+                        with path.open("a", encoding="utf-8") as f:
+                            f.write(json.dumps({"manifest": record.id, "requests": [{"item_id": i, "kind": "grammar"} for i in requested]}) + "\n")
+                    return "explained"
+
+                class Channel:
+                    async def send(self, content=None, **kw):
+                        sent.append(content)
+
+                fb = Feedback({1: "yuki"}, lambda n: Path(td) / n, 0, lambda: NOW, explain=explain, wants_explain=lambda name: True)
+                inter = interaction([])
+                inter.channel = Channel()
+                asyncio.run(fb._explain(inter, "yuki", record, Answers(sooner=["takk_fyrir", "eg_var_ad_inf"], load="right")))
+            if expect is None:
+                self.assertEqual((len(asked), sent), (1, []), "both asked for: nothing posted")
+            else:
+                self.assertEqual(len(asked), 2)
+                self.assertNotIn("Takk fyrir", asked[1])
+                self.assertIn("Ég var að", asked[1])
+                self.assertEqual(sent, ["**レッスン 12 で選んだ表現の解説**\nexplained"])
 
     def test_no_button_without_an_explainer(self):
         lines, _, sent, asked, acks, log = self._run("takk_fyrir", "grammar", explain_on=False, then_submit=False)

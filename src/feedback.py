@@ -974,7 +974,17 @@ class Feedback:
         if self.explain is None or not messages or channel is None or not self.wants_explain(name):
             return
         try:
-            text = (await self.explain(messages)).strip()
+            # an explicit request for one of these expressions may come while the LLM writes (review of #180): the request's answer
+            # supersedes this one, so the explanation is written again without it (twice at most), or not posted when nothing is left
+            text = ""
+            for _ in range(2):
+                text = (await self.explain(messages)).strip()
+                now = explain_messages(record, answers, skip=self._requested(name, record))
+                if now == messages:
+                    break
+                messages, text = now, ""
+                if not messages:
+                    break
             if text:
                 await channel.send(_clip(f"**{record.title} で選んだ表現の解説**\n{text}", MESSAGE_MAX))
         except Exception:
@@ -1016,6 +1026,8 @@ class Feedback:
             )
 
         ack = f"解説リクエストを受け付けました（{label}）。回答はこのチャンネルに投稿します。"
+        if (name, record.id) not in self.submitted and self.ledger(name).events(record.id):
+            self.submitted.add((name, record.id))  # sent before a restart: the ledger keeps it (review of #180), memory only caches it
         if (name, record.id) not in self.submitted:
             ack += "\nレッスンのフィードバックはまだ送信されていません。"
         await interaction.response.send_message(ack, view=OwnerButtons(owner, [("別の表現も質問する", another)]), ephemeral=True)
