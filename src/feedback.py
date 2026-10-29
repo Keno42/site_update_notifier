@@ -292,6 +292,14 @@ class Record:
     def lesson(self) -> int:
         return int(self.manifest["lesson"])
 
+    def segments(self) -> list[dict]:
+        """保存した script.json の音声の区切り (読めなければ []): 実際に読み上げた文."""
+        path = self.dir / f"lesson-{self.lesson:03d}.script.json"
+        try:
+            return list(json.loads(path.read_text("utf-8")).get("segments", []))
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+
     @property
     def id(self) -> str:
         """lesson-012 / 再生成なら lesson-012.2."""
@@ -470,14 +478,42 @@ SUPPORT_OTHER = "_other"  # 選択肢にない表現: 質問欄に書いても�
 SUPPORT_FOLLOW = {"more": "もっと詳しく", "other": "別の説明で"}
 
 
+_WORD = re.compile(r"[^\W\d_]+")
+_NOTE = re.compile(r"\s*\([^()]*\)\s*$")  # a label's note after the sentence: «Hvar er sjúkrahúsið? (sjúkrahúsið)»
+
+
+def _words(text: str) -> list[str]:
+    return [w.lower() for w in _WORD.findall(text)]
+
+
 def lesson_sentences(record: "Record", item_id: str, limit: int = 2) -> list[str]:
-    """レッスンで ``item_id`` を言った文 (問いのラベルの文, 型の {…} を残したものは除く): 型 «Ég var að {inf}.» ではなく実際の文で解説するため."""
+    """レッスンで ``item_id`` を言った文: 型 «Ég var að {inf}.» ではなく実際の文で解説し、読み上げるため. 保存した script の、その表現の
+    問いで読み上げた目標言語の文のうち、表現の語 (型なら {…} の外の語) を含む最初のもの (「Ég er…」のような途中の手がかりは除く).
+    script がなければ問いのラベルの文 (末尾の「（…）」の注記は除く, review of #183: «Hvar er sjúkrahúsið? (sjúkrahúsið)» を読んでいた)."""
+    target = (record.items().get(item_id) or {}).get("target") or ""
+    need = _words(re.sub(r"\{[^}]*\}", " ", target))
+    segments = record.segments()
+    by_exercise: dict[int, list[dict]] = {}
+    for g in segments:
+        if g.get("type") in ("speak", "answer") and g.get("lang") not in (None, "en", "ja") and g.get("text"):
+            by_exercise.setdefault(g.get("exercise"), []).append(g)
+
+    def holds(text: str) -> bool:
+        said = _words(text)
+        return bool(said) and all(w in said for w in need) and "…" not in text
+
     out: list[str] = []
     for e in record.plan.get("exercises", []):
         if item_id not in e.get("items", []):
             continue
-        text = str(e.get("label", "")).split(": ", 1)[-1].strip()
-        if text and "{" not in text and ": " in str(e.get("label", "")) and text not in out:
+        if segments:
+            text = next((g["text"].strip() for g in by_exercise.get(e.get("index"), []) if holds(g["text"]) and len(_words(g["text"])) > 1), "")
+            if not text:
+                text = next((g["text"].strip() for g in by_exercise.get(e.get("index"), []) if holds(g["text"])), "")
+        else:
+            label = str(e.get("label", ""))
+            text = _NOTE.sub("", label.split(": ", 1)[-1]).strip() if ": " in label else ""
+        if text and "{" not in text and text not in out:
             out.append(text)
         if len(out) >= limit:
             break
