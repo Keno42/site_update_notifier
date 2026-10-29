@@ -64,6 +64,18 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(preview_text(bare, "takk"), "Takk.", "no sentence: the expression itself")
         self.assertIsNone(preview_text(bare, "eg_var_ad_inf"), "only a pattern: nothing is made up")
 
+    def test_a_word_taught_inside_a_sentence_plays_the_sentence_without_the_labels_note(self):
+        """Review of #183: lesson 40 played «Hvar er sjúkrahúsið? (sjúkrahúsið)» and «Ég er þrjátíu ára. (þrjátíu)»: the label's note."""
+        plan = dict(PLAN, new_items=[{"id": "sjukrahusid", "target": "sjúkrahúsið", "meaning": "the hospital"}],
+                    exercises=[{"index": 3, "kind": "intro", "items": ["sjukrahusid"], "label": "new: Hvar er sjúkrahúsið? (sjúkrahúsið)"}])
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "lesson-012.script.json").write_text(json.dumps({"segments": [
+                {"type": "speak", "text": "Hvar er sjúkrahúsið?", "lang": "is", "exercise": 3},
+                {"type": "speak", "text": "sjúkrahúsið", "lang": "is", "exercise": 3},
+            ]}), "utf-8")
+            self.assertEqual(preview_text(Record(Path(td), {"lesson": 12}, plan), "sjukrahusid"), "Hvar er sjúkrahúsið?")
+        self.assertEqual(preview_text(Record(Path("."), {"lesson": 12}, plan), "sjukrahusid"), "Hvar er sjúkrahúsið?", "no script: the label without its note")
+
     def _open(self, td, speak_fails=False, explain_on=True, user=1):
         log, spoken = [], []
         ledger = saved(Path(td))
