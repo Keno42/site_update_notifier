@@ -1295,11 +1295,12 @@ class Lessons:
                 message_id,
                 newlist.list_text(plan["lesson_number"], plan.get("new_items", [])),
                 plan["lesson_number"],
+                owner=owner,
             )
         except OSError:
             logging.exception("新出表現の一覧を保存できませんでした")
 
-    async def _send_new_list(self, channel: Any, sent: Any, plan: dict) -> None:
+    async def _send_new_list(self, channel: Any, sent: Any, plan: dict, owner: int = 0, manifest: str = "") -> None:
         """「レッスンと一緒に出す」: 投稿への返信として、すぐ一覧を出す. 出せなくても投稿は成功のまま."""
         items = plan.get("new_items", [])
         if not newlist.unique_items(items):
@@ -1308,6 +1309,8 @@ class Lessons:
             "channel": getattr(channel, "id", 0),
             "message": getattr(sent, "id", 0),
             "text": newlist.list_text(plan["lesson_number"], items),
+            "owner": owner,
+            "manifest": manifest,
         }
         await newlist.release(channel, [entry])
 
@@ -1370,7 +1373,7 @@ class Lessons:
             else:
                 sent = await channel.send(text, files=files)
             if before:
-                await self._send_new_list(channel, sent, plan)
+                await self._send_new_list(channel, sent, plan, owner, manifest or "")
         finally:
             for f in files:
                 f.close()
@@ -1395,11 +1398,14 @@ def setup(
         report_feedback=lessons.report_feedback,
         explain=explain,
         wants_explain=lambda name: cfg.user_settings(name).explain == "on",
+        speak=lambda text: lessons.speak({"text": text, "own": True}),  # a lesson's sentence may name the learner's own places: not cached
     )
     feedback.FeedbackButton.handler = fb
+    feedback.PreviewButton.handler = fb
+    newlist.list_view = feedback.preview_view
     newlist.NewListButton.users = cfg.users
     newlist.NewListButton.user_dir = cfg.user_dir
-    client.add_dynamic_items(feedback.FeedbackButton, newlist.NewListButton)
+    client.add_dynamic_items(feedback.FeedbackButton, newlist.NewListButton, feedback.PreviewButton)
     tree = app_commands.CommandTree(client)
     guild = discord.Object(id=cfg.guild_id) if cfg.guild_id else None
 

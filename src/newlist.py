@@ -19,6 +19,8 @@ import discord
 from .interaction import answers_on_failure
 
 PENDING_FILE = "new_list_pending.json"
+# 一覧に付けるボタン (発音の確認, feedback.preview_view): (レッスンを受けた人, 記録の ID) → view. lesson.setup が入れる (feedback が newlist を使うため、ここからは呼ぶだけ)
+list_view: Callable[[int, str], Any] | None = None
 LIMIT = 1900  # Discord の 1 通は 2000 字まで
 
 
@@ -68,7 +70,7 @@ class PendingLists:
         self.path.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
 
     def add(
-        self, record: str, channel_id: int, message_id: int, text: str, lesson: int = 0
+        self, record: str, channel_id: int, message_id: int, text: str, lesson: int = 0, owner: int = 0
     ) -> None:
         """一覧を置く. 同じ番号のレッスンを生成し直したときは、前の版 (lesson-019 に対する lesson-019.2) の
         一覧は捨てる: 聞くのは新しい版で、前の投稿の一覧は別の新出かもしれない (#83 review)."""
@@ -80,6 +82,8 @@ class PendingLists:
             "message": message_id,
             "text": text,
             "lesson": lesson,
+            "owner": owner,
+            "manifest": record,
         }
         self._save(data)
 
@@ -105,7 +109,18 @@ async def send(channel: Any, entry: dict) -> None:
         channel_id=entry["channel"],
         fail_if_not_exists=False,
     )
-    await channel.send(entry["text"], reference=ref, mention_author=False)
+    view = view_for(entry.get("owner", 0), entry.get("manifest", ""))
+    if view is None:
+        await channel.send(entry["text"], reference=ref, mention_author=False)
+    else:
+        await channel.send(entry["text"], reference=ref, mention_author=False, view=view)
+
+
+def view_for(owner: int, manifest: str) -> Any:
+    """一覧に付けるボタン (発音を聞く・説明を頼む). 人と記録が分からない古い一覧には付けない."""
+    if list_view is None or not owner or not manifest:
+        return None
+    return list_view(owner, manifest)
 
 
 async def release(channel: Any, entries: list[dict]) -> None:
@@ -165,4 +180,8 @@ class NewListButton(
                 "一覧はもう出ています。", ephemeral=True
             )
             return
-        await interaction.response.send_message(entry["text"])
+        view = view_for(self.owner, self.manifest)
+        if view is None:
+            await interaction.response.send_message(entry["text"])
+        else:
+            await interaction.response.send_message(entry["text"], view=view)

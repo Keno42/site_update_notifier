@@ -34,7 +34,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncContextManager, Awaitable, Callable
 
 import discord
 
@@ -613,6 +613,103 @@ class OwnerButtons(discord.ui.View):
         return True
 
 
+def preview_text(record: "Record", item_id: str) -> str | None:
+    """「発音を聞く」で読み上げる文: レッスンで実際に言った文 (学習者の形のまま), なければ表現そのもの. 型 (〜{inf}) しかなければ None:
+    作った例は読まない."""
+    sents = lesson_sentences(record, item_id, limit=1)
+    if sents:
+        return sents[0]
+    target = (record.items().get(item_id) or {}).get("target") or ""
+    return target if target and "{" not in target else None
+
+
+class PreviewView(discord.ui.View):
+    """新出表現の発音を確かめる (レッスンを聞く前でも): 表現を選び、「🔊 発音を聞く」で読み上げる文を聞く (押すたびに)、
+    「発音の説明を頼む」で表現と「発音」が選ばれた #180 の頼み (質問欄は任意). 結果・負荷・予定には数えない."""
+
+    def __init__(
+        self,
+        record: "Record",
+        owner_id: int,
+        speak: Callable[[str], AsyncContextManager[Path]] | None,
+        request: Callable[[discord.Interaction, dict], Awaitable[None]] | None,
+    ) -> None:
+        super().__init__(timeout=1800)
+        self.record = record
+        self.owner_id = owner_id
+        self.speak = speak
+        self.request = request
+        self.item = ""
+        self.kind = "pronunciation"
+        items = record.new_items()[:25]
+        self.select: discord.ui.Select = discord.ui.Select(
+            placeholder="発音を確かめたい表現",
+            options=[
+                discord.SelectOption(label=_clip(i.get("target") or i["id"]), value=i["id"], description=_clip(i.get("meaning") or "") or None)
+                for i in items
+            ],
+            min_values=1,
+            max_values=1,
+        )
+        self.select.callback = self._chose  # type: ignore[method-assign]
+        self.add_item(self.select)
+        if speak is not None:
+            play: discord.ui.Button = discord.ui.Button(label="🔊 発音を聞く", style=discord.ButtonStyle.primary)
+            play.callback = self._play  # type: ignore[method-assign]
+            self.add_item(play)
+        if request is not None:
+            ask: discord.ui.Button = discord.ui.Button(label="発音の説明を頼む", style=discord.ButtonStyle.secondary)
+            ask.callback = self._ask  # type: ignore[method-assign]
+            self.add_item(ask)
+
+    def text(self) -> str:
+        lines = [f"**{self.record.title} の新出表現：発音の確認**", "表現を選んでください。聞くことも頼むことも、練習の結果や予定には数えません。"]
+        if self.item:
+            said = preview_text(self.record, self.item)
+            lines.append(f"読み上げる文：「{said}」" if said else "この表現は、読み上げられる文がレッスンの記録にありません（型だけの表現です）。")
+        if self.request is not None:
+            lines.append("「発音の説明を頼む」の回答はこのチャンネルに投稿されます（チャンネルのほかの人にも見えます）。")
+        return "\n".join(lines)
+
+    def stop(self) -> None:  # SupportModal stops its view; this one stays open for another expression
+        pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("このレッスンを受けた人だけが使えます。", ephemeral=True)
+            return False
+        return True
+
+    @answers_on_failure(CHOOSE_FAILED)
+    async def _chose(self, interaction: discord.Interaction) -> None:
+        self.item = self.select.values[0]
+        await interaction.response.edit_message(content=self.text(), view=self)
+
+    @answers_on_failure(SEND_FAILED)
+    async def _play(self, interaction: discord.Interaction) -> None:
+        if not self.item:
+            await interaction.response.send_message("先に表現を選んでください。", ephemeral=True)
+            return
+        said = preview_text(self.record, self.item)
+        if said is None or self.speak is None:
+            await interaction.response.send_message("この表現は、読み上げられる文がレッスンの記録にありません。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)  # the TTS may take longer than Discord's 3 seconds
+        try:
+            async with self.speak(said) as mp3:
+                await interaction.followup.send(f"🔊「{said}」", file=discord.File(mp3, filename="pronunciation.mp3"), ephemeral=True)
+        except Exception:
+            logging.exception("新出表現の音声を作れませんでした")
+            await interaction.followup.send("音声を作れませんでした。もう一度「🔊 発音を聞く」を押してください。", ephemeral=True)
+
+    @answers_on_failure(SEND_FAILED)
+    async def _ask(self, interaction: discord.Interaction) -> None:
+        if not self.item:
+            await interaction.response.send_message("先に表現を選んでください。", ephemeral=True)
+            return
+        await interaction.response.send_modal(SupportModal(self))  # type: ignore[arg-type]
+
+
 def form_text(
     record: Record, answers: Answers | None = None, compact: bool = False
 ) -> str:
@@ -884,6 +981,7 @@ class Feedback:
         report_feedback: Callable[[str, int, list[str], str | None], Awaitable[bool]] | None = None,
         explain: Callable[[list[dict]], Awaitable[str]] | None = None,
         wants_explain: Callable[[str], bool] = lambda name: False,
+        speak: Callable[[str], AsyncContextManager[Path]] | None = None,
     ) -> None:
         self.users = users
         self.user_dir = user_dir
@@ -898,6 +996,7 @@ class Feedback:
         self.wants_explain = wants_explain
         self.explanations: set[asyncio.Task] = set()  # the explanations still waiting for the LLM (held so they are not collected while they run)
         self.submitted: set[tuple[str, str]] = set()  # (user, manifest) whose feedback was sent: a help request's answer says whether it still waits
+        self.speak = speak  # a sentence → its mp3 (the reading cards' TTS): the new-expression list's «🔊 発音を聞く»
 
     def ledger(self, name: str) -> Ledger:
         return Ledger(self.user_dir(name))
@@ -1075,6 +1174,24 @@ class Feedback:
         task.add_done_callback(self.explanations.discard)
 
     @answers_on_failure()
+    async def open_preview(self, interaction: discord.Interaction, ref: str | int | None = None) -> None:
+        """新出表現の一覧の「発音を聞く・説明を頼む」: 表現を選んで、レッスンの文を聞く (何度でも)、発音の説明を頼む (#180 の頼み方).
+        聞くことも頼むことも、結果・負荷・予定には数えない. 何も記録しない (頼んだ解説は support_requests.jsonl に)."""
+        found = await self._record(interaction, ref)
+        if found is None:
+            return
+        name, _, record = found
+        if not record.new_items():
+            await interaction.response.send_message("このレッスンには新出表現がありません。", ephemeral=True)
+            return
+
+        async def request(inter: discord.Interaction, req: dict) -> None:
+            await self._support(inter, name, record, req)
+
+        view = PreviewView(record, interaction.user.id, self.speak, request if self.explain else None)
+        await interaction.response.send_message(view.text(), view=view, ephemeral=True)
+
+    @answers_on_failure()
     async def open_form(
         self, interaction: discord.Interaction, ref: str | int | None = None
     ) -> None:
@@ -1178,6 +1295,43 @@ class FeedbackButton(
             return
         if FeedbackButton.handler is not None:
             await FeedbackButton.handler.open_form(interaction, self.manifest)
+
+
+class PreviewButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"lla-preview:(?P<owner>[0-9]+):(?P<manifest>lesson-[0-9]+(?:\.[0-9]+)?)",
+):
+    """新出表現の一覧の「発音を聞く・説明を頼む」. custom_id にレッスンを受けた人と記録の ID を持つので、bot を再起動した後でも、
+    古いレッスンの一覧でも押せる. 押せるのはその人だけ."""
+
+    handler: "Feedback | None" = None
+
+    def __init__(self, owner: int, manifest: str) -> None:
+        super().__init__(
+            discord.ui.Button(label="🔊 発音を聞く・説明を頼む", style=discord.ButtonStyle.secondary, custom_id=f"lla-preview:{owner}:{manifest}")
+        )
+        self.owner = owner
+        self.manifest = manifest
+
+    @classmethod
+    async def from_custom_id(  # type: ignore[override]
+        cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str]
+    ) -> "PreviewButton":
+        return cls(int(match["owner"]), match["manifest"])
+
+    @answers_on_failure()
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner or PreviewButton.handler is None:
+            await interaction.response.send_message("このレッスンを受けた人だけが押せます。", ephemeral=True)
+            return
+        await PreviewButton.handler.open_preview(interaction, self.manifest)
+
+
+def preview_view(owner: int, manifest: str) -> discord.ui.View:
+    """新出表現の一覧に付ける view (newlist.list_view)."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(PreviewButton(owner, manifest))
+    return view
 
 
 def feedback_view(
