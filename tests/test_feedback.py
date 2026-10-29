@@ -731,87 +731,171 @@ class ReasonAndExplainTests(unittest.TestCase):
 
 
 class SupportRequestTests(unittest.TestCase):
-    """#179: help on an expression is asked for apart from «練習が足りなかった»: the request is saved on its own, answered at once, explained by the
-    LLM when it can, and changes no outcome, no load and no schedule."""
+    """#179: help on an expression is asked for apart from «練習が足りなかった»: one expression and one kind of help a request (review of #180:
+    two expressions × two kinds asked four explanations), with an optional question; saved on its own, answered at once, explained by the LLM,
+    with a follow-up and a retry; no outcome, no load and no schedule changes."""
 
-    def _run(self, items, kinds, fail=False, explain_on=True, then_submit=True):
+    def _run(self, item, kind, question="", replies=("**Ég var að.** …",), explain_on=True, then_submit=True, submit_first=False, follow=None):
         sent, asked, log = [], [], []
+        replies = list(replies)
         with tempfile.TemporaryDirectory() as td:
             ledger = saved(Path(td))
 
             async def explain(messages):
                 asked.append(messages)
-                if fail:
-                    raise RuntimeError("down")
-                return "**Takk fyrir.** …"
+                reply = replies.pop(0) if replies else "…"
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
 
             class Channel:
                 async def send(self, content=None, **kw):
-                    sent.append(content)
+                    sent.append((content, kw.get("view")))
 
             fb = Feedback({1: "yuki"}, lambda n: Path(td) / n, 0, lambda: NOW, explain=explain if explain_on else None, wants_explain=lambda name: False)
-            requested = []
+            acks = []
 
             async def run():
                 inter = interaction(log)
                 inter.channel = Channel()
                 await fb.open_form(inter)
                 kw = log[-1][2]
+                if submit_first:
+                    await submit_form(self, log, kw, "right")
                 helpme = [c for c in kw["view"].children if getattr(c, "label", "") == "解説を頼む"]
                 if not helpme:
                     return
                 await helpme[0].callback(interaction(log))
                 support = log[-1][2]["view"]
                 selects = [c for c in support.children if hasattr(c, "options")]
-                selects[0]._values = items
-                await selects[0].callback(interaction(log))
-                selects[1]._values = kinds
-                await selects[1].callback(interaction(log))
+                if item:
+                    selects[0]._values = [item]
+                    await selects[0].callback(interaction(log))
+                if kind:
+                    selects[1]._values = [kind]
+                    await selects[1].callback(interaction(log))
                 ask = next(c for c in support.children if getattr(c, "label", "") == "頼む")
+                await ask.callback(interaction(log))
+                if log[-1][0] != "modal":
+                    acks.append(log[-1])
+                    return
+                modal = log[-1][2]["modal"]
+                modal.question._value = question
                 inter2 = interaction(log)
                 inter2.channel = Channel()
-                await ask.callback(inter2)
-                requested.append(log[-1])
+                await modal.on_submit(inter2)
+                acks.append(log[-1])
                 await asyncio.gather(*fb.explanations)
-                if then_submit:
+                if follow and sent and sent[-1][1] is not None:
+                    button = next(c for c in sent[-1][1].children if c.label == follow)
+                    inter3 = interaction(log)
+                    inter3.channel = Channel()
+                    await button.callback(inter3)
+                    await asyncio.gather(*fb.explanations)
+                if then_submit and not submit_first:
                     await submit_form(self, log, kw, "right")
 
             asyncio.run(run())
             path = ledger.user_dir / "support_requests.jsonl"
             lines = [json.loads(x) for x in path.read_text("utf-8").splitlines()] if path.exists() else []
-            return lines, ledger.events(), sent, asked, requested, log
+            return lines, ledger.events(), sent, asked, acks, log
 
-    def test_a_request_is_saved_answered_and_explained_without_touching_the_feedback(self):
-        lines, events, sent, asked, requested, _ = self._run(["takk_fyrir", "eg_var_ad_inf"], ["pronunciation", "grammar"])
+    @staticmethod
+    def labels(view):
+        return [c.label for c in view.children] if view is not None else []
+
+    def test_one_expression_one_kind_and_a_question_are_asked_and_answered(self):
+        lines, events, sent, asked, acks, _ = self._run("eg_var_ad_inf", "pronunciation", question="var の発音")
         (line,) = lines
-        self.assertEqual(line["lesson"], 12)
-        self.assertEqual(line["requests"], [
-            {"kind": "pronunciation", "item_id": "takk_fyrir"}, {"kind": "grammar", "item_id": "takk_fyrir"},
-            {"kind": "pronunciation", "item_id": "eg_var_ad_inf"}, {"kind": "grammar", "item_id": "eg_var_ad_inf"},
-        ])  # fmt: skip
-        self.assertEqual(requested[0][0], "edit")
-        self.assertIn("解説を頼みました", requested[0][1])
+        self.assertEqual(line["requests"], [{"kind": "pronunciation", "item_id": "eg_var_ad_inf", "question": "var の発音"}])
+        ack = acks[0][1]
+        self.assertIn("受け付けました（Ég var að {inf}.・発音）", ack)
+        self.assertIn("このチャンネルに投稿します", ack)
+        self.assertIn("フィードバックはまだ送信されていません", ack)
+        self.assertEqual(self.labels(acks[0][2]["view"]), ["別の表現も質問する"])
         user = asked[0][-1]["content"]
-        self.assertIn("Takk fyrir {thing}.（〜をありがとう。）: 発音", user)
-        self.assertIn("Ég var að {inf}.", user)
-        self.assertEqual(sent, ["**レッスン 12 で頼んだ解説**\n**Takk fyrir.** …"])
+        self.assertIn("表現: Ég var að {inf}.（ちょうど〜していたところです。）", user)
+        self.assertIn("種類: 発音", user)
+        self.assertIn("学習者の質問: var の発音", user)
+        self.assertNotIn("Takk", user, "one expression a request")
+        content, view = sent[0]
+        self.assertEqual(content, "**レッスン 12 で頼んだ解説：Ég var að {inf}.・発音**\n**Ég var að.** …")
+        self.assertEqual(self.labels(view), ["もっと詳しく", "別の説明で", "別の表現を質問する"])
         (event,) = events
         self.assertEqual((event["sooner"], event["load"], event["load_effective"]), ([], "right", "right"), "a request is no outcome and no load")
 
-    def test_a_failed_explanation_keeps_the_request_and_says_so(self):
-        lines, _, sent, _, _, _ = self._run(["takk_fyrir"], ["pronunciation"], fail=True, then_submit=False)
-        self.assertEqual(len(lines), 1)
-        self.assertEqual(sent, ["頼まれた解説を作れませんでした。頼んだことは記録してあります。"])
+    def test_the_intro_says_where_the_answer_goes(self):
+        from src.feedback import SUPPORT_INTRO
+
+        _, _, _, _, _, log = self._run("eg_var_ad_inf", "grammar", then_submit=False)
+        intro = next(entry for entry in log if entry[0] == "send" and entry[1] == SUPPORT_INTRO)
+        self.assertIn("このチャンネルに投稿されます", intro[1])
+        self.assertIn("練習の予定や負荷には数えません", intro[1])
+
+    def test_a_follow_up_sends_the_previous_answer(self):
+        lines, _, sent, asked, _, _ = self._run("eg_var_ad_inf", "grammar", replies=("first", "second"), then_submit=False, follow="もっと詳しく")
+        self.assertEqual([ln["requests"][0].get("follow") for ln in lines], [None, "more"])
+        user = asked[1][-1]["content"]
+        self.assertIn("頼み: もっと詳しく", user)
+        self.assertIn("前の解説:\nfirst", user)
+        self.assertEqual(sent[1][0], "**レッスン 12 で頼んだ解説：Ég var að {inf}.・文法・使い方**\nsecond")
+
+    def test_a_failed_or_empty_explanation_offers_a_retry(self):
+        for reply in (RuntimeError("down"), "  "):
+            lines, _, sent, _, _, _ = self._run("takk_fyrir", "pronunciation", replies=(reply, "ok"), then_submit=False, follow="再試行")
+            self.assertEqual(len(lines), 2, "the retry is a request of its own")
+            content, view = sent[0]
+            self.assertIn("作れませんでした（Takk fyrir {thing}.・発音）", content)
+            self.assertIn("「再試行」で頼み直せます", content)
+            self.assertNotIn("自動", content)
+            self.assertEqual(self.labels(view), ["再試行"])
+            self.assertTrue(sent[1][0].endswith("\nok"), "the retry is answered")
+
+    def test_another_expression_may_be_named_in_the_question(self):
+        lines, _, _, asked, acks, _ = self._run("_other", "grammar", then_submit=False)
+        self.assertEqual((lines, asked), ([], []), "nothing named: nothing asked")
+        self.assertIn("質問欄に表現と知りたいことを書いて", acks[0][1])
+        lines, _, _, asked, acks, _ = self._run("_other", "grammar", question="Gaman að spjalla の spjalla", then_submit=False)
+        self.assertEqual(lines[0]["requests"][0]["item_id"], "_other")
+        self.assertIn("学習者の質問: Gaman að spjalla の spjalla", asked[0][-1]["content"])
+        self.assertIn("選択肢にない表現・文法・使い方", acks[0][1])
+
+    def test_after_the_feedback_the_answer_does_not_say_it_still_waits(self):
+        _, _, _, _, acks, _ = self._run("takk_fyrir", "grammar", submit_first=True)
+        self.assertNotIn("まだ送信されていません", acks[0][1])
 
     def test_no_button_without_an_explainer(self):
-        lines, _, sent, asked, requested, log = self._run(["takk_fyrir"], ["grammar"], explain_on=False, then_submit=False)
-        self.assertEqual((lines, sent, asked, requested), ([], [], [], []))
+        lines, _, sent, asked, acks, log = self._run("takk_fyrir", "grammar", explain_on=False, then_submit=False)
+        self.assertEqual((lines, sent, asked, acks), ([], [], [], []))
         self.assertFalse([c for c in log[0][2]["view"].children if getattr(c, "label", "") == "解説を頼む"])
 
     def test_nothing_is_asked_until_an_item_and_a_kind_are_chosen(self):
-        lines, _, _, asked, requested, _ = self._run([], ["grammar"], then_submit=False)
-        self.assertEqual((lines, asked), ([], []))
-        self.assertIn("選んでから", requested[0][1])
+        for item, kind in (("", "grammar"), ("takk_fyrir", "")):
+            lines, _, _, asked, acks, _ = self._run(item, kind, then_submit=False)
+            self.assertEqual((lines, asked), ([], []))
+            self.assertIn("選んでから", acks[0][1])
+
+    def test_the_lesson_sentence_stands_for_a_pattern(self):
+        from src.feedback import Record, lesson_sentences, support_messages
+
+        plan = dict(PLAN, exercises=[
+            {"kind": "intro", "items": ["eg_var_ad_inf"], "label": "new pattern: Ég var að {inf}."},
+            {"kind": "recall", "items": ["eg_var_ad_inf", "borda"], "label": "meaning: Ég var að borða."},
+            {"kind": "recall", "items": ["eg_var_ad_inf"], "label": "meaning: Ég var að borða."},
+        ])  # fmt: skip
+        record = Record(Path("."), {"lesson": 12}, plan)
+        self.assertEqual(lesson_sentences(record, "eg_var_ad_inf"), ["Ég var að borða."])
+        self.assertIn("レッスンで使った文: Ég var að borða.", support_messages(record, {"kind": "grammar", "item_id": "eg_var_ad_inf"})[-1]["content"])
+
+    def test_the_automatic_explanation_skips_an_expression_already_asked_about(self):
+        from src.feedback import Answers, Record, explain_messages
+
+        record = Record(Path("."), {"lesson": 12}, PLAN)
+        answers = Answers(sooner=["takk_fyrir", "eg_var_ad_inf"], load="right")
+        user = explain_messages(record, answers, skip={"takk_fyrir"})[-1]["content"]
+        self.assertNotIn("Takk fyrir", user)
+        self.assertIn("Ég var að", user)
+        self.assertEqual(explain_messages(record, answers, skip={"takk_fyrir", "eg_var_ad_inf"}), [])
 
 
 class ReviewedItemsTests(unittest.TestCase):
