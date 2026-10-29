@@ -50,6 +50,10 @@ from .interaction import (
 
 SCHEMA = 1
 FEEDBACK_FILE = "lesson_feedback.jsonl"
+# #179: the help the learner asked for, one line per request; kept apart from the feedback ledger, so a request changes no outcome, no load and
+# no schedule
+SUPPORT_FILE = "support_requests.jsonl"
+SUPPORT_KINDS = {"pronunciation": "発音", "grammar": "文法・使い方"}
 MANIFESTS = "lesson_manifests"
 LESSON_FILES = (".plan.json", ".script.json", ".transcript.md")
 LEARNER_BEFORE = "learner.before.json"
@@ -451,6 +455,88 @@ def explain_messages(record: "Record", answers: "Answers") -> list[dict]:
     return [{"role": "system", "content": EXPLAIN_SYSTEM}, {"role": "user", "content": user}]
 
 
+SUPPORT_SYSTEM = (
+    "あなたは、アイスランド旅行の準備をしている日本語話者の大人に、アイスランド語を教える先生です。"
+    "学習者が頼んだ表現ごとに、頼まれた種類の解説だけを日本語で短く書いてください。"
+    "「発音」なら、音のつながり、強勢、日本語話者が間違えやすい音を一言ずつ。カタカナの読みは添えないでください（母音が足されて別の音になります）。"
+    "「文法・使い方」なら、文の組み立て（どの語がどの形で、なぜその形か）と、別の言い方か使う場面を一つ。"
+    "全体で 1200 字以内、見出しは表現そのもの。"
+)
+
+
+def support_messages(record: "Record", requests: list[dict]) -> list[dict]:
+    """頼まれた解説 (#179) を LLM に頼む messages: 表現と意味と、表現ごとに頼まれた種類だけを送る. 頼みがなければ []."""
+    items = record.items()
+    lines = []
+    for r in requests:
+        it = items.get(r["item_id"]) or {"id": r["item_id"]}
+        lines.append(f"・{it.get('target') or it['id']}（{it.get('meaning') or ''}）: {SUPPORT_KINDS.get(r['kind'], r['kind'])}")
+    if not lines:
+        return []
+    return [{"role": "system", "content": SUPPORT_SYSTEM}, {"role": "user", "content": "頼まれた解説:\n" + "\n".join(lines)}]
+
+
+class SupportView(discord.ui.View):
+    """解説を頼む (#179): 表現 (新出・復習) と種類 (発音・文法) を選んで「頼む」. 練習の予定にも負荷にも数えない."""
+
+    def __init__(self, record: "Record", owner_id: int, request: Callable[[discord.Interaction, list[dict]], Awaitable[None]]) -> None:
+        super().__init__(timeout=900)
+        self.owner_id = owner_id
+        self.request = request
+        self.items: list[str] = []
+        self.kinds: list[str] = []
+        choices = record.new_items()[:25]
+        choices += record.reviewed_choices(25 - len(choices))
+        self.item_select: discord.ui.Select = discord.ui.Select(
+            placeholder="解説してほしい表現（複数可）",
+            options=[
+                discord.SelectOption(label=_clip(i.get("target") or i["id"]), value=i["id"], description=_clip(i.get("meaning") or "") or None)
+                for i in choices
+            ],
+            min_values=1,
+            max_values=len(choices),
+        )
+        self.kind_select: discord.ui.Select = discord.ui.Select(
+            placeholder="解説の種類（複数可）",
+            options=[discord.SelectOption(label=v, value=k) for k, v in SUPPORT_KINDS.items()],
+            min_values=1,
+            max_values=len(SUPPORT_KINDS),
+        )
+
+        @answers_on_failure(CHOOSE_FAILED)
+        async def chose_items(interaction: discord.Interaction) -> None:
+            self.items = list(self.item_select.values)
+            await interaction.response.defer()
+
+        @answers_on_failure(CHOOSE_FAILED)
+        async def chose_kinds(interaction: discord.Interaction) -> None:
+            self.kinds = list(self.kind_select.values)
+            await interaction.response.defer()
+
+        self.item_select.callback = chose_items  # type: ignore[method-assign]
+        self.kind_select.callback = chose_kinds  # type: ignore[method-assign]
+        self.add_item(self.item_select)
+        self.add_item(self.kind_select)
+        ask: discord.ui.Button = discord.ui.Button(label="頼む", style=discord.ButtonStyle.primary)
+        ask.callback = self._ask  # type: ignore[method-assign]
+        self.add_item(ask)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("解説はレッスンを受けた人だけが頼めます。", ephemeral=True)
+            return False
+        return True
+
+    @answers_on_failure(SEND_FAILED)
+    async def _ask(self, interaction: discord.Interaction) -> None:
+        if not self.items or not self.kinds:
+            await interaction.response.send_message("表現と解説の種類を選んでから「頼む」を押してください。", ephemeral=True)
+            return
+        requests = [{"kind": k, "item_id": i} for i in self.items for k in self.kinds]
+        self.stop()
+        await self.request(interaction, requests)
+
+
 def form_text(
     record: Record, answers: Answers | None = None, compact: bool = False
 ) -> str:
@@ -559,11 +645,13 @@ class FeedbackView(discord.ui.View):
         owner_id: int,
         submit: Callable[[Answers], Awaitable[None]],
         compact: bool = False,
+        request_support: Callable[[discord.Interaction, list[dict]], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(timeout=900)
         self.record = record
         self.owner_id = owner_id
         self.submit = submit
+        self.request_support = request_support
         self.answers = Answers()
         new = record.new_items()[:25]
         reviewed = record.reviewed_choices(25 - len(new))
@@ -615,6 +703,11 @@ class FeedbackView(discord.ui.View):
             label="送信", style=discord.ButtonStyle.primary, row=4
         )
         send.callback = self._send  # type: ignore[method-assign]
+        if request_support is not None and (new or reviewed):
+            # #179: help on an expression, asked for apart from «練習が足りなかった»: no extra practice, no load
+            helpme: discord.ui.Button = discord.ui.Button(label="解説を頼む", row=4)
+            helpme.callback = self._help  # type: ignore[method-assign]
+            self.add_item(helpme)
         if compact:
             self.add_item(send)
             return
@@ -672,6 +765,15 @@ class FeedbackView(discord.ui.View):
     @answers_on_failure(NOTE_FAILED)
     async def _note(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(NoteModal(self))
+
+    @answers_on_failure(CHOOSE_FAILED)
+    async def _help(self, interaction: discord.Interaction) -> None:
+        assert self.request_support is not None
+        await interaction.response.send_message(
+            "解説してほしい表現と種類を選んでください（練習の予定や負荷には数えません）。",
+            view=SupportView(self.record, self.owner_id, self.request_support),
+            ephemeral=True,
+        )
 
     @answers_on_failure(SEND_FAILED)
     async def _send(self, interaction: discord.Interaction) -> None:
@@ -805,6 +907,37 @@ class Feedback:
         except Exception:
             logging.exception("フィードバックの解説を出せませんでした")
 
+    async def _support(self, interaction: discord.Interaction, name: str, record: Record, requests: list[dict]) -> None:
+        """頼まれた解説 (#179): 記録してすぐに受け付けたと答え、解説は LLM が返したらチャンネルに出す. 練習の予定にも負荷にも数えない
+        (フィードバックの記録とは別のファイル). 解説に失敗しても、頼んだことの記録は残る."""
+        line = {
+            "schema": SCHEMA, "ts": self.now().isoformat(timespec="seconds"), "user": name,
+            "lesson": record.lesson, "manifest": record.id, "requests": requests,
+        }  # fmt: skip
+        path = self.ledger(name).user_dir / SUPPORT_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        await interaction.response.edit_message(content="解説を頼みました。できたらこのチャンネルに届きます。", view=None)
+        channel = getattr(interaction, "channel", None)
+
+        async def explain() -> None:
+            try:
+                text = (await self.explain(support_messages(record, requests))).strip()  # type: ignore[misc]
+                if text and channel is not None:
+                    await channel.send(_clip(f"**{record.title} で頼んだ解説**\n{text}", MESSAGE_MAX))
+            except Exception:
+                logging.exception("頼まれた解説を出せませんでした")
+                if channel is not None:
+                    try:
+                        await channel.send("頼まれた解説を作れませんでした。頼んだことは記録してあります。")
+                    except Exception:
+                        logging.exception("解説の失敗も知らせられませんでした")
+
+        task = asyncio.create_task(explain())
+        self.explanations.add(task)
+        task.add_done_callback(self.explanations.discard)
+
     @answers_on_failure()
     async def open_form(
         self, interaction: discord.Interaction, ref: str | int | None = None
@@ -827,10 +960,13 @@ class Feedback:
             self.explanations.add(task)
             task.add_done_callback(self.explanations.discard)
 
+        async def request_support(inter: discord.Interaction, requests: list[dict]) -> None:
+            await self._support(inter, name, record, requests)
+
         compact = lesson_minutes(record) < usersettings.COMPACT_FEEDBACK_BELOW
         await interaction.response.send_message(
             form_text(record, compact=compact),
-            view=FeedbackView(record, interaction.user.id, submit, compact=compact),
+            view=FeedbackView(record, interaction.user.id, submit, compact=compact, request_support=request_support if self.explain else None),
             ephemeral=True,
         )
 

@@ -730,6 +730,90 @@ class ReasonAndExplainTests(unittest.TestCase):
             self.assertEqual(explain_messages(record, Answers()), [])
 
 
+class SupportRequestTests(unittest.TestCase):
+    """#179: help on an expression is asked for apart from «練習が足りなかった»: the request is saved on its own, answered at once, explained by the
+    LLM when it can, and changes no outcome, no load and no schedule."""
+
+    def _run(self, items, kinds, fail=False, explain_on=True, then_submit=True):
+        sent, asked, log = [], [], []
+        with tempfile.TemporaryDirectory() as td:
+            ledger = saved(Path(td))
+
+            async def explain(messages):
+                asked.append(messages)
+                if fail:
+                    raise RuntimeError("down")
+                return "**Takk fyrir.** …"
+
+            class Channel:
+                async def send(self, content=None, **kw):
+                    sent.append(content)
+
+            fb = Feedback({1: "yuki"}, lambda n: Path(td) / n, 0, lambda: NOW, explain=explain if explain_on else None, wants_explain=lambda name: False)
+            requested = []
+
+            async def run():
+                inter = interaction(log)
+                inter.channel = Channel()
+                await fb.open_form(inter)
+                kw = log[-1][2]
+                helpme = [c for c in kw["view"].children if getattr(c, "label", "") == "解説を頼む"]
+                if not helpme:
+                    return
+                await helpme[0].callback(interaction(log))
+                support = log[-1][2]["view"]
+                selects = [c for c in support.children if hasattr(c, "options")]
+                selects[0]._values = items
+                await selects[0].callback(interaction(log))
+                selects[1]._values = kinds
+                await selects[1].callback(interaction(log))
+                ask = next(c for c in support.children if getattr(c, "label", "") == "頼む")
+                inter2 = interaction(log)
+                inter2.channel = Channel()
+                await ask.callback(inter2)
+                requested.append(log[-1])
+                await asyncio.gather(*fb.explanations)
+                if then_submit:
+                    await submit_form(self, log, kw, "right")
+
+            asyncio.run(run())
+            path = ledger.user_dir / "support_requests.jsonl"
+            lines = [json.loads(x) for x in path.read_text("utf-8").splitlines()] if path.exists() else []
+            return lines, ledger.events(), sent, asked, requested, log
+
+    def test_a_request_is_saved_answered_and_explained_without_touching_the_feedback(self):
+        lines, events, sent, asked, requested, _ = self._run(["takk_fyrir", "eg_var_ad_inf"], ["pronunciation", "grammar"])
+        (line,) = lines
+        self.assertEqual(line["lesson"], 12)
+        self.assertEqual(line["requests"], [
+            {"kind": "pronunciation", "item_id": "takk_fyrir"}, {"kind": "grammar", "item_id": "takk_fyrir"},
+            {"kind": "pronunciation", "item_id": "eg_var_ad_inf"}, {"kind": "grammar", "item_id": "eg_var_ad_inf"},
+        ])  # fmt: skip
+        self.assertEqual(requested[0][0], "edit")
+        self.assertIn("解説を頼みました", requested[0][1])
+        user = asked[0][-1]["content"]
+        self.assertIn("Takk fyrir {thing}.（〜をありがとう。）: 発音", user)
+        self.assertIn("Ég var að {inf}.", user)
+        self.assertEqual(sent, ["**レッスン 12 で頼んだ解説**\n**Takk fyrir.** …"])
+        (event,) = events
+        self.assertEqual((event["sooner"], event["load"], event["load_effective"]), ([], "right", "right"), "a request is no outcome and no load")
+
+    def test_a_failed_explanation_keeps_the_request_and_says_so(self):
+        lines, _, sent, _, _, _ = self._run(["takk_fyrir"], ["pronunciation"], fail=True, then_submit=False)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(sent, ["頼まれた解説を作れませんでした。頼んだことは記録してあります。"])
+
+    def test_no_button_without_an_explainer(self):
+        lines, _, sent, asked, requested, log = self._run(["takk_fyrir"], ["grammar"], explain_on=False, then_submit=False)
+        self.assertEqual((lines, sent, asked, requested), ([], [], [], []))
+        self.assertFalse([c for c in log[0][2]["view"].children if getattr(c, "label", "") == "解説を頼む"])
+
+    def test_nothing_is_asked_until_an_item_and_a_kind_are_chosen(self):
+        lines, _, _, asked, requested, _ = self._run([], ["grammar"], then_submit=False)
+        self.assertEqual((lines, asked), ([], []))
+        self.assertIn("選んでから", requested[0][1])
+
+
 class ReviewedItemsTests(unittest.TestCase):
     """Lesson 28 of language-learning-audio: a reviewed item the learner could not say in the lesson could not be reported; only the new items were in
     the select. The reviewed items the lesson asked are there too, after the new ones, and go to the same report."""
