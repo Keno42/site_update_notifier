@@ -255,6 +255,7 @@ class LessonConfig:
         sooner: list[str] | None = None,
         load: str | None = None,
         gaps: dict[str, int] | None = None,
+        sooner_reasons: list[str] | None = None,
     ) -> list[str]:
         """lesson を省くと最新のレッスンへの報告になる. 振り返りでは出題元のレッスンを
         必ず渡す (flush_reports). 迷った / 言えたも送る: 音声レッスン側は言えなかった・
@@ -270,6 +271,10 @@ class LessonConfig:
         ):
             if ids:
                 args += [flag, ",".join(ids)]
+        if sooner and sooner_reasons:
+            # フォームで選んだ理由 (language-learning-audio #444): 「聞き取りにくい」は聞き取りの支援、「発音しにくい」は発音の手本.
+            # 理由がなければ渡さない (音声レッスン側は従来どおり発音の手本)
+            args += ["--sooner-reasons", ",".join(sooner_reasons)]
         if load:
             args += ["--load", load]
         if gaps:
@@ -500,7 +505,7 @@ class Lessons:
         self.busy: dict[str, float] = {}
         # 進行中に届いたフィードバックの報告 (名前 → [(レッスン, 項目, 負荷)]). learner.json には鍵がないので、
         # 生成と並べて走らせず、/lesson が終わってから送る (language-learning-audio #218)
-        self.deferred: dict[str, list[tuple[int, list[str], str | None]]] = {}
+        self.deferred: dict[str, list[tuple[int, list[str], str | None, list[str]]]] = {}  # (lesson, sooner, load, sooner_reasons)
 
     def mark_generating(self, name: str, minutes: float) -> None:
         path = self.cfg.generating_path(name)
@@ -575,8 +580,8 @@ class Lessons:
         """進行中に届いたフィードバックの報告を送る. 送れなければ残し (次の機会に送り直す)、channel があれば知らせる:
         即時の失敗と同じく、/lesson-feedback から送り直せば反映される."""
         pending = self.deferred.pop(name, [])
-        for k, (lesson, ids, load) in enumerate(pending):
-            if not await self._send_feedback(name, lesson, ids, load):
+        for k, (lesson, ids, load, reasons) in enumerate(pending):
+            if not await self._send_feedback(name, lesson, ids, load, reasons):
                 self.deferred[name] = pending[k:] + self.deferred.get(name, [])
                 if channel is not None:
                     try:
@@ -1005,33 +1010,34 @@ class Lessons:
         return True
 
     async def report_feedback(
-        self, name: str, lesson: int, ids: list[str], load: str | None
+        self, name: str, lesson: int, ids: list[str], load: str | None, reasons: list[str] | None = None
     ) -> bool:
         """フィードバックの送信で選んだことを、1 回の report で音声レッスンへ報告する (language-learning-audio #218):
         「練習が足りなかった・覚えていない」の項目は早めにもう一度出す依頼 (--sooner, #81. 結果 (迷った・言えなかった)
         としては数えず、埋め込みの項目の判定や「報告済み」にも触れない. #222) で、負荷 (--load) はペースの入力.
         負荷だけの報告も「報告済み」にしない. flush_reports には載せない: 自動モードや、振り返りがそのレッスンから
-        何も問わないときは、その道はそのレッスンを一度も報告しない.
+        何も問わないときは、その道はそのレッスンを一度も報告しない. reasons はフォームの「難しかった理由」で、
+        --sooner-reasons として渡す (language-learning-audio #444: 聞き取りにくいなら聞き取りの支援).
 
         /lesson が進行中なら送らずに取っておき、終わってから送る (learner.json に鍵はなく、生成と並べて走らせると
         書き込みが食い違う). 受け付けたか (取っておいた分も True)."""
         if not ids and not load:
             return True
         if self.is_busy(name):
-            self.deferred.setdefault(name, []).append((lesson, list(ids), load))
+            self.deferred.setdefault(name, []).append((lesson, list(ids), load, list(reasons or [])))
             return True
         # 送っている間も busy にする: その間に始まった /lesson (自動モードは振り返りなしで生成に進む) が、
         # 送信中の report と並ばないように. 送信中に届いた分は release() が続けて送る
         self.busy[name] = time.monotonic()
         try:
-            return await self._send_feedback(name, lesson, ids, load)
+            return await self._send_feedback(name, lesson, ids, load, reasons)
         finally:
             await self.release(name)
 
     async def _send_feedback(
-        self, name: str, lesson: int, ids: list[str], load: str | None
+        self, name: str, lesson: int, ids: list[str], load: str | None, reasons: list[str] | None = None
     ) -> bool:
-        args = self.cfg.report_args(name, [], lesson=lesson, sooner=ids, load=load)
+        args = self.cfg.report_args(name, [], lesson=lesson, sooner=ids, load=load, sooner_reasons=reasons)
         rc, out, err = await run_cli(self.cfg, args)
         if rc != 0:
             logging.error("フィードバックの report に失敗しました: %s", _tail(err or out))

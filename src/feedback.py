@@ -1014,7 +1014,7 @@ class Feedback:
         user_dir: Callable[[str], Path],
         channel_id: int = 0,
         now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-        report_feedback: Callable[[str, int, list[str], str | None], Awaitable[bool]] | None = None,
+        report_feedback: Callable[..., Awaitable[bool]] | None = None,  # (name, lesson, ids, load, reasons=…)
         explain: Callable[[list[dict]], Awaitable[str]] | None = None,
         wants_explain: Callable[[str], bool] = lambda name: False,
         speak: Callable[[str], AsyncContextManager[Path]] | None = None,
@@ -1089,7 +1089,8 @@ class Feedback:
         if not ids and not load:
             return
         try:
-            ok = await self.report_feedback(name, record.lesson, ids, load)
+            reasons = [r for r in answers.reasons if r in REASONS] if ids else []
+            ok = await self.report_feedback(name, record.lesson, ids, load, reasons=reasons)
         except Exception:
             logging.exception("フィードバックの報告に失敗しました")
             ok = False
