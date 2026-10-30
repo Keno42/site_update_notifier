@@ -447,7 +447,7 @@ class StrugglingItemsTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 saved(Path(td))
 
-                async def report(name, lesson, ids, load):
+                async def report(name, lesson, ids, load, reasons=None):
                     reported.append((name, lesson, ids, load))
                     return ok
 
@@ -495,7 +495,7 @@ class StrugglingItemsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             saved(Path(td))
 
-            async def report(name, lesson, ids, effective):
+            async def report(name, lesson, ids, effective, reasons=None):
                 calls.append((name, lesson, ids, effective))
                 return True
 
