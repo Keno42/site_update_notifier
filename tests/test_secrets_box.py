@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from src import lesson, secrets_box, seal_secrets, speech
+from src import lesson, newlist, secrets_box, seal_secrets, speech
 
 VALUES = {"AZURE_SPEECH_KEY": "SECRET-KEY-123", "AZURE_SPEECH_REGION": "northeurope", "OTHER": "not allowed"}
 
@@ -162,7 +162,9 @@ class PublicKeyCommandTests(unittest.TestCase):
                     sent.append((content, ephemeral))
 
             # the command is built inside setup(); read it back from the tree it registers on
-            with mock.patch("src.lesson.app_commands.CommandTree") as Tree:
+            # setup() also installs module-wide hooks (newlist.list_view): restored after, so later tests see none (a new-list button that
+            # sent its preview view broke NewListTimingTests' stand-in, in whole-suite order only)
+            with mock.patch("src.lesson.app_commands.CommandTree") as Tree, mock.patch.object(newlist, "list_view", newlist.list_view):
                 tree = Tree.return_value
                 added = []
                 tree.add_command.side_effect = lambda c, guild=None: added.append(c)
