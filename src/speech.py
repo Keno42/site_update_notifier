@@ -75,7 +75,7 @@ async def azure_tts_save(text: str, voice: str, out: Path) -> None:
 
 def default_tts() -> TTS:
     """封じた secrets で Azure の鍵があれば Azure (edge-tts が断られていても読める), なければ edge-tts."""
-    if all(secrets_box.SECRETS.get(k) for k in secrets_box.ALLOWLIST):
+    if all(secrets_box.SECRETS.get(k) for k in secrets_box.AZURE):
         return azure_tts_save
     return edge_tts_save
 

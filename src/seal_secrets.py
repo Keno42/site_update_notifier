@@ -25,8 +25,8 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         print("BOT_PUBLIC_KEY (the repository variable) is not set", file=sys.stderr)
         return 1
     values = {k: env[k] for k in secrets_box.ALLOWLIST if env.get(k)}
-    missing = [k for k in secrets_box.ALLOWLIST if k not in values]
-    if missing:
+    missing = [k for k in secrets_box.AZURE if k not in values]
+    if missing:  # 音声合成の鍵は必須 (封じ直すと前の値は消えるので、片方だけでは封じない). FEEDBACK_SYNC_TOKEN は任意
         print(f"not set: {', '.join(missing)}", file=sys.stderr)  # 名前だけ
         return 1
     try:

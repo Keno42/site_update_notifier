@@ -66,14 +66,14 @@ class SealTests(unittest.TestCase):
             secrets_box.load(root, sealed_path)
             self.assertEqual(secrets_box.SECRETS["AZURE_SPEECH_REGION"], "northeurope")
             self.assertEqual(dict(os.environ), before, "not into os.environ")
-            self.assertEqual(secrets_box.status(), "secrets: azure ✓")
+            self.assertEqual(secrets_box.status(), "secrets: azure ✓ / feedback-sync –")
             sealed_path.write_text("garbage", "ascii")
             with self.assertLogs(level="WARNING") as logs:
                 secrets_box.load(root, sealed_path)
             self.assertEqual(secrets_box.SECRETS, {})
             self.assertEqual(len(logs.output), 1)
             self.assertNotIn("SECRET", logs.output[0])
-            self.assertEqual(secrets_box.status(), "secrets: azure –")
+            self.assertEqual(secrets_box.status(), "secrets: azure – / feedback-sync –")
             secrets_box.load(root, root / "none.sealed")  # a missing file is no warning
             self.assertEqual(secrets_box.SECRETS, {})
 
