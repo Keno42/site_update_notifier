@@ -164,6 +164,30 @@ class SyncTests(unittest.TestCase):
         self.assertIn("HTTP 503", logs.output[0])
 
 
+class ScrubTests(unittest.TestCase):
+    """Review of #197: a relative LESSON_ROOT was replaced everywhere («go out.» → «go <root>.», «1.0» → «1<root>0», invalid JSON)."""
+
+    NAMES = {"neko": "learner-x"}
+
+    def scrub(self, text: str, root: str) -> str:
+        return feedback_sync.scrub(text.encode(), Path(root), self.NAMES).decode()
+
+    def test_a_relative_root_is_replaced_only_where_a_path_begins(self):
+        self.assertEqual(self.scrub('Say you are about to go out. "out/neko/learner.json" outlet/x', "out"),
+                         'Say you are about to go out. "<root>/learner-x/learner.json" outlet/x')
+
+    def test_the_root_dot_leaves_numbers_and_ids_and_still_hides_the_learner(self):
+        text = json.dumps({"id": "lesson-045.2", "rate": 1.0, "args": ["--learner", "neko/learner.json", "--out", "./neko/work", "../x"]})
+        out = self.scrub(text, ".")
+        data = json.loads(out)  # still valid JSON
+        self.assertEqual(data["id"], "lesson-045.2")
+        self.assertEqual(data["rate"], 1.0)
+        self.assertEqual(data["args"], ["--learner", "<root>/learner-x/learner.json", "--out", "<root>/learner-x/work", "../x"])
+
+    def test_an_absolute_root_is_matched_whole_not_as_a_prefix_of_another_path(self):
+        self.assertEqual(self.scrub('"/srv/l/neko/x" "/srv/lessons/y" "/srv/l"', "/srv/l"), '"<root>/learner-x/x" "/srv/lessons/y" "<root>"')
+
+
 class SetupTests(unittest.TestCase):
     def test_without_a_repo_or_a_token_nothing_syncs(self):
         root = Path(".")

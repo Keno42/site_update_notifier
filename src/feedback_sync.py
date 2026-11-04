@@ -105,21 +105,35 @@ def _support_lines(user_dir: Path) -> list[dict]:
     return out
 
 
+# A path starts here: not inside a word, a number or another path («go out.», «1.0», «lesson-045.2» stay as they are)
+_PATH_START = r"(?<![\w.~/-])"
+
+
+def _path_pattern(path: str) -> re.Pattern:
+    """``path`` where it begins a path: followed by «/», or, for an absolute path (never prose), also at the end of a value."""
+    end = r"(?=/)" if not path.startswith("/") else r"(?=[/\"'\s]|$)"
+    return re.compile(_PATH_START + re.escape(path) + end, re.M)
+
+
 def scrub(data: bytes, root: Path, names: dict[str, str] | None = None) -> bytes:
     """Server paths out: LESSON_ROOT (and the bot's own directory) become ``<root>`` / ``<bot>``, and a learner's directory under it takes the
-    learner's pseudonym (``names``: name → pseudonym), so ``<root>/<name>/learner.json`` in a record's arguments names no one. Binary files are
-    left as they are."""
+    learner's pseudonym (``names``: name → pseudonym), so ``<root>/<name>/learner.json`` in a record's arguments names no one. Only where a path
+    begins: a relative root («out», «.») is not replaced inside words or numbers. With the root «.», a learner's directory is written without it
+    («neko/learner.json») and is matched by the name alone. Binary files are left as they are."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return data
+    root = Path(root)
     bot_dir = str(Path(__file__).resolve().parent.parent)
-    for path, mark in ((str(Path(root).resolve()), "<root>"), (str(root), "<root>"), (bot_dir, "<bot>")):
+    for path, mark in ((str(root.resolve()), "<root>"), (str(root), "<root>"), (bot_dir, "<bot>")):
         if path and path != "/":
-            text = text.replace(path, mark)
-            text = text.replace(json.dumps(path)[1:-1], mark)  # the same path as JSON escapes it
+            text = _path_pattern(path).sub(mark, text)
+    bare = root == Path(".")
     for name, who in (names or {}).items():
         text = re.sub(r"<root>/" + re.escape(name) + r"(?=[/\"\s]|$)", "<root>/" + who, text)
+        if bare:
+            text = re.sub(_PATH_START + re.escape(name) + r"(?=/)", "<root>/" + who, text)
     return text.encode("utf-8")
 
 
