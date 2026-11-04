@@ -52,7 +52,7 @@ class RankingTests(unittest.TestCase):
 class DryRunTests(unittest.TestCase):
     """The bot's dry run before the review: `generate --dry-run --no-audio`, whose plan.json carries ``review_savings``."""
 
-    def run_dry(self, fake):
+    def run_dry(self, fake, channel=None):
         import asyncio
         import json
         import tempfile
@@ -73,7 +73,7 @@ class DryRunTests(unittest.TestCase):
                 return fake(args)
 
             with mock.patch("src.lesson.run_cli", cli):
-                out = asyncio.run(Lessons(cfg).review_savings(FakeChannel(), "yuki", 30))
+                out = asyncio.run(Lessons(cfg).review_savings(channel or FakeChannel(), "yuki", 30))
         return out, calls
 
     def test_it_reads_the_savings_of_the_dry_runs_plan_and_never_touches_the_real_work_dir(self):
@@ -102,6 +102,24 @@ class DryRunTests(unittest.TestCase):
 
         self.assertIsNone(self.run_dry(old)[0])
         self.assertIsNone(self.run_dry(lambda args: (2, "", "error: boom"))[0])
+
+
+    def test_a_trip_set_in_the_channel_topic_still_exists_when_the_dry_run_reads_it(self):
+        import json
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        seen = []
+
+        def fake(args):
+            seen.append(Path(args[args.index("--trip") + 1]).exists())
+            (Path(args[args.index("--out") + 1]) / "lesson-005.plan.json").write_text(json.dumps({"review_savings": {"a": 1.0}}), "utf-8")
+            return 0, "", ""
+
+        channel = SimpleNamespace(topic='[trip]\nseason = "winter-holidays"\n', id=1, parent=None)
+        got, _ = self.run_dry(fake, channel)
+        self.assertEqual(seen, [True], "the topic's temporary trip.toml is removed only after the CLI ran")
+        self.assertEqual(got, {"a": 1.0})
 
 
 if __name__ == "__main__":
