@@ -26,6 +26,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -104,8 +105,10 @@ def _support_lines(user_dir: Path) -> list[dict]:
     return out
 
 
-def scrub(data: bytes, root: Path) -> bytes:
-    """Server paths out: LESSON_ROOT (and the bot's own directory) become ``<root>`` / ``<bot>``. Binary files are left as they are."""
+def scrub(data: bytes, root: Path, names: dict[str, str] | None = None) -> bytes:
+    """Server paths out: LESSON_ROOT (and the bot's own directory) become ``<root>`` / ``<bot>``, and a learner's directory under it takes the
+    learner's pseudonym (``names``: name → pseudonym), so ``<root>/<name>/learner.json`` in a record's arguments names no one. Binary files are
+    left as they are."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
@@ -115,12 +118,15 @@ def scrub(data: bytes, root: Path) -> bytes:
         if path and path != "/":
             text = text.replace(path, mark)
             text = text.replace(json.dumps(path)[1:-1], mark)  # the same path as JSON escapes it
+    for name, who in (names or {}).items():
+        text = re.sub(r"<root>/" + re.escape(name) + r"(?=[/\"\s]|$)", "<root>/" + who, text)
     return text.encode("utf-8")
 
 
 def folders(cfg: SyncConfig, salt: bytes) -> dict[str, dict[str, bytes]]:
     """What the repository should hold: folder (``learner-…/lesson-045``) → file name → content."""
     out: dict[str, dict[str, bytes]] = {}
+    names = {name: pseudonym(name, salt) for name in cfg.users}
     for name in cfg.users:
         full = name in cfg.full
         if not full and not cfg.others:
@@ -151,7 +157,7 @@ def folders(cfg: SyncConfig, salt: bytes) -> dict[str, dict[str, bytes]]:
                 for p in sorted(dirs[record].iterdir()):
                     if p.is_file() and p.name not in NOTES_FILES:
                         files[p.name] = p.read_bytes()
-            out[f"{who}/{record}"] = {k: scrub(v, cfg.root) for k, v in files.items()}
+            out[f"{who}/{record}"] = {k: scrub(v, cfg.root, names) for k, v in files.items()}
     return out
 
 

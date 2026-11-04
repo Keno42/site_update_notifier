@@ -69,7 +69,8 @@ class SyncTests(unittest.TestCase):
         self.addCleanup(self.td.cleanup)
         self.root = Path(self.td.name)
         trip = str(self.root / "owner" / "trip.toml")
-        self.owner_record = write_record(self.root / "owner", 45, ["generate", "--trip", trip])
+        learner = str(self.root / "owner" / "learner.json")
+        self.owner_record = write_record(self.root / "owner", 45, ["generate", "--learner", learner, "--out", str(self.root / "owner" / "work"), "--trip", trip])
         feedback.Ledger(self.root / "owner").append({"user": "owner", "manifest": self.owner_record, "note": "the café scene was odd"})
         other = write_record(self.root / "friend", 3, ["generate"])
         feedback.Ledger(self.root / "friend").append({"user": "friend", "manifest": other, "note": "the app froze once", "load": "right"})
@@ -100,7 +101,11 @@ class SyncTests(unittest.TestCase):
         for secret in ("owner", "friend", str(self.root)):
             self.assertNotIn(f'"{secret}"' if secret in ("owner", "friend") else secret, everything)
         self.assertNotIn(self.td.name, everything, "no server path")
-        self.assertIn("<root>/owner/trip.toml", files[own + "manifest.json"])
+        manifest = files[own + "manifest.json"]
+        self.assertIn(f"<root>/{self.owner}/trip.toml", manifest, "the learner's directory takes the pseudonym")
+        for name in ("owner", "friend"):
+            for path, text in files.items():
+                self.assertNotRegex(path + "\n" + text, rf"\b{name}\b", f"{name} in {path}")
 
     def test_the_pseudonym_is_stable_and_not_the_name(self):
         self.assertEqual(self.owner, feedback_sync.pseudonym("owner", feedback_sync.load_salt(self.root)))
