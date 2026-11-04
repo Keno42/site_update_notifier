@@ -123,6 +123,28 @@ class SyncTests(unittest.TestCase):
         self.assertIn("lesson-004", gh.messages[-1])
         self.assertIn(f"{self.owner}/lesson-045/manifest.json", gh.files, "the earlier files stay")
 
+    def test_progress_is_kept_per_branch(self):
+        """Review of #197: after a change of `FEEDBACK_SYNC_BRANCH` the new branch got nothing (the progress was kept per repository)."""
+        gh = FakeGitHub()
+        self.assertEqual(self.sync(gh), 2)
+        self.cfg.branch = "other"
+        self.assertEqual(self.sync(gh), 2, "every folder again, for the new branch")
+        self.assertEqual(self.sync(gh), 0)
+        self.cfg.branch = "main"
+        self.assertEqual(self.sync(gh), 0, "the first branch's progress is kept")
+
+    def test_the_state_before_branches_counts_for_main_only(self):
+        gh = FakeGitHub()
+        self.sync(gh)
+        path = self.root / feedback_sync.STATE_FILE
+        data = json.loads(path.read_text("utf-8"))
+        path.write_text(json.dumps({"o/r": data["o/r@main"]}), "utf-8")  # as #197 wrote it
+        self.assertEqual(self.sync(gh), 0, "the old progress is main's")
+        self.assertEqual(set(json.loads(path.read_text("utf-8"))), {"o/r@main"}, "migrated on the next save")
+        path.write_text(json.dumps({"o/r": data["o/r@main"]}), "utf-8")
+        self.cfg.branch = "other"
+        self.assertEqual(self.sync(gh), 2, "another branch starts from nothing")
+
     def test_a_failure_pushes_nothing_and_the_next_sync_catches_up(self):
         gh = FakeGitHub()
         gh.down = True
