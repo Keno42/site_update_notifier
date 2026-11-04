@@ -1209,12 +1209,13 @@ class Lessons:
         tmp = Path(tempfile.mkdtemp(prefix="review-savings-"))
         try:
             lever_args, _ = levers.from_topic(channel)
+            # the CLI runs inside the with: a trip set in the channel topic is a temporary file that the with removes
             with trip.resolve(self.cfg.trip_path(name), channel) as (source, _warning):
                 args = self.cfg.generate_args(name, False, source.path if source else None, lever_args, minutes=minutes, order=settings.order)
-            args = [*args, "--dry-run", "--no-audio"]
-            if "--out" in args:
-                args[args.index("--out") + 1] = str(tmp)
-            rc, out, err = await asyncio.wait_for(run_cli(self.cfg, args, env=secrets_box.environment()), timeout=120)
+                args = [*args, "--dry-run", "--no-audio"]
+                if "--out" in args:
+                    args[args.index("--out") + 1] = str(tmp)
+                rc, out, err = await asyncio.wait_for(run_cli(self.cfg, args, env=secrets_box.environment()), timeout=120)
             plan_path = latest_plan(tmp)
             if rc != 0 or plan_path is None:
                 logging.warning("振り返りの順位づけ (dry run) を作れませんでした: %s", _tail(redact(err or out)))
