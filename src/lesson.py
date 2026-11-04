@@ -49,7 +49,7 @@ from .cards import CardQueue
 from .interaction import answers_on_failure
 from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, backlog_detail, log_review, read_review_log, review_note
 from .review_queue import REFINE_VERSION, ReviewQueue
-from . import secrets_box
+from . import feedback_sync, secrets_box
 
 LLA_DIR = (
     Path(__file__).resolve().parent.parent / "external" / "language-learning-audio"
@@ -500,6 +500,7 @@ class Lessons:
     ) -> None:
         self.cfg = cfg
         self.today = today
+        self.record_saved: Callable[[], None] = lambda: None  # a lesson record was saved: the feedback sync (src/feedback_sync.py) runs soon
         # 進行中の /lesson: 名前 → 始めた時刻 (time.monotonic()). 解放し損ねても、上限を過ぎたら
         # 止まった記録として捨てる (#82)
         self.busy: dict[str, float] = {}
@@ -1283,6 +1284,7 @@ class Lessons:
         except OSError:
             logging.exception("レッスンの記録を保存できませんでした")
             return None
+        self.record_saved()
         return d.name
 
     def _keep_new_list(
@@ -1397,6 +1399,10 @@ def setup(
         return None
     secrets_box.load(cfg.root)  # 封じた secrets (issue #119): 鍵がなければ作り、開けたらメモリに置く
     lessons = Lessons(cfg)
+    # フィードバックを非公開のリポジトリへ (src/feedback_sync.py): 送信・解説の依頼・レッスンの記録のたびに、少し待ってから
+    sync_feedback = feedback_sync.setup(config, cfg.root, list(cfg.users.values()), secrets_box.SECRETS.get(secrets_box.FEEDBACK_SYNC))
+    kick = sync_feedback.kick if sync_feedback else (lambda: None)
+    lessons.record_saved = kick
     fb = feedback.Feedback(
         cfg.users,
         cfg.user_dir,
@@ -1405,6 +1411,7 @@ def setup(
         explain=explain,
         wants_explain=lambda name: cfg.user_settings(name).explain == "on",
         speak=lambda text: lessons.speak({"text": text, "own": True}),  # a lesson's sentence may name the learner's own places: not cached
+        changed=kick,
     )
     feedback.FeedbackButton.handler = fb
     feedback.PreviewButton.handler = fb
@@ -1554,6 +1561,7 @@ def setup(
         tree.add_command(command, guild=guild)
 
     async def sync() -> None:
+        kick()  # 起動時: 前回までに送れなかったフィードバックを送る
         # 失敗は呼び出し元へ渡し、成功したときだけ同期済みにする。
         synced = await tree.sync(guild=guild)
         logging.info(

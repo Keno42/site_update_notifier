@@ -36,3 +36,8 @@ LESSON_READINESS_DAYS: int
 LESSON_DEFAULT_MINUTES: float  # 5 / 10 / 15 / 30
 LESSON_DEFAULT_NEW_LIST: str  # "before" | "after"
 LESSON_DEFAULT_ORDER: str  # "new-first" | "spread"
+# フィードバックを非公開のリポジトリへ (src/feedback_sync.py). token は封じた secrets の FEEDBACK_SYNC_TOKEN
+FEEDBACK_SYNC_REPO: str  # "owner/name". 空か未設定なら同期しない
+FEEDBACK_SYNC_FULL: list[str]  # 記録一式 (再現用の learner.before.json など) も送る学習者名
+FEEDBACK_SYNC_OTHERS: bool  # ほかの学習者のメモとフォームの回答も送る (既定 True)
+FEEDBACK_SYNC_BRANCH: str  # 既定 "main"

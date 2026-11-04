@@ -16,7 +16,9 @@ import os
 from pathlib import Path
 
 # 封じて渡してよい名前 (許可リスト). 増やすには workflow と合わせた、レビューされた変更が要る
-ALLOWLIST = ("AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION")
+AZURE = ("AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION")
+FEEDBACK_SYNC = "FEEDBACK_SYNC_TOKEN"  # フィードバックの同期先 (src/feedback_sync.py) の 1 リポジトリだけに書ける token
+ALLOWLIST = AZURE + (FEEDBACK_SYNC,)
 KEY_FILE = ".bot_secret_key"  # LESSON_ROOT の下. git の外. mode 600
 SEALED_PATH = Path(__file__).resolve().parent.parent / "sealed" / "secrets.sealed"
 
@@ -95,10 +97,11 @@ def load(root: Path, sealed: Path | None = None) -> dict[str, str]:
 
 
 def environment() -> dict[str, str]:
-    """生成のサブプロセスにだけ足す env (``os.environ`` には入れない)."""
-    return dict(SECRETS)
+    """生成のサブプロセスにだけ足す env (``os.environ`` には入れない). 音声合成の鍵だけで、GitHub の token は渡さない."""
+    return {k: v for k, v in SECRETS.items() if k in AZURE}
 
 
 def status() -> str:
     """/version に出す一行: 値は出さず、あるかどうかだけ."""
-    return "secrets: azure " + ("✓" if all(SECRETS.get(k) for k in ALLOWLIST) else "–")
+    azure = "✓" if all(SECRETS.get(k) for k in AZURE) else "–"
+    return f"secrets: azure {azure} / feedback-sync " + ("✓" if SECRETS.get(FEEDBACK_SYNC) else "–")

@@ -278,6 +278,48 @@ lesson_manifests/lesson-012/
 記録は生成したときのまま変えない（同じ番号をもう一度生成したら `lesson-012.2` を別に作る）。
 この機能より前に生成したレッスンには記録がないので、フィードバックの対象外。
 
+### フィードバックを非公開のリポジトリへ（`src/feedback_sync.py`）
+
+手でエクスポートしなくても、フィードバックが届くようにする。送信・解説の依頼・レッスンの記録のたびに（10 秒待ってから）、
+変わった分だけを `FEEDBACK_SYNC_REPO` に 1 コミットで送る（GitHub の API。機械に clone は要らない）。起動時にも、前回までに
+送れなかった分を送る。
+
+```text
+learner-1a2b3c4d/lesson-045/   名前の代わりに仮名（名前と、機械にだけある塩 .feedback_sync_salt の HMAC）
+  feedback.jsonl               その記録へのフィードバック（名前の欄を除く）
+  support_requests.jsonl       解説の依頼（名前の欄を除く）
+  manifest.json, ….plan.json, ….transcript.md, learner.before.json, …
+                               記録一式（レッスンの再現用）。FEEDBACK_SYNC_FULL の人だけ
+```
+
+- ほかの学習者はメモとフォームの回答（と解説の依頼）だけ。`FEEDBACK_SYNC_OTHERS = False` で送らない。
+  送ることは、その人に伝えておく
+- サーバーのパス（`LESSON_ROOT`、bot のディレクトリ）は、どのファイルでも `<root>` / `<bot>` に置き換える。
+  旅程のプロフィールは記録に入らない（`trip_sha256` だけ）。メモは書いたまま送るので、旅程の中身はメモに書かない
+- 送れなかったとき（ネットワーク、API）は警告を 1 行ログに出すだけで、次の同期が送り直す（何を送ったかは
+  `<LESSON_ROOT>/.feedback_sync.json` に、フォルダーごとの digest で残す）
+- token は封じた secrets の `FEEDBACK_SYNC_TOKEN`（下の「音声合成の鍵を SSH なしで渡す」と同じ手順）。レッスン生成の
+  サブプロセスには渡さない。`/version` が「feedback-sync ✓」になる
+
+設定:
+
+1. GitHub に非公開のリポジトリを作る（README だけでよい。空のリポジトリには送れない）
+2. fine-grained personal access token を作る: Repository access は **そのリポジトリだけ**、Permissions は
+   **Contents: Read and write** だけ（Metadata: Read は自動で付く）。期限は 1 年など
+3. bot のリポジトリの secrets に `FEEDBACK_SYNC_TOKEN` として入れ、「Seal secrets」を実行して PR をマージする
+   （`AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` も一緒に封じ直されるので、そのまま置いておく）
+4. `config/config.py` に追記する
+
+   ```python
+   FEEDBACK_SYNC_REPO = "Keno42/lla-feedback"
+   FEEDBACK_SYNC_FULL = ["yuki"]       # 記録一式も送る学習者名（LESSON_USERS の値）
+   FEEDBACK_SYNC_OTHERS = True         # ほかの人のメモとフォームの回答も送る
+   ```
+
+5. 次の自動更新と再起動で動き出す（`/version` で feedback-sync ✓ を確かめる）
+
+token を変えるときは 2〜3 をやり直す。
+
 ### 週のレポート（/lesson-week）
 
 信号を一画面に並べる。判断（残す・戻す・待つ）は、直近に入れた変更の予測と突き合わせて人が行う
@@ -376,7 +418,7 @@ lesson_manifests/lesson-012/
   を忘れていると、bot のコミットが新しくてもこちらは古いまま、と分かる）
 - 日時はサーバーのローカル時刻。git で読めないときは「不明」
 - `/lesson` と同じく `LESSON_ROOT` / `LESSON_USERS` があるときだけ登録される
-- 封じた secrets（下）が開けたかを「secrets: azure ✓ / –」で示す（値は出さない）
+- 封じた secrets（下）が開けたかを「secrets: azure ✓ / feedback-sync –」のように示す（値は出さない）
 
 ### 音声合成の鍵を SSH なしで渡す（Azure Speech, #119）
 

@@ -1018,6 +1018,7 @@ class Feedback:
         explain: Callable[[list[dict]], Awaitable[str]] | None = None,
         wants_explain: Callable[[str], bool] = lambda name: False,
         speak: Callable[[str], AsyncContextManager[Path]] | None = None,
+        changed: Callable[[], None] = lambda: None,
     ) -> None:
         self.users = users
         self.user_dir = user_dir
@@ -1033,6 +1034,7 @@ class Feedback:
         self.explanations: set[asyncio.Task] = set()  # the explanations still waiting for the LLM (held so they are not collected while they run)
         self.submitted: set[tuple[str, str]] = set()  # (user, manifest) whose feedback was sent: a help request's answer says whether it still waits
         self.speak = speak  # a sentence → its mp3 (the reading cards' TTS): the new-expression list's «🔊 発音を聞く»
+        self.changed = changed  # a feedback or help request was written: the sync to the feedback repository (src/feedback_sync.py) runs soon
 
     def ledger(self, name: str) -> Ledger:
         return Ledger(self.user_dir(name))
@@ -1153,6 +1155,7 @@ class Feedback:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        self.changed()
         owner = interaction.user.id
         label = support_label(record, request)
 
@@ -1240,6 +1243,7 @@ class Feedback:
         async def submit(answers: Answers) -> None:
             ledger.append(build_event(record, answers, name, self.now()))
             self.submitted.add((name, record.id))
+            self.changed()
             await self._report_feedback(interaction, name, record, answers)
             # 記録できた後に、新出表現の一覧を出す (#79). 出せなくても記録は成功のまま
             pending = newlist.PendingLists(ledger.user_dir).take(record.dir.name)
