@@ -266,22 +266,31 @@ class FeedbackSync:
         self._task: asyncio.Task | None = None
         self._again = False
 
-    def _state(self) -> dict[str, str]:
+    @property
+    def _key(self) -> str:
+        """Progress is kept per repository and branch (review of #197): a new destination branch gets every folder, not only what changed."""
+        return f"{self.cfg.repo}@{self.cfg.branch}"
+
+    def _read(self) -> dict:
         try:
             data = json.loads(self.state_path.read_text("utf-8"))
         except (OSError, ValueError):
             return {}
-        pushed = data.get(self.cfg.repo, {}) if isinstance(data, dict) else {}
-        return pushed if isinstance(pushed, dict) else {}
+        return data if isinstance(data, dict) else {}
+
+    def _state(self) -> dict[str, str]:
+        data = self._read()
+        pushed = data.get(self._key)
+        if pushed is None and self.cfg.branch == "main" and isinstance(data.get(self.cfg.repo), dict):
+            pushed = data[self.cfg.repo]  # the state before branches were kept: every sync then went to the default branch, «main»
+            self._save_state(dict(pushed))  # migrated now, whether or not anything is pushed
+        return dict(pushed) if isinstance(pushed, dict) else {}
 
     def _save_state(self, pushed: dict[str, str]) -> None:
-        try:
-            data = json.loads(self.state_path.read_text("utf-8"))
-            if not isinstance(data, dict):
-                data = {}
-        except (OSError, ValueError):
-            data = {}
-        data[self.cfg.repo] = pushed
+        data = self._read()
+        data[self._key] = pushed
+        if self.cfg.branch == "main":
+            data.pop(self.cfg.repo, None)  # migrated: the old key no longer stands for anything
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1, sort_keys=True), "utf-8")
         os.replace(tmp, self.state_path)
