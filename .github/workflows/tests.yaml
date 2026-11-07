@@ -14,7 +14,8 @@ permissions:
 
 jobs:
   unittest:
-    runs-on: ubuntu-latest
+    # pinned: .python-version is 3.11.2, the Raspberry Pi's Python, and ubuntu-latest moved to 26.04, which has no 3.11.2 build
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout (with the language-learning-audio submodule)
         uses: actions/checkout@v4
