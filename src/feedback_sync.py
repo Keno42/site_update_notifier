@@ -137,9 +137,24 @@ def scrub(data: bytes, root: Path, names: dict[str, str] | None = None) -> bytes
     return text.encode("utf-8")
 
 
-def folders(cfg: SyncConfig, salt: bytes) -> dict[str, dict[str, bytes]]:
-    """What the repository should hold: folder (``learner-…/lesson-045``) → file name → content."""
-    out: dict[str, dict[str, bytes]] = {}
+def _unique(lines: list[dict]) -> list[dict]:
+    """The lines without the repeats of one feedback: the same answers for the same record, whatever their time (the send button pressed again
+    while the bot did not answer: lesson 54's feedback was stored five times). The first of each is kept, in order."""
+    seen: set[str] = set()
+    out = []
+    for line in lines:
+        key = json.dumps({k: v for k, v in line.items() if k not in ("ts", "user")}, sort_keys=True, ensure_ascii=False)
+        if key not in seen:
+            seen.add(key)
+            out.append(line)
+    return out
+
+
+def plan(cfg: SyncConfig, salt: bytes) -> dict[str, tuple[dict[str, bytes], list[Path]]]:
+    """What the repository should hold, without reading the records: folder (``learner-…/lesson-045``) → (its two notes files, ready, and the paths
+    of the record's own files, for the names in ``full``). The notes are small; a record is about a megabyte, and reading and scrubbing every record
+    on every sync held the bot's event loop for many seconds (``FeedbackSync.run``)."""
+    out: dict[str, tuple[dict[str, bytes], list[Path]]] = {}
     names = {name: pseudonym(name, salt) for name in cfg.users}
     for name in cfg.users:
         full = name in cfg.full
@@ -162,17 +177,60 @@ def folders(cfg: SyncConfig, salt: bytes) -> dict[str, dict[str, bytes]]:
         for record in sorted(records):
             if feedback.MANIFEST_RE.match(record) is None:
                 continue  # only a record's own id names a folder
-            files: dict[str, bytes] = {}
+            notes: dict[str, bytes] = {}
             if record in events:
-                files["feedback.jsonl"] = _jsonl(events[record])
+                notes["feedback.jsonl"] = _jsonl(_unique(events[record]))
             if record in support:
-                files["support_requests.jsonl"] = _jsonl(support[record])
-            if full and record in dirs:
-                for p in sorted(dirs[record].iterdir()):
-                    if p.is_file() and p.name not in NOTES_FILES:
-                        files[p.name] = p.read_bytes()
-            out[f"{who}/{record}"] = {k: scrub(v, cfg.root, names) for k, v in files.items()}
+                notes["support_requests.jsonl"] = _jsonl(support[record])
+            paths = sorted(p for p in dirs[record].iterdir() if p.is_file() and p.name not in NOTES_FILES) if full and record in dirs else []
+            out[f"{who}/{record}"] = ({k: scrub(v, cfg.root, names) for k, v in notes.items()}, paths)
     return out
+
+
+def folders(cfg: SyncConfig, salt: bytes, only: set[str] | None = None) -> dict[str, dict[str, bytes]]:
+    """What the repository should hold: folder (``learner-…/lesson-045``) → file name → content. ``only``: these folders (the others are not read)."""
+    names = {name: pseudonym(name, salt) for name in cfg.users}
+    out: dict[str, dict[str, bytes]] = {}
+    for folder, (notes, paths) in plan(cfg, salt).items():
+        if only is not None and folder not in only:
+            continue
+        files = dict(notes)
+        for p in paths:
+            files[p.name] = scrub(p.read_bytes(), cfg.root, names)
+        out[folder] = files
+    return out
+
+
+class Digests:
+    """The digest of every folder, reading a record's file only when it is new or has changed on disk (its size or its time): a file's digest is
+    kept in memory by its path. The digests are those ``digest`` gives the folder's contents, so the state file of an earlier version still
+    holds."""
+
+    def __init__(self) -> None:
+        self._files: dict[str, tuple[tuple[int, int], bytes]] = {}
+
+    def _file(self, path: Path, root: Path, names: dict[str, str]) -> bytes:
+        st = path.stat()
+        sig = (st.st_size, st.st_mtime_ns)
+        had = self._files.get(str(path))
+        if had is not None and had[0] == sig:
+            return had[1]
+        d = hashlib.sha256(scrub(path.read_bytes(), root, names)).digest()
+        self._files[str(path)] = (sig, d)
+        return d
+
+    def of(self, cfg: SyncConfig, salt: bytes) -> dict[str, str]:
+        names = {name: pseudonym(name, salt) for name in cfg.users}
+        out: dict[str, str] = {}
+        for folder, (notes, paths) in plan(cfg, salt).items():
+            parts = {k: hashlib.sha256(v).digest() for k, v in notes.items()}
+            for p in paths:
+                parts[p.name] = self._file(p, cfg.root, names)
+            h = hashlib.sha256()
+            for k in sorted(parts):
+                h.update(k.encode("utf-8") + b"\0" + parts[k])
+            out[folder] = h.hexdigest()
+        return out
 
 
 def digest(files: dict[str, bytes]) -> str:
@@ -265,6 +323,7 @@ class FeedbackSync:
         self.state_path = cfg.root / STATE_FILE
         self._task: asyncio.Task | None = None
         self._again = False
+        self._digests = Digests()
 
     @property
     def _key(self) -> str:
@@ -296,17 +355,23 @@ class FeedbackSync:
         os.replace(tmp, self.state_path)
 
     async def run(self) -> int:
-        """Push every folder whose content differs from what was pushed last. Returns the number of folders pushed."""
-        want = folders(self.cfg, load_salt(self.cfg.root))
+        """Push every folder whose content differs from what was pushed last. Returns the number of folders pushed.
+
+        The files are read off the event loop, and only those that changed. Until lesson 54 every sync read and scrubbed every record of the
+        course on the event loop (44 records: 2.5 s on a desktop, many times that on the Raspberry Pi): for that long the bot answered nothing,
+        a button pressed meanwhile got Discord's «interaction failed» after three seconds, and the presses that followed were all handled when
+        the loop came back (lesson 54's feedback stored five times in one second, 38 s after a help request had started a sync)."""
+        salt = load_salt(self.cfg.root)
         pushed = self._state()
-        digests = {k: digest(v) for k, v in want.items()}
-        changed = {k: v for k, v in want.items() if pushed.get(k) != digests[k]}
+        digests = await asyncio.to_thread(self._digests.of, self.cfg, salt)
+        stale = {k for k, d in digests.items() if pushed.get(k) != d}
+        changed = await asyncio.to_thread(folders, self.cfg, salt, stale) if stale else {}
         done = 0
         for group in batches(changed):
             files = {f"{folder}/{name}": data for folder in group for name, data in changed[folder].items()}
             await commit(self.request, self.cfg.repo, self.cfg.branch, files, "Feedback: " + ", ".join(group))
             for folder in group:
-                pushed[folder] = digests[folder]
+                pushed[folder] = digest(changed[folder])  # of what was pushed, read a moment after the digests were taken
             self._save_state(pushed)
             done += len(group)
         return done
