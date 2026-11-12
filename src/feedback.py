@@ -44,6 +44,7 @@ from .interaction import (
     NOTE_FAILED,
     SEND_FAILED,
     SEND_SCREEN_FAILED,
+    SENDING,
     answers_on_failure,
     screen_step,
 )
@@ -855,12 +856,16 @@ class FeedbackView(discord.ui.View):
         submit: Callable[[Answers], Awaitable[None]],
         compact: bool = False,
         request_support: Callable[[discord.Interaction, dict], Awaitable[None]] | None = None,
+        notify: Callable[[str], Awaitable[Any]] | None = None,
     ) -> None:
         super().__init__(timeout=900)
         self.record = record
         self.owner_id = owner_id
         self.submit = submit
         self.request_support = request_support
+        self.compact = compact
+        self.notify = notify  # 操作が切れて画面に何も出せないとき、記録したことをチャンネルで知らせる
+        self.sending = False  # 「送信」の記録の途中: 押し直しは記録しない
         self.answers = Answers()
         new = record.new_items()[:25]
         reviewed = record.reviewed_choices(25 - len(new))
@@ -982,21 +987,58 @@ class FeedbackView(discord.ui.View):
 
     @answers_on_failure(SEND_FAILED)
     async def _send(self, interaction: discord.Interaction) -> None:
+        """「送信」. 先に Discord に返事をしてから記録する: 記録・レッスンへの報告・新出表現の一覧は 3 秒を超えることがあり、
+        返事がないと Discord は「インタラクションに失敗しました」と出し、学習者は押し直す (レッスン 54: 同じフィードバックが 5 回
+        記録された). 記録の間に押し直されても二度は記録しない."""
         if self.answers.load is None:
             await interaction.response.send_message(
                 "「今日の量・難しさ」を選んでから送信してください。", ephemeral=True
             )
             return
-        await self.submit(self.answers)  # 記録 (失敗なら SEND_FAILED: まだ押し直せる)
+        if self.sending:
+            # 記録の途中で押し直された: 何もせず、待ってもらう (返事もできなければログだけ)
+            await screen_step(lambda: interaction.response.send_message(SENDING, ephemeral=True), _nothing)
+            return
+        self.sending = True
+        try:
+            # ここで返事: フォームを閉じて「記録しています」に. 期限切れなどで返事できなくても、押されたのだから記録はする
+            acked = await screen_step(
+                lambda: interaction.response.edit_message(content=f"{self.record.title} のフィードバックを記録しています…", view=None),
+                _nothing,
+            )
+            try:
+                await self.submit(self.answers)  # 記録 (失敗なら SEND_FAILED: フォームを戻すので、まだ押し直せる)
+            except Exception:
+                if acked:
+                    await screen_step(
+                        lambda: interaction.edit_original_response(content=form_text(self.record, self.answers, compact=self.compact), view=self),
+                        _nothing,
+                    )
+                raise
+        finally:
+            self.sending = False
         self.stop()
         # ここから先は画面だけ: 失敗しても記録は済んでいる
-        await screen_step(
-            lambda: interaction.response.edit_message(
-                content=f"{self.record.title} のフィードバックを記録しました。ありがとうございます。",
-                view=None,
-            ),
-            lambda: interaction.followup.send(SEND_SCREEN_FAILED, ephemeral=True),
-        )
+        done = f"{self.record.title} のフィードバックを記録しました。ありがとうございます。"
+        if acked and await screen_step(lambda: interaction.edit_original_response(content=done, view=None), _nothing):
+            return
+        try:
+            await interaction.followup.send(SEND_SCREEN_FAILED, ephemeral=True)
+        except Exception:
+            # 操作そのものが切れている (ボットが時間内に返事できなかった): 学習者には何も見えていないので、チャンネルで知らせる
+            logging.exception("画面の更新の代わりの通知も送れませんでした")
+            if self.notify is not None:
+                await screen_step(lambda: self.notify(SEND_SCREEN_FAILED), _nothing)  # type: ignore[misc]
+
+
+async def _nothing() -> None:
+    return None
+
+
+def same_feedback(a: dict, b: dict) -> bool:
+    """同じ記録への同じ答え (時刻だけが違う): 押し直しや、同じ内容の送り直し."""
+    drop = ("ts",)
+    return {k: v for k, v in a.items() if k not in drop} == {k: v for k, v in b.items() if k not in drop}
 
 
 # ---------------------------------------------------------------- entry points
@@ -1241,7 +1283,13 @@ class Feedback:
         name, ledger, record = found
 
         async def submit(answers: Answers) -> None:
-            ledger.append(build_event(record, answers, name, self.now()))
+            event = build_event(record, answers, name, self.now())
+            # 同じ記録への同じ答えは一度だけ書く (押し直し・同じ内容の送り直し). 報告は下でもう一度送る: 前の報告が失敗して
+            # いたら、送り直しで反映される
+            if any(same_feedback(e, event) for e in ledger.events(record.id)):
+                logging.info("%s のフィードバックは同じ内容で記録済みです（書き足しません）", record.id)
+            else:
+                ledger.append(event)
             self.submitted.add((name, record.id))
             self.changed()
             await self._report_feedback(interaction, name, record, answers)
@@ -1259,9 +1307,13 @@ class Feedback:
             await self._support(inter, name, record, request)
 
         compact = lesson_minutes(record) < usersettings.COMPACT_FEEDBACK_BELOW
+        channel = getattr(interaction, "channel", None)
         await interaction.response.send_message(
             form_text(record, compact=compact),
-            view=FeedbackView(record, interaction.user.id, submit, compact=compact, request_support=request_support if self.explain else None),
+            view=FeedbackView(
+                record, interaction.user.id, submit, compact=compact, request_support=request_support if self.explain else None,
+                notify=(lambda text: channel.send(f"<@{interaction.user.id}> {text}")) if channel is not None else None,
+            ),
             ephemeral=True,
         )
 

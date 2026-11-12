@@ -23,6 +23,7 @@ CHOOSE_FAILED = "選択を受け付けられませんでした。もう一度選
 STALE_RATING = "この問いはもう記録しました。新しいメッセージから続けてください。"
 NOTE_FAILED = "メモ欄を開けませんでした。もう一度押してください。"
 SEND_SCREEN_FAILED = "フィードバックは記録しました（画面を更新できませんでした）。"
+SENDING = "フィードバックを記録しています。少しお待ちください（もう一度押さなくて大丈夫です）。"
 
 
 def _interaction(args: tuple, kwargs: dict) -> discord.Interaction | None:

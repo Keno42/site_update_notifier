@@ -123,6 +123,55 @@ class SyncTests(unittest.TestCase):
         self.assertIn("lesson-004", gh.messages[-1])
         self.assertIn(f"{self.owner}/lesson-045/manifest.json", gh.files, "the earlier files stay")
 
+    def test_a_sync_reads_only_the_records_that_changed_and_never_on_the_event_loop(self):
+        """Lesson 54: every sync read and scrubbed every record on the event loop, so the bot answered nothing for many seconds: a help request
+        started a sync, the send button pressed meanwhile got «interaction failed», and its five presses were all recorded when the loop came back."""
+        import threading
+        from unittest import mock
+
+        gh = FakeGitHub()
+        sync = feedback_sync.FeedbackSync(self.cfg, gh, delay=0)
+        loop_thread = threading.get_ident()
+        read: list[tuple[str, bool]] = []
+        real = feedback_sync.scrub
+
+        def scrub(data, root, names=None):
+            read.append((data[:12].decode("utf-8", "replace"), threading.get_ident() == loop_thread))
+            return real(data, root, names)
+
+        with mock.patch.object(feedback_sync, "scrub", scrub):
+            self.assertEqual(asyncio.run(sync.run()), 2)
+            self.assertTrue(read)
+            self.assertFalse(any(on_loop for _, on_loop in read), "the records are read in a worker thread")
+            first = len(read)
+            read.clear()
+            self.assertEqual(asyncio.run(sync.run()), 0)
+            self.assertLess(len(read), first)
+            self.assertFalse(any(head.startswith(("Góðan", '{"id"')) for head, _ in read), "no record file is read again")
+            (self.root / "owner" / feedback.MANIFESTS / "lesson-045" / "lesson-045.transcript.md").write_text("Gott kvöld, allir saman.", "utf-8")
+            read.clear()
+            self.assertEqual(asyncio.run(sync.run()), 1)
+            self.assertIn("Gott kvöld", gh.files[f"{self.owner}/lesson-045/lesson-045.transcript.md"])
+
+    def test_the_digests_are_those_of_the_contents_so_an_earlier_state_still_holds(self):
+        want = feedback_sync.folders(self.cfg, self.salt)
+        self.assertEqual(feedback_sync.Digests().of(self.cfg, self.salt), {k: feedback_sync.digest(v) for k, v in want.items()})
+        only = feedback_sync.folders(self.cfg, self.salt, {f"{self.owner}/lesson-045"})
+        self.assertEqual(only, {f"{self.owner}/lesson-045": want[f"{self.owner}/lesson-045"]})
+
+    def test_one_feedback_stored_several_times_is_exported_once(self):
+        """Lesson 54's export held the same feedback five times: the send button was pressed again while the bot did not answer."""
+        ledger = feedback.Ledger(self.root / "owner")
+        same = {"user": "owner", "manifest": self.owner_record, "load": "light", "note": "too thick"}
+        for second in (7, 7, 8):
+            ledger.append({**same, "ts": f"2026-11-12T05:58:0{second}+09:00"})
+        ledger.append({**same, "ts": "2026-11-12T06:10:00+09:00", "note": "another thought"})
+        gh = FakeGitHub()
+        self.sync(gh)
+        lines = [json.loads(x) for x in gh.files[f"{self.owner}/lesson-045/feedback.jsonl"].splitlines()]
+        self.assertEqual([x.get("note") for x in lines], ["the café scene was odd", "too thick", "another thought"])
+        self.assertEqual(len(ledger.events(self.owner_record)), 5, "the machine's own file is append-only and keeps every line")
+
     def test_progress_is_kept_per_branch(self):
         """Review of #197: after a change of `FEEDBACK_SYNC_BRANCH` the new branch got nothing (the progress was kept per repository)."""
         gh = FakeGitHub()

@@ -252,6 +252,7 @@ class FakeResponse:
         self.log.append(("send", content, kw))
 
     async def edit_message(self, **kw):
+        self.done = True
         self.log.append(("edit", kw.get("content"), kw))
 
     async def defer(self):
@@ -261,9 +262,21 @@ class FakeResponse:
         self.log.append(("modal", None, {"modal": modal}))
 
 
+class FakeFollowup:
+    def __init__(self, log):
+        self.log = log
+
+    async def send(self, content=None, **kw):
+        self.log.append(("followup", content, kw))
+
+
 def interaction(log, user=1, channel=5):
+    async def edit_original_response(**kw):
+        log.append(("edit_original", kw.get("content"), kw))
+
     return SimpleNamespace(
-        user=SimpleNamespace(id=user), channel_id=channel, response=FakeResponse(log)
+        user=SimpleNamespace(id=user), channel_id=channel, response=FakeResponse(log),
+        followup=FakeFollowup(log), edit_original_response=edit_original_response,
     )
 
 
@@ -513,6 +526,30 @@ class StrugglingItemsTests(unittest.TestCase):
 
             asyncio.run(run())
         return calls
+
+    def test_the_same_answers_sent_again_are_written_once_and_reported_again(self):
+        """Lesson 54's ledger holds one feedback five times. The same answers for the same record are one line, whichever form sent them; the
+        report to the lessons is sent each time, so sending again still repairs a report that failed («もう一度 /lesson-feedback から送ると
+        反映されます»)."""
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            ledger = saved(Path(td))
+
+            async def report(name, lesson, ids, effective, reasons=None):
+                calls.append(effective)
+                return True
+
+            fb = Feedback({1: "yuki"}, lambda n: Path(td) / n, 0, lambda: NOW, report_feedback=report)
+
+            async def run():
+                for load in ("light", "light", "right"):
+                    log = []
+                    await fb.open_form(interaction(log))
+                    await submit_form(self, log, log[-1][2], load)
+
+            asyncio.run(run())
+            self.assertEqual([e["load"] for e in ledger.events()], ["light", "right"])
+        self.assertEqual(calls, ["light", "light", "right"])
 
     def test_the_load_is_sent_even_when_nothing_is_selected(self):
         self.assertEqual(self._submit([], "light"), [("yuki", 12, [], "light")])
@@ -1120,7 +1157,7 @@ class FailureTests(unittest.TestCase):
 
     def test_a_send_that_cannot_be_recorded_says_so_and_can_be_pressed_again(self):
         """#80 review: the one component handler that writes. If the append fails the learner is told the feedback was not
-        recorded (not that «記録は残っています»), and the view is still live so 「送信」 works a second time.
+        recorded (not that «記録は残っています»), the form is put back, and the view is still live so 「送信」 works a second time.
         """
         from src.interaction import SEND_FAILED
 
@@ -1141,7 +1178,10 @@ class FailureTests(unittest.TestCase):
                 log = []
                 with self.assertLogs(level="ERROR"):
                     await send.callback(interaction(log))
-                self.assertEqual(log, [("send", SEND_FAILED, {"ephemeral": True})])
+                self.assertEqual([x[0] for x in log], ["edit", "edit_original", "followup"])
+                self.assertIs(log[1][2]["view"], view, "the form is back")
+                self.assertIn("今日の新しい表現", log[1][1])
+                self.assertEqual(log[2][1:], (SEND_FAILED, {"ephemeral": True}))
                 self.assertFalse(view.is_finished())
                 await send.callback(interaction(log))
                 return view, log
@@ -1149,7 +1189,95 @@ class FailureTests(unittest.TestCase):
             view, log = asyncio.run(run())
             self.assertTrue(view.is_finished())
             self.assertEqual(len(calls), 2)
-            self.assertEqual(log[-1][0], "edit")
+            self.assertEqual(log[-1][0], "edit_original")
+            self.assertIn("記録しました", log[-1][1])
+
+    def test_the_button_is_answered_before_the_record_and_a_second_press_records_nothing(self):
+        """Lesson 54: the bot did not answer the send button in time, Discord said «interaction failed», the learner pressed again, and the same
+        feedback was stored five times. The button is answered first (the form closes on «記録しています…»), then the record is written; a press
+        that comes while it is being written is told to wait and writes nothing."""
+        from src.interaction import SENDING
+
+        with tempfile.TemporaryDirectory() as td:
+            record = saved(Path(td)).load()
+            assert record is not None
+            calls, order = [], []
+
+            async def run():
+                release = asyncio.Event()
+
+                async def submit(answers):
+                    order.append("submit")
+                    calls.append(1)
+                    await release.wait()
+
+                view = FeedbackView(record, 1, submit)
+                view.answers.load = "right"
+                send = next(c for c in view.children if getattr(c, "label", "") == "送信")
+                first, again = [], []
+
+                class Response(FakeResponse):
+                    async def edit_message(self, **kw):
+                        order.append("answered")
+                        await super().edit_message(**kw)
+
+                i = interaction(first)
+                i.response = Response(first)
+                task = asyncio.create_task(send.callback(i))
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                for _ in range(4):
+                    await send.callback(interaction(again))
+                release.set()
+                await task
+                return view, first, again
+
+            view, first, again = asyncio.run(run())
+            self.assertEqual(order, ["answered", "submit"])
+            self.assertEqual(calls, [1], "five presses, one record")
+            self.assertEqual([x[:2] for x in again], [("send", SENDING)] * 4)
+            self.assertIsNone(first[0][2]["view"], "the form is closed by the first answer")
+            self.assertIn("記録しています", first[0][1])
+            self.assertIn("記録しました", first[-1][1])
+            self.assertTrue(view.is_finished())
+
+    def test_when_the_interaction_is_dead_the_feedback_is_recorded_once_and_the_channel_is_told(self):
+        """The bot was too slow for Discord's three seconds, so nothing can be shown through the button: the feedback is still recorded (the
+        learner pressed send), and the channel says so, so the learner need not press again to find out."""
+        from src.interaction import SEND_SCREEN_FAILED
+
+        with tempfile.TemporaryDirectory() as td:
+            record = saved(Path(td)).load()
+            assert record is not None
+            calls, told = [], []
+
+            async def submit(answers):
+                calls.append(1)
+
+            async def notify(text):
+                told.append(text)
+
+            async def dead(*a, **kw):
+                raise RuntimeError("404 Not Found (error code: 10062): Unknown interaction")
+
+            async def run():
+                view = FeedbackView(record, 1, submit, notify=notify)
+                view.answers.load = "right"
+                send = next(c for c in view.children if getattr(c, "label", "") == "送信")
+                log = []
+                i = interaction(log)
+                i.response.edit_message = dead
+                i.response.send_message = dead
+                i.followup.send = dead
+                i.edit_original_response = dead
+                with self.assertLogs(level="ERROR"):
+                    await send.callback(i)
+                return view
+
+            view = asyncio.run(run())
+            self.assertEqual(calls, [1])
+            self.assertEqual(told, [SEND_SCREEN_FAILED])
+            self.assertTrue(view.is_finished())
 
     def test_a_screen_update_that_fails_after_the_write_says_it_was_recorded(self):
         """#80 review: the write is done when only the screen update fails (an expired token). The message must not say
