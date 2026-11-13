@@ -421,6 +421,10 @@ class ReviewQueue:
         (期限・結果・source_lesson はそのまま: language-learning-audio #73).
         未解決 (open) の項目 (plan の open_items と open_not_fitted) は、すべて振り返りで確かめる
         (``_ask_open_items``). 足した数を返す."""
+        # language-learning-audio #429: レッスンが扱わなくなった項目 (指示を「置き換えない」を選んだときの指示の表現) の問いはもう出さない
+        withdrawn = set(plan.get("withdrawn_items") or [])
+        for key in [k for k, e in self.entries.items() if withdrawn & set(e.items)]:
+            del self.entries[key]
         new_ids = {i["id"] for i in plan.get("new_items", [])}
         open_ids = set(plan.get("open_items") or []) | set(
             plan.get("open_not_fitted") or []
