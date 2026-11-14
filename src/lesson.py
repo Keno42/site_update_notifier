@@ -215,8 +215,10 @@ class LessonConfig:
         lever_args: list[str] | None = None,
         minutes: float | None = None,
         order: str | None = None,
+        instructions: str | None = None,
     ) -> list[str]:
-        """trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める).
+        """instructions: audiolesson の --instructions (UserSettings.instructions_arg). None なら渡さない.
+        trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める).
         lever_args: チャンネルのトピックのレバー (src/levers.py). None なら extra_args のまま.
         minutes: レッスンの長さ (None なら config の LESSON_MINUTES). order: 並び順 (usersettings.ORDER).
         今まで (spread) は渡さない: 並び順を知らない language-learning-audio でも動く."""
@@ -243,6 +245,7 @@ class LessonConfig:
             str(self.cache_dir(name)),
             *extra,
             *(["--order", order] if order and order != "spread" else []),
+            *(["--instructions", instructions] if instructions else []),
         ]
 
     def report_args(
@@ -457,6 +460,41 @@ def failure_message(rc_err: str) -> str:
     return f"生成に失敗しました:\n```\n{_tail(redact(rc_err))}\n```"
 
 
+INSTRUCTIONS_QUESTION = (
+    "これから、レッスンの指示（「繰り返してください」「聞いてください」など）を少しずつアイスランド語に置き換えていきます。いいですか？\n"
+    "この設定は後から /lesson-configure で変えられます。"
+)
+
+
+class InstructionsView(discord.ui.View):
+    """レッスンの指示をアイスランド語に置き換えるかの二択 (language-learning-audio #429). 本人だけが押せる. 押したら保存して、
+    ボタンを外す."""
+
+    def __init__(self, lessons: "Lessons", owner: int, name: str, timeout: float = 6 * 3600) -> None:
+        super().__init__(timeout=timeout)
+        self.lessons = lessons
+        self.owner = owner
+        self.name = name
+
+    async def choose(self, interaction: discord.Interaction, value: str) -> None:
+        if interaction.user.id != self.owner:
+            await interaction.response.send_message("このボタンは本人だけが使えます。", ephemeral=True)
+            return
+        self.lessons.set_instructions(self.name, value)
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"{INSTRUCTIONS_QUESTION}\n→ 「{usersettings.INSTRUCTIONS[value]}」にしました。", view=None
+        )
+
+    @discord.ui.button(label=usersettings.INSTRUCTIONS["gradual"], style=discord.ButtonStyle.primary)
+    async def gradual(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.choose(interaction, "gradual")
+
+    @discord.ui.button(label=usersettings.INSTRUCTIONS["off"], style=discord.ButtonStyle.secondary)
+    async def off(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.choose(interaction, "off")
+
+
 class RetryView(discord.ui.View):
     """生成に失敗したメッセージの「もう一度生成」ボタン (#110): 振り返りも「できた前提」も使わずに同じ長さで生成し直す. そのレッスンの本人だけ.
     /lesson と同じ busy の守りがあるので、二重には走らない."""
@@ -594,6 +632,42 @@ class Lessons:
                         logging.exception("先送りの報告失敗の通知も送れませんでした")
                 return
 
+    async def ask_instructions(self, channel: discord.abc.Messageable, owner: int, name: str) -> None:
+        """language-learning-audio #429 (owner, 2026-11-14): INSTRUCTIONS_ASK_FROM 回のレッスンを終えた人に、まだ答えていなければ
+        レッスンの開始時に一度だけ聞く. 答えはこのレッスンの生成から使う (振り返りの間に答えることが多い). 答えなければ次の /lesson でまた聞き、
+        その間は --instructions pending. 失敗してもレッスンは止めない."""
+        try:
+            if self.cfg.user_settings(name).instructions in usersettings.INSTRUCTIONS:
+                return
+            path = self.cfg.learner_path(name)
+            done = json.loads(path.read_text("utf-8")).get("lessons_completed", 0) if path.exists() else 0
+            if done < usersettings.INSTRUCTIONS_ASK_FROM:
+                return
+            await channel.send(INSTRUCTIONS_QUESTION, view=InstructionsView(self, owner, name))
+        except Exception as e:
+            logging.warning(f"指示の言語の質問を出せませんでした ({type(e).__name__})")
+
+    async def withdraw_instructions(self, name: str, queue: ReviewQueue) -> list[str]:
+        """language-learning-audio #429: 指示を「置き換えない」にした人の振り返りから、指示の表現 (audiolesson instructions) の問いを
+        外す. 振り返りを選ぶ前に毎回 (設定を変えた直後の /lesson も). plan.json の withdrawn_items は次の生成のあとにしか来ない (#224 のレビュー:
+        その間の振り返りに「Repeat.」→「Endurtaktu.」が出た). 読めなければ何もしない."""
+        if self.cfg.user_settings(name).instructions != "off" or not queue.entries:
+            return []
+        try:
+            rc, out, _ = await asyncio.wait_for(run_cli(self.cfg, ["instructions", self.cfg.curriculum]), timeout=60)
+            if rc != 0:
+                logging.warning(f"指示の表現を読めませんでした (rc={rc})")
+                return []
+            return queue.withdraw(json.loads(out)["items"])
+        except Exception as e:
+            logging.warning(f"指示の表現を読めませんでした ({type(e).__name__})")
+            return []
+
+    def set_instructions(self, name: str, value: str) -> None:
+        settings = self.cfg.user_settings(name)
+        settings.instructions = value
+        usersettings.save(self.cfg.user_dir(name), settings)
+
     async def configure(
         self,
         interaction: discord.Interaction,
@@ -601,6 +675,7 @@ class Lessons:
         new_list: str | None = None,
         order: str | None = None,
         explain: str | None = None,
+        instructions: str | None = None,
     ) -> None:
         """/lesson-configure: 指定した項目だけ変えて保存し、今の設定を本人にだけ見せる."""
         name = self.cfg.users.get(interaction.user.id)
@@ -612,7 +687,7 @@ class Lessons:
         settings = self.cfg.user_settings(name)
         changed = {
             k: v
-            for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order), ("explain", explain))
+            for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order), ("explain", explain), ("instructions", instructions))
             if v is not None
         }
         for k, v in changed.items():
@@ -659,6 +734,7 @@ class Lessons:
         try:
             # 外部処理を待つ前に、Discord の初回応答期限内に返事をする。
             await interaction.response.send_message("レッスンを準備しています…")
+            await self.ask_instructions(channel, interaction.user.id, name)
             await self.flush_deferred(name)  # 進行中の記録が捨てられて残った報告 (is_busy)
             self.cfg.user_dir(name).mkdir(parents=True, exist_ok=True)
             m = minutes or self.cfg.user_settings(name).minutes
@@ -673,6 +749,8 @@ class Lessons:
             today = self.today()
             path = self.cfg.pending_path(name)
             queue = ReviewQueue.load(path, today)
+            if await self.withdraw_instructions(name, queue):
+                queue.save(path)  # 「置き換えない」: 指示の表現の問いを、振り返りを選ぶ前に外す (#224 のレビュー)
             if not auto and queue.drop_stale_new():
                 queue.save(path)
             if not auto:
@@ -1097,6 +1175,7 @@ class Lessons:
             lever_args,
             minutes=minutes or settings.minutes,
             order=settings.order,
+            instructions=settings.instructions_arg(),
         )
         if source is not None and str(source.path) not in args:
             source = None  # LESSON_EXTRA_ARGS の --trip が優先された
@@ -1211,7 +1290,7 @@ class Lessons:
             lever_args, _ = levers.from_topic(channel)
             # the CLI runs inside the with: a trip set in the channel topic is a temporary file that the with removes
             with trip.resolve(self.cfg.trip_path(name), channel) as (source, _warning):
-                args = self.cfg.generate_args(name, False, source.path if source else None, lever_args, minutes=minutes, order=settings.order)
+                args = self.cfg.generate_args(name, False, source.path if source else None, lever_args, minutes=minutes, order=settings.order, instructions=settings.instructions_arg())
                 args = [*args, "--dry-run", "--no-audio"]
                 if "--out" in args:
                     args[args.index("--out") + 1] = str(tmp)
@@ -1458,6 +1537,7 @@ def setup(
         new_list="新出表現の一覧を出すタイミング",
         order="新出と既出の並び順",
         explain="フィードバックで「練習が足りなかった」表現を選んだあと、理由に合わせた解説を出すか",
+        instructions="レッスンの指示（「繰り返してください」など）をアイスランド語に置き換えるか",
     )
     @app_commands.choices(
         minutes=minute_choices,
@@ -1470,6 +1550,9 @@ def setup(
         explain=[
             app_commands.Choice(name=v, value=k) for k, v in usersettings.EXPLAIN.items()
         ],
+        instructions=[
+            app_commands.Choice(name=v, value=k) for k, v in usersettings.INSTRUCTIONS.items()
+        ],
     )
     async def lesson_configure(
         interaction: discord.Interaction,
@@ -1477,6 +1560,7 @@ def setup(
         new_list: app_commands.Choice[str] | None = None,
         order: app_commands.Choice[str] | None = None,
         explain: app_commands.Choice[str] | None = None,
+        instructions: app_commands.Choice[str] | None = None,
     ) -> None:
         await lessons.configure(
             interaction,
@@ -1484,6 +1568,7 @@ def setup(
             new_list.value if new_list else None,
             order.value if order else None,
             explain.value if explain else None,
+            instructions.value if instructions else None,
         )
 
     async def lesson_auto(interaction: discord.Interaction) -> None:

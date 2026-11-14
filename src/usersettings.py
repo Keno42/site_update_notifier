@@ -28,6 +28,10 @@ EXPLAIN = {
     "on": "フィードバックで選んだ表現を解説する",
     "off": "解説しない",
 }
+# language-learning-audio #429 (owner, 2026-11-14): レッスンの指示をアイスランド語に置き換えるか. 10回目あたりのレッスン開始時に一度だけ聞く
+# (``Lessons.ask_instructions``). 未回答 (None) は audiolesson の --instructions pending: まだ一つも習っていなければ置き換えず、習い始めていれば続ける
+INSTRUCTIONS = {"gradual": "段階的に進める", "off": "置き換えない"}
+INSTRUCTIONS_ASK_FROM = 10  # この数のレッスンを終えたら聞く (audiolesson の PlanConfig.commands_from と同じ: そこから1つ目を教える)
 # これより短いレッスンのフィードバックは「量・難しさ」「練習が足りなかった」と送信だけ
 COMPACT_FEEDBACK_BELOW = 15
 # 必須にする未解決項目の確認の、BASE_MINUTES での目安 (短いレッスンだけに使う上限)
@@ -42,12 +46,19 @@ class UserSettings:
     # EXPLAIN のキー: フィードバックの「練習が足りなかった」表現を、選んだ理由に合わせて LLM が解説する (language-learning-audio,
     # 2026-10-16 の owner の案). 既定は今までどおり出さない
     explain: str = "off"
+    # INSTRUCTIONS のキー. None はまだ聞いていない / 答えていない
+    instructions: str | None = None
 
     def describe(self) -> str:
         return (
             f"レッスンの長さ: {self.minutes:g}分 / 新出表現の一覧: {NEW_LIST[self.new_list]}"
             f" / 並び順: {ORDER[self.order]} / フィードバック後の解説: {EXPLAIN[self.explain]}"
+            f" / アイスランド語の指示: {INSTRUCTIONS.get(self.instructions or '', '未回答')}"
         )
+
+    def instructions_arg(self) -> str:
+        """audiolesson generate の --instructions: 答えたらそれ、未回答なら pending."""
+        return self.instructions if self.instructions in INSTRUCTIONS else "pending"
 
 
 def load(user_dir: Path, default: UserSettings, legacy: UserSettings) -> UserSettings:
@@ -75,6 +86,7 @@ def load(user_dir: Path, default: UserSettings, legacy: UserSettings) -> UserSet
         ),
         order=raw["order"] if raw.get("order") in ORDER else default.order,
         explain=raw["explain"] if raw.get("explain") in EXPLAIN else default.explain,
+        instructions=raw["instructions"] if raw.get("instructions") in INSTRUCTIONS else None,
     )
 
 

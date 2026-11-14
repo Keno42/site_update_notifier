@@ -412,6 +412,14 @@ class ReviewQueue:
         else:
             self.pending_reports.pop(lesson, None)
 
+    def withdraw(self, items) -> list[str]:
+        """language-learning-audio #429: ``items`` の問いをキューから外す (指示を「置き換えない」を選んだときの指示の表現). 外したキーを返す."""
+        gone = set(items)
+        keys = [k for k, e in self.entries.items() if gone & set(e.items)]
+        for k in keys:
+            del self.entries[k]
+        return keys
+
     def add_from_plan(self, plan: dict, today: date) -> int:
         """生成したレッスンの問いを足す. 既存の問いは削除しない.
 
@@ -421,6 +429,8 @@ class ReviewQueue:
         (期限・結果・source_lesson はそのまま: language-learning-audio #73).
         未解決 (open) の項目 (plan の open_items と open_not_fitted) は、すべて振り返りで確かめる
         (``_ask_open_items``). 足した数を返す."""
+        # language-learning-audio #429: レッスンが扱わなくなった項目 (指示を「置き換えない」を選んだときの指示の表現) の問いはもう出さない
+        self.withdraw(plan.get("withdrawn_items") or [])
         new_ids = {i["id"] for i in plan.get("new_items", [])}
         open_ids = set(plan.get("open_items") or []) | set(
             plan.get("open_not_fitted") or []
