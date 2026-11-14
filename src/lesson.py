@@ -647,6 +647,22 @@ class Lessons:
         except Exception as e:
             logging.warning(f"指示の言語の質問を出せませんでした ({type(e).__name__})")
 
+    async def withdraw_instructions(self, name: str, queue: ReviewQueue) -> list[str]:
+        """language-learning-audio #429: 指示を「置き換えない」にした人の振り返りから、指示の表現 (audiolesson instructions) の問いを
+        外す. 振り返りを選ぶ前に毎回 (設定を変えた直後の /lesson も). plan.json の withdrawn_items は次の生成のあとにしか来ない (#224 のレビュー:
+        その間の振り返りに「Repeat.」→「Endurtaktu.」が出た). 読めなければ何もしない."""
+        if self.cfg.user_settings(name).instructions != "off" or not queue.entries:
+            return []
+        try:
+            rc, out, _ = await asyncio.wait_for(run_cli(self.cfg, ["instructions", self.cfg.curriculum]), timeout=60)
+            if rc != 0:
+                logging.warning(f"指示の表現を読めませんでした (rc={rc})")
+                return []
+            return queue.withdraw(json.loads(out)["items"])
+        except Exception as e:
+            logging.warning(f"指示の表現を読めませんでした ({type(e).__name__})")
+            return []
+
     def set_instructions(self, name: str, value: str) -> None:
         settings = self.cfg.user_settings(name)
         settings.instructions = value
@@ -733,6 +749,8 @@ class Lessons:
             today = self.today()
             path = self.cfg.pending_path(name)
             queue = ReviewQueue.load(path, today)
+            if await self.withdraw_instructions(name, queue):
+                queue.save(path)  # 「置き換えない」: 指示の表現の問いを、振り返りを選ぶ前に外す (#224 のレビュー)
             if not auto and queue.drop_stale_new():
                 queue.save(path)
             if not auto:

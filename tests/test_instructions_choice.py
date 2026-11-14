@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from src import usersettings
-from src.lesson import INSTRUCTIONS_QUESTION, InstructionsView, LessonConfig, Lessons
+from src.lesson import INSTRUCTIONS_QUESTION, LLA_DIR, InstructionsView, LessonConfig, Lessons
 from src.review_queue import ReviewQueue
 from tests.test_lesson import FakeChannel
 from tests.test_review_queue import D, plan
@@ -106,6 +106,36 @@ class WithdrawnCardsTests(unittest.TestCase):
             p["withdrawn_items"] = ["endurtaktu", "hlustadu"]
             q.add_from_plan(p, D)
             self.assertEqual([e.items for e in q.entries.values()], [["a"]])
+
+
+
+@unittest.skipUnless((LLA_DIR / "audiolesson").exists(), "submodule not checked out")
+class OffBeforeTheReviewTests(unittest.TestCase):
+    """Review of #224: «置き換えない» already saved, /lesson still asked «Repeat.» → «Endurtaktu.»: the cards were dropped only by the next
+    plan.json (``withdrawn_items``), after the review. They leave the queue before the review is chosen, through the real CLI."""
+
+    def test_an_instruction_card_is_not_asked_once_off_is_chosen(self):
+        from datetime import timedelta
+
+        from src.review_queue import Entry
+        from tests.test_lesson import EndToEndTests
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = EndToEndTests.config(None, td)
+            lessons = Lessons(cfg, today=lambda: D)
+            path = cfg.pending_path("yuki")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            q = ReviewQueue.load(path, D)
+            for items, prompt, answer in ((["endurtaktu"], "Say: Repeat, as an instruction.", "Endurtaktu."), (["takk"], "Say: Thanks.", "Takk.")):
+                q.entries["|".join(items)] = Entry(items=items, prompt=prompt, answer=answer, source_lesson=1, due=(D - timedelta(days=1)).isoformat())
+            q.save(path)
+            lessons.set_instructions("yuki", "off")
+            channel, replies = FakeChannel(), []
+            asyncio.run(lessons.start(EndToEndTests.interaction(channel, replies)))
+            shown = "\n".join(c or "" for c, _ in replies)
+            self.assertIn("振り返り 1/1", shown, "the review asks the one card left")
+            self.assertNotIn("Repeat", shown)
+            self.assertEqual([e.items for e in ReviewQueue.load(path, D).entries.values()], [["takk"]], "and the card is gone from the queue")
 
 
 if __name__ == "__main__":
