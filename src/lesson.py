@@ -346,12 +346,17 @@ REFUSAL_MESSAGE = "音声合成のサービスが応答を拒否しています�
 #   「warning: openai-realtime could not say 'Endurtaktu.' (…); said in the profile's voice」 (one line)
 VOICE_FALLBACK_ALL_RE = re.compile(r"^speaker '([^']+)': provider '([^']+)' cannot run \((.*)\); said in the profile's voice$", re.M)
 VOICE_FALLBACK_LINE_RE = re.compile(r"^warning: (\S+) could not say (['\"])(.*?)\2 \(.*\); said in the profile's voice$", re.M)
+# language-learning-audio #578: a clip of the instructions' own voice is checked against the conversations' male voice (a cut clip,
+# «Hlustaðu.» said as «staðu», is far shorter); when that voice cannot say the line, the clip is used unchecked:
+#   「warning: openai-realtime could not check 'Hlustaðu.' against the profile's voice (…); used unchecked」
+VOICE_UNCHECKED_RE = re.compile(r"^warning: (\S+) could not check (['\"])(.*?)\2 against the profile's voice \(.*\); used unchecked$", re.M)
 VOICE_FALLBACK_SHOWN = 5
 
 
 def voice_fallbacks(err: str) -> dict:
     """What a successful generation's stderr says fell back from a speaker's own voice: ``{"all": reason}`` when the provider could not run
-    at all, ``{"lines": [...]}`` for the lines it could not say as written; {} when nothing fell back."""
+    at all, ``{"lines": [...]}`` for the lines it could not say as written, ``{"unchecked": [...]}`` for the lines said in its voice with
+    no check that the clip is whole (language-learning-audio #578); {} when there is none of these."""
     out: dict = {}
     # the renderer's progress («  synthesized 10/20 new lines») ends in «\r», not «\n»: a warning right after it starts no line until
     # «\r» is read as one (review of #233)
@@ -361,17 +366,29 @@ def voice_fallbacks(err: str) -> dict:
     lines = list(dict.fromkeys(m.group(3) for m in VOICE_FALLBACK_LINE_RE.finditer(err)))
     if lines:
         out["lines"] = lines
+    unchecked = list(dict.fromkeys(m.group(3) for m in VOICE_UNCHECKED_RE.finditer(err)))
+    if unchecked:
+        out["unchecked"] = unchecked
     return out
 
 
-def voice_fallback_message(fallback: dict) -> str:
-    """The channel's one-line note that the instructions were read in the conversations' male voice (#563)."""
-    if "all" in fallback:
-        return f"⚠️ 指示の声 (OpenAI) が使えなかったため ({fallback['all']})、今日の指示はすべて会話の男性の声で読まれています。"
-    lines = fallback["lines"]
+def _shown(lines: list[str]) -> str:
     shown = "、".join(f"«{t}»" for t in lines[:VOICE_FALLBACK_SHOWN])
     more = f" ほか {len(lines) - VOICE_FALLBACK_SHOWN} 行" if len(lines) > VOICE_FALLBACK_SHOWN else ""
-    return f"⚠️ 次の指示は指示の声 (OpenAI) で読めなかったため、会話の男性の声で読まれています: {shown}{more}"
+    return shown + more
+
+
+def voice_fallback_message(fallback: dict) -> str:
+    """The channel's note on the instructions' voice (#563): read in the conversations' male voice, all of them or some lines; and lines
+    read in the instructions' voice whose clip could not be checked for a cut (language-learning-audio #578), one line each."""
+    notes = []
+    if "all" in fallback:
+        notes.append(f"⚠️ 指示の声 (OpenAI) が使えなかったため ({fallback['all']})、今日の指示はすべて会話の男性の声で読まれています。")
+    elif fallback.get("lines"):
+        notes.append(f"⚠️ 次の指示は指示の声 (OpenAI) で読めなかったため、会話の男性の声で読まれています: {_shown(fallback['lines'])}")
+    if fallback.get("unchecked"):
+        notes.append(f"⚠️ 次の指示は、途中で切れていないかを確かめられないまま指示の声 (OpenAI) で読まれています: {_shown(fallback['unchecked'])}")
+    return "\n".join(notes)
 
 
 async def run_cli(
@@ -1238,7 +1255,7 @@ class Lessons:
                 return
             fallback = voice_fallbacks(err)
             if fallback:
-                logging.warning("指示の声が会話の声に戻りました (%s): %s", name, fallback)
+                logging.warning("指示の声に注意があります (会話の声に戻った行、確かめられなかった行) (%s): %s", name, fallback)
             plan_path = latest_plan(work)
             if plan_path is None:
                 await channel.send("生成結果 (plan.json) が見つかりませんでした。")
