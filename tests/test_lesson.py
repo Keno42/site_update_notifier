@@ -15,7 +15,7 @@ import hashlib
 
 import discord
 
-from src import feedback
+from src import feedback, lesson
 
 from src.lesson import (
     LLA_DIR,
@@ -1284,6 +1284,42 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(len(refused), 2, "the stale entry let /lesson go on")
             self.assertNotEqual(refused[1], refused[0])
             self.assertTrue(any("進行中の記録を捨てます" in m for m in logs.output))
+
+    def test_a_lesson_whose_instructions_fell_back_says_so(self):
+        """language-learning-audio #563/#575 (review of #233): the instructions' own voice (OpenAI) fell back to the conversations' male voice
+        and the generation still succeeded. The channel says which lines, the log keeps it, and the export holds ``voice_fallbacks.json``."""
+        real = lesson.run_cli
+        line = ("warning: openai-realtime could not say 'Endurtaktu.' (the realtime model did not say 'Endurtaktu.' as written "
+                "(last: 'Endurtaktu núna.')); said in the profile's voice\n")
+
+        async def with_fallback(*args, **kw):
+            rc, out, err = await real(*args, **kw)
+            return rc, out, err + line
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td)
+            lessons = Lessons(cfg)
+            channel = FakeChannel()
+            with mock.patch.object(lesson, "run_cli", with_fallback), self.assertLogs(level="WARNING") as logs:
+                asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            notes = [t for t, _ in channel.sent if t and t.startswith("⚠️")]
+            self.assertEqual(notes, ["⚠️ 次の指示は指示の声 (OpenAI) で読めなかったため、会話の男性の声で読まれています: «Endurtaktu.»"])
+            self.assertTrue(any("指示の声が会話の声に戻りました" in m for m in logs.output))
+            saved = list(Path(td).rglob("voice_fallbacks.json"))
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(json.loads(saved[0].read_text("utf-8")), {"lines": ["Endurtaktu."]})
+            # without a fallback, nothing is said
+            channel2 = FakeChannel()
+            asyncio.run(Lessons(self.config(Path(td) / "b")).generate_and_post(channel2, "yuki"))
+            self.assertFalse([t for t, _ in channel2.sent if t and t.startswith("⚠️")])
+
+    def test_the_fallback_note_reads_the_renderer_s_lines(self):
+        self.assertEqual(lesson.voice_fallbacks("synthesized 10/10\n"), {})
+        every = "speaker 'command': provider 'openai-realtime' cannot run (OPENAI_API_KEY is not set); said in the profile's voice\n"
+        self.assertEqual(lesson.voice_fallbacks(every), {"all": "OPENAI_API_KEY is not set"})
+        self.assertIn("今日の指示はすべて会話の男性の声", lesson.voice_fallback_message({"all": "OPENAI_API_KEY is not set"}))
+        many = "".join(f"warning: openai-realtime could not say 'L{k}.' (x); said in the profile's voice\n" for k in range(7))
+        self.assertTrue(lesson.voice_fallback_message(lesson.voice_fallbacks(many)).endswith("«L4.» ほか 2 行"))
 
     def test_auto_skips_review_and_self_report(self):
         with tempfile.TemporaryDirectory() as td:
