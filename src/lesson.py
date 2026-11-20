@@ -88,6 +88,16 @@ class LessonConfig:
     default_order: str = "new-first"
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
+    # language-learning-audio #563: the instructions in Icelandic in OpenAI's realtime voice (the profile's ``command`` speaker); the key is
+    # the bot's own OpenAI key (CHATGPT_TOKEN), passed to the generation only. Without it the instructions keep the male native voice
+    openai_key: str = field(default="", repr=False)
+
+    def speech_env(self) -> dict[str, str]:
+        """The env a lesson's generation gets on top of the bot's: the sealed speech secrets (#119) and the OpenAI key."""
+        env = dict(secrets_box.environment())
+        if self.openai_key:
+            env["OPENAI_API_KEY"] = self.openai_key
+        return env
 
     @classmethod
     def from_module(cls, config: Any) -> "LessonConfig | None":
@@ -106,6 +116,7 @@ class LessonConfig:
             known=getattr(config, "LESSON_KNOWN", defaults.known),
             profile=getattr(config, "LESSON_PROFILE", defaults.profile),
             minutes=getattr(config, "LESSON_MINUTES", defaults.minutes),
+            openai_key=getattr(config, "CHATGPT_TOKEN", "") or "",
             extra_args=list(getattr(config, "LESSON_EXTRA_ARGS", [])),
             keep_cache=getattr(config, "LESSON_KEEP_CACHE", defaults.keep_cache),
             upload_limit_mb=getattr(
@@ -328,6 +339,39 @@ RETRY_RE = re.compile(r"edge-tts: .*?\((\d+)/(\d+)\)")
 # 音声合成のサービスが断った失敗 (stderr の特徴): 一文で言い、全文はログに回す
 REFUSAL_MARKERS = ("WSServerHandshakeError", "speech service refused", "service refusing", "NoAudioReceived")
 REFUSAL_MESSAGE = "音声合成のサービスが応答を拒否しています。しばらく待ってからもう一度生成してください。"
+
+# language-learning-audio #563/#575: the instructions' own voice (OpenAI's realtime model) fell back to the male native voice, the voice the
+# learner asked to leave. The renderer says so on stderr, one line each, and the lesson still succeeds:
+#   「speaker 'command': provider 'openai-realtime' cannot run (OPENAI_API_KEY is not set); said in the profile's voice」 (every instruction)
+#   「warning: openai-realtime could not say 'Endurtaktu.' (…); said in the profile's voice」 (one line)
+VOICE_FALLBACK_ALL_RE = re.compile(r"^speaker '([^']+)': provider '([^']+)' cannot run \((.*)\); said in the profile's voice$", re.M)
+VOICE_FALLBACK_LINE_RE = re.compile(r"^warning: (\S+) could not say (['\"])(.*?)\2 \(.*\); said in the profile's voice$", re.M)
+VOICE_FALLBACK_SHOWN = 5
+
+
+def voice_fallbacks(err: str) -> dict:
+    """What a successful generation's stderr says fell back from a speaker's own voice: ``{"all": reason}`` when the provider could not run
+    at all, ``{"lines": [...]}`` for the lines it could not say as written; {} when nothing fell back."""
+    out: dict = {}
+    # the renderer's progress («  synthesized 10/20 new lines») ends in «\r», not «\n»: a warning right after it starts no line until
+    # «\r» is read as one (review of #233)
+    err = err.replace("\r\n", "\n").replace("\r", "\n")
+    if m := VOICE_FALLBACK_ALL_RE.search(err):
+        out["all"] = m.group(3)
+    lines = list(dict.fromkeys(m.group(3) for m in VOICE_FALLBACK_LINE_RE.finditer(err)))
+    if lines:
+        out["lines"] = lines
+    return out
+
+
+def voice_fallback_message(fallback: dict) -> str:
+    """The channel's one-line note that the instructions were read in the conversations' male voice (#563)."""
+    if "all" in fallback:
+        return f"⚠️ 指示の声 (OpenAI) が使えなかったため ({fallback['all']})、今日の指示はすべて会話の男性の声で読まれています。"
+    lines = fallback["lines"]
+    shown = "、".join(f"«{t}»" for t in lines[:VOICE_FALLBACK_SHOWN])
+    more = f" ほか {len(lines) - VOICE_FALLBACK_SHOWN} 行" if len(lines) > VOICE_FALLBACK_SHOWN else ""
+    return f"⚠️ 次の指示は指示の声 (OpenAI) で読めなかったため、会話の男性の声で読まれています: {shown}{more}"
 
 
 async def run_cli(
@@ -1183,7 +1227,7 @@ class Lessons:
             status = StatusMessage(channel)
             await status.start()
             async with channel.typing():
-                rc, out, err = await run_cli(self.cfg, args, status.update, env=secrets_box.environment())
+                rc, out, err = await run_cli(self.cfg, args, status.update, env=self.cfg.speech_env())
             await status.finish(rc == 0)
             if rc != 0:
                 logging.error("生成に失敗しました (%s): %s", name, err or out)  # 全文はログへ
@@ -1192,6 +1236,9 @@ class Lessons:
                     **({} if auto else {"view": RetryView(self, name, minutes or settings.minutes)}),
                 )
                 return
+            fallback = voice_fallbacks(err)
+            if fallback:
+                logging.warning("指示の声が会話の声に戻りました (%s): %s", name, fallback)
             plan_path = latest_plan(work)
             if plan_path is None:
                 await channel.send("生成結果 (plan.json) が見つかりませんでした。")
@@ -1214,6 +1261,8 @@ class Lessons:
             tomorrow = today + timedelta(days=1)
             if manifest:  # 確認待ちの内訳を記録のディレクトリに別ファイルで足す (数だけ, #123. manifest は変えない): サーバに入らなくても日々の読みで追える
                 feedback.Ledger(self.cfg.user_dir(name)).save_extra(manifest, "review_backlog.json", queue.backlog_summary(tomorrow))
+                if fallback:  # #563: どの指示が会話の声で読まれたかもエクスポートに載せる (翌日の振り返りで読める)
+                    feedback.Ledger(self.cfg.user_dir(name)).save_extra(manifest, "voice_fallbacks.json", fallback)
             # 次の振り返りは、その人の既定の長さで見積もる
             size = self.cfg.review_size(settings.minutes)
             note = (
@@ -1236,6 +1285,8 @@ class Lessons:
                 guide,
                 new_list=settings.new_list,
             )
+            if fallback:
+                await channel.send(voice_fallback_message(fallback))
             self.clear_generating(name)  # 投稿できた
         finally:
             cleanup(work)

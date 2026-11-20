@@ -15,7 +15,7 @@ import hashlib
 
 import discord
 
-from src import feedback
+from src import feedback, lesson
 
 from src.lesson import (
     LLA_DIR,
@@ -64,6 +64,18 @@ class ConfigTests(unittest.TestCase):
     def test_disabled_without_root_or_users(self):
         self.assertIsNone(LessonConfig.from_module(SimpleNamespace()))
         self.assertIsNone(LessonConfig.from_module(SimpleNamespace(LESSON_ROOT="/x")))
+
+    def test_the_generation_gets_the_openai_key_for_the_instructions_voice(self):
+        """language-learning-audio #563: the profile's ``command`` speaker is OpenAI's realtime voice; its key is the bot's own (CHATGPT_TOKEN),
+        given to the generation's env only, beside the sealed speech secrets."""
+        with mock.patch("src.secrets_box.environment", return_value={"AZURE_SPEECH_KEY": "k"}):
+            cfg = LessonConfig.from_module(SimpleNamespace(LESSON_ROOT="/data", LESSON_USERS={1: "yuki"}, CHATGPT_TOKEN="sk-test"))
+            assert cfg is not None
+            self.assertEqual(cfg.speech_env(), {"AZURE_SPEECH_KEY": "k", "OPENAI_API_KEY": "sk-test"})
+            self.assertNotIn("sk-test", repr(cfg), "the key is not printed with the config")
+            bare = LessonConfig.from_module(SimpleNamespace(LESSON_ROOT="/data", LESSON_USERS={1: "yuki"}))
+            assert bare is not None
+            self.assertEqual(bare.speech_env(), {"AZURE_SPEECH_KEY": "k"}, "no key: the instructions keep the male native voice")
 
     def test_defaults_and_args(self):
         cfg = LessonConfig.from_module(
@@ -1272,6 +1284,52 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(len(refused), 2, "the stale entry let /lesson go on")
             self.assertNotEqual(refused[1], refused[0])
             self.assertTrue(any("進行中の記録を捨てます" in m for m in logs.output))
+
+    def test_a_lesson_whose_instructions_fell_back_says_so(self):
+        """language-learning-audio #563/#575 (review of #233): the instructions' own voice (OpenAI) fell back to the conversations' male voice
+        and the generation still succeeded. The channel says which lines, the log keeps it, and the export holds ``voice_fallbacks.json``."""
+        real = lesson.run_cli
+        line = ("warning: openai-realtime could not say 'Endurtaktu.' (the realtime model did not say 'Endurtaktu.' as written "
+                "(last: 'Endurtaktu núna.')); said in the profile's voice\n")
+
+        async def with_fallback(*args, **kw):
+            rc, out, err = await real(*args, **kw)
+            return rc, out, err + line
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.config(td)
+            lessons = Lessons(cfg)
+            channel = FakeChannel()
+            with mock.patch.object(lesson, "run_cli", with_fallback), self.assertLogs(level="WARNING") as logs:
+                asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            notes = [t for t, _ in channel.sent if t and t.startswith("⚠️")]
+            self.assertEqual(notes, ["⚠️ 次の指示は指示の声 (OpenAI) で読めなかったため、会話の男性の声で読まれています: «Endurtaktu.»"])
+            self.assertTrue(any("指示の声が会話の声に戻りました" in m for m in logs.output))
+            saved = list(Path(td).rglob("voice_fallbacks.json"))
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(json.loads(saved[0].read_text("utf-8")), {"lines": ["Endurtaktu."]})
+            # without a fallback, nothing is said
+            channel2 = FakeChannel()
+            asyncio.run(Lessons(self.config(Path(td) / "b")).generate_and_post(channel2, "yuki"))
+            self.assertFalse([t for t, _ in channel2.sent if t and t.startswith("⚠️")])
+
+    def test_the_fallback_note_reads_the_renderer_s_lines(self):
+        self.assertEqual(lesson.voice_fallbacks("synthesized 10/10\n"), {})
+        every = "speaker 'command': provider 'openai-realtime' cannot run (OPENAI_API_KEY is not set); said in the profile's voice\n"
+        self.assertEqual(lesson.voice_fallbacks(every), {"all": "OPENAI_API_KEY is not set"})
+        self.assertIn("今日の指示はすべて会話の男性の声", lesson.voice_fallback_message({"all": "OPENAI_API_KEY is not set"}))
+        many = "".join(f"warning: openai-realtime could not say 'L{k}.' (x); said in the profile's voice\n" for k in range(7))
+        self.assertTrue(lesson.voice_fallback_message(lesson.voice_fallbacks(many)).endswith("«L4.» ほか 2 行"))
+
+    def test_a_warning_right_after_the_progress_line_is_read(self):
+        """Review of #233: the progress line ends in «\\r», so a warning after it is not at a line start until «\\r» counts as one."""
+        progress = "  synthesized 10/20 new lines\r"
+        line = "warning: openai-realtime could not say 'Endurtaktu.' (x); said in the profile's voice\n"
+        every = "speaker 'command': provider 'openai-realtime' cannot run (OPENAI_API_KEY is not set); said in the profile's voice\n"
+        self.assertEqual(lesson.voice_fallbacks(progress + line), {"lines": ["Endurtaktu."]})
+        self.assertEqual(lesson.voice_fallbacks(progress + every), {"all": "OPENAI_API_KEY is not set"})
+        self.assertEqual(lesson.voice_fallbacks(progress + every.replace("\n", "\r\n") + progress + line),
+                         {"all": "OPENAI_API_KEY is not set", "lines": ["Endurtaktu."]})
 
     def test_auto_skips_review_and_self_report(self):
         with tempfile.TemporaryDirectory() as td:
