@@ -1321,6 +1321,16 @@ class EndToEndTests(unittest.TestCase):
         many = "".join(f"warning: openai-realtime could not say 'L{k}.' (x); said in the profile's voice\n" for k in range(7))
         self.assertTrue(lesson.voice_fallback_message(lesson.voice_fallbacks(many)).endswith("«L4.» ほか 2 行"))
 
+    def test_a_warning_right_after_the_progress_line_is_read(self):
+        """Review of #233: the progress line ends in «\\r», so a warning after it is not at a line start until «\\r» counts as one."""
+        progress = "  synthesized 10/20 new lines\r"
+        line = "warning: openai-realtime could not say 'Endurtaktu.' (x); said in the profile's voice\n"
+        every = "speaker 'command': provider 'openai-realtime' cannot run (OPENAI_API_KEY is not set); said in the profile's voice\n"
+        self.assertEqual(lesson.voice_fallbacks(progress + line), {"lines": ["Endurtaktu."]})
+        self.assertEqual(lesson.voice_fallbacks(progress + every), {"all": "OPENAI_API_KEY is not set"})
+        self.assertEqual(lesson.voice_fallbacks(progress + every.replace("\n", "\r\n") + progress + line),
+                         {"all": "OPENAI_API_KEY is not set", "lines": ["Endurtaktu."]})
+
     def test_auto_skips_review_and_self_report(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = LessonConfig(

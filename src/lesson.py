@@ -353,6 +353,9 @@ def voice_fallbacks(err: str) -> dict:
     """What a successful generation's stderr says fell back from a speaker's own voice: ``{"all": reason}`` when the provider could not run
     at all, ``{"lines": [...]}`` for the lines it could not say as written; {} when nothing fell back."""
     out: dict = {}
+    # the renderer's progress («  synthesized 10/20 new lines») ends in «\r», not «\n»: a warning right after it starts no line until
+    # «\r» is read as one (review of #233)
+    err = err.replace("\r\n", "\n").replace("\r", "\n")
     if m := VOICE_FALLBACK_ALL_RE.search(err):
         out["all"] = m.group(3)
     lines = list(dict.fromkeys(m.group(3) for m in VOICE_FALLBACK_LINE_RE.finditer(err)))
