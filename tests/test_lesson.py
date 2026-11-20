@@ -65,6 +65,18 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNone(LessonConfig.from_module(SimpleNamespace()))
         self.assertIsNone(LessonConfig.from_module(SimpleNamespace(LESSON_ROOT="/x")))
 
+    def test_the_generation_gets_the_openai_key_for_the_instructions_voice(self):
+        """language-learning-audio #563: the profile's ``command`` speaker is OpenAI's realtime voice; its key is the bot's own (CHATGPT_TOKEN),
+        given to the generation's env only, beside the sealed speech secrets."""
+        with mock.patch("src.secrets_box.environment", return_value={"AZURE_SPEECH_KEY": "k"}):
+            cfg = LessonConfig.from_module(SimpleNamespace(LESSON_ROOT="/data", LESSON_USERS={1: "yuki"}, CHATGPT_TOKEN="sk-test"))
+            assert cfg is not None
+            self.assertEqual(cfg.speech_env(), {"AZURE_SPEECH_KEY": "k", "OPENAI_API_KEY": "sk-test"})
+            self.assertNotIn("sk-test", repr(cfg), "the key is not printed with the config")
+            bare = LessonConfig.from_module(SimpleNamespace(LESSON_ROOT="/data", LESSON_USERS={1: "yuki"}))
+            assert bare is not None
+            self.assertEqual(bare.speech_env(), {"AZURE_SPEECH_KEY": "k"}, "no key: the instructions keep the male native voice")
+
     def test_defaults_and_args(self):
         cfg = LessonConfig.from_module(
             SimpleNamespace(

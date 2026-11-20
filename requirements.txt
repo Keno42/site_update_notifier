@@ -3,4 +3,5 @@ discord.py==2.4.0
 openai==1.65.4
 slack_bolt
 edge-tts>=7.3.1  # 7.3.1 fixes the 403 from the speech service
+websockets>=12  # language-learning-audio #563: the instructions' voice, OpenAI's realtime model
 PyNaCl

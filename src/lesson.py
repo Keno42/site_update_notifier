@@ -88,6 +88,16 @@ class LessonConfig:
     default_order: str = "new-first"
     python: str = sys.executable
     lla_dir: Path = LLA_DIR
+    # language-learning-audio #563: the instructions in Icelandic in OpenAI's realtime voice (the profile's ``command`` speaker); the key is
+    # the bot's own OpenAI key (CHATGPT_TOKEN), passed to the generation only. Without it the instructions keep the male native voice
+    openai_key: str = field(default="", repr=False)
+
+    def speech_env(self) -> dict[str, str]:
+        """The env a lesson's generation gets on top of the bot's: the sealed speech secrets (#119) and the OpenAI key."""
+        env = dict(secrets_box.environment())
+        if self.openai_key:
+            env["OPENAI_API_KEY"] = self.openai_key
+        return env
 
     @classmethod
     def from_module(cls, config: Any) -> "LessonConfig | None":
@@ -106,6 +116,7 @@ class LessonConfig:
             known=getattr(config, "LESSON_KNOWN", defaults.known),
             profile=getattr(config, "LESSON_PROFILE", defaults.profile),
             minutes=getattr(config, "LESSON_MINUTES", defaults.minutes),
+            openai_key=getattr(config, "CHATGPT_TOKEN", "") or "",
             extra_args=list(getattr(config, "LESSON_EXTRA_ARGS", [])),
             keep_cache=getattr(config, "LESSON_KEEP_CACHE", defaults.keep_cache),
             upload_limit_mb=getattr(
@@ -1183,7 +1194,7 @@ class Lessons:
             status = StatusMessage(channel)
             await status.start()
             async with channel.typing():
-                rc, out, err = await run_cli(self.cfg, args, status.update, env=secrets_box.environment())
+                rc, out, err = await run_cli(self.cfg, args, status.update, env=self.cfg.speech_env())
             await status.finish(rc == 0)
             if rc != 0:
                 logging.error("生成に失敗しました (%s): %s", name, err or out)  # 全文はログへ
