@@ -1304,7 +1304,7 @@ class EndToEndTests(unittest.TestCase):
                 asyncio.run(lessons.generate_and_post(channel, "yuki"))
             notes = [t for t, _ in channel.sent if t and t.startswith("⚠️")]
             self.assertEqual(notes, ["⚠️ 次の指示は指示の声 (OpenAI) で読めなかったため、会話の男性の声で読まれています: «Endurtaktu.»"])
-            self.assertTrue(any("指示の声が会話の声に戻りました" in m for m in logs.output))
+            self.assertTrue(any("指示の声に注意があります" in m for m in logs.output))
             saved = list(Path(td).rglob("voice_fallbacks.json"))
             self.assertEqual(len(saved), 1)
             self.assertEqual(json.loads(saved[0].read_text("utf-8")), {"lines": ["Endurtaktu."]})
@@ -1320,6 +1320,33 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn("今日の指示はすべて会話の男性の声", lesson.voice_fallback_message({"all": "OPENAI_API_KEY is not set"}))
         many = "".join(f"warning: openai-realtime could not say 'L{k}.' (x); said in the profile's voice\n" for k in range(7))
         self.assertTrue(lesson.voice_fallback_message(lesson.voice_fallbacks(many)).endswith("«L4.» ほか 2 行"))
+
+    def test_an_unchecked_instruction_is_said(self):
+        """language-learning-audio #578 (review): when the conversations' male voice cannot say a line, the instructions' own clip of it is
+        used with no check for a cut («Hlustaðu.» was once said as «staðu»). The renderer warns on stderr; the channel says which lines, and
+        the export keeps them, as for a fallback."""
+        line = ("warning: openai-realtime could not check 'Hlustaðu.' against the profile's voice (edge-tts: service refusing (403)); "
+                "used unchecked\n")
+        self.assertEqual(lesson.voice_fallbacks("  synthesized 3/9 new lines\r" + line), {"unchecked": ["Hlustaðu."]})
+        self.assertEqual(lesson.voice_fallback_message({"unchecked": ["Hlustaðu."]}),
+                         "⚠️ 次の指示は、途中で切れていないかを確かめられないまま指示の声 (OpenAI) で読まれています: «Hlustaðu.»")
+        both = lesson.voice_fallbacks("warning: openai-realtime could not say 'Endurtaktu.' (x); said in the profile's voice\n" + line)
+        self.assertEqual(both, {"lines": ["Endurtaktu."], "unchecked": ["Hlustaðu."]})
+        self.assertEqual(len(lesson.voice_fallback_message(both).splitlines()), 2, "one note each")
+        real = lesson.run_cli
+
+        async def unchecked(*args, **kw):
+            rc, out, err = await real(*args, **kw)
+            return rc, out, err + line
+
+        with tempfile.TemporaryDirectory() as td:
+            channel = FakeChannel()
+            with mock.patch.object(lesson, "run_cli", unchecked), self.assertLogs(level="WARNING"):
+                asyncio.run(Lessons(self.config(td)).generate_and_post(channel, "yuki"))
+            notes = [t for t, _ in channel.sent if t and t.startswith("⚠️")]
+            self.assertEqual(notes, ["⚠️ 次の指示は、途中で切れていないかを確かめられないまま指示の声 (OpenAI) で読まれています: «Hlustaðu.»"])
+            saved = list(Path(td).rglob("voice_fallbacks.json"))
+            self.assertEqual(json.loads(saved[0].read_text("utf-8")), {"unchecked": ["Hlustaðu."]})
 
     def test_a_warning_right_after_the_progress_line_is_read(self):
         """Review of #233: the progress line ends in «\\r», so a warning after it is not at a line start until «\\r» counts as one."""
