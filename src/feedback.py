@@ -346,6 +346,20 @@ class Record:
         order = [i for i in asked if i in open_ids] + [i for i in asked if i not in open_ids]
         return [described[i] for i in order[:limit]]
 
+    def asked_more(self, shown: set[str] | frozenset[str]) -> list[tuple[dict, float]]:
+        """新出以外で、このレッスンで言わせた項目のうち ``shown`` (フォームの欄に出ている項目) にないもの全部と、最初に問われた時刻 (秒):
+        レッスンで最初に問われた順 (language-learning-audio #585: lesson 65 は 59 項目を問い、欄に出せたのは 15. «húfu» は 43 番目で選べなかった).
+        「他の表現を追加」の選び直し画面 (``MoreSoonerView``) が、ページに分けて出す."""
+        new = {i["id"] for i in self.new_items()}
+        described = self.items()
+        first: dict[str, float] = {}
+        for e in self.plan.get("exercises", []):
+            if e.get("kind") in ("recall", "connect", "generative"):
+                for i in e.get("items", []):
+                    if i not in new and i in described and i not in shown and i not in first:
+                        first[i] = float(e.get("start_s") or 0.0)
+        return [(described[i], t) for i, t in first.items()]
+
     def candidates(self) -> list[dict]:
         """カードに出す候補 (MAX_CANDIDATES 件まで). 同じ場面の繰り返し (古いレッスンの
         repeated_situation) は練習なので出さない."""
@@ -845,6 +859,94 @@ def lesson_minutes(record: "Record") -> float:
     return float(minutes or usersettings.BASE_MINUTES)
 
 
+def _clock(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60}:{s % 60:02d}"
+
+
+class MoreSoonerView(discord.ui.View):
+    """「他の表現を追加」(language-learning-audio #585): フォームの欄に入りきらない、このレッスンで言わせた表現を 25 件ずつのページで選ぶ.
+    レッスンで最初に問われた順で、説明に時刻と意味 («復習 23:25 · …»): 言えなかった表現は、一覧の何番目かより「いつ頃か」で思い出す.
+    ページをまたいで選んだものは保たれ、「追加」でフォームの「練習が足りなかった・言えなかった表現」に加わる (送信はフォームで)."""
+
+    PAGE = 25
+
+    def __init__(self, form: "FeedbackView") -> None:
+        super().__init__(timeout=900)
+        self.form = form
+        self.items = form.more_items
+        self.chosen: list[str] = list(form.more)
+        self.page = 0
+        self._layout()
+
+    @property
+    def pages(self) -> int:
+        return max(1, -(-len(self.items) // self.PAGE))
+
+    def _page_items(self) -> list[tuple[dict, float]]:
+        return self.items[self.page * self.PAGE : (self.page + 1) * self.PAGE]
+
+    def _layout(self) -> None:
+        self.clear_items()
+        page = self._page_items()
+        options = [
+            discord.SelectOption(
+                label=_clip(i.get("target") or i["id"]),
+                value=i["id"],
+                description=_clip(f"復習 {_clock(t)} · " + (i.get("meaning") or "")),
+                default=i["id"] in self.chosen,
+            )
+            for i, t in page
+        ]
+        first, last = page[0][1], page[-1][1]
+        self.select: discord.ui.Select = discord.ui.Select(
+            placeholder=f"言えなかった表現（{_clock(first)}〜{_clock(last)}、複数可）", options=options, min_values=0, max_values=len(options), row=0
+        )
+        self.select.callback = self._chose  # type: ignore[method-assign]
+        self.add_item(self.select)
+        for label, step in (("◀ 前の25件", -1), ("次の25件 ▶", 1)):
+            button: discord.ui.Button = discord.ui.Button(label=label, row=1, disabled=not 0 <= self.page + step < self.pages)
+            button.callback = self._turn(step)  # type: ignore[method-assign]
+            self.add_item(button)
+        add: discord.ui.Button = discord.ui.Button(label="追加", style=discord.ButtonStyle.primary, row=1)
+        add.callback = self._add  # type: ignore[method-assign]
+        self.add_item(add)
+
+    def text(self) -> str:
+        return (
+            f"**他の表現を追加**（{self.page + 1}/{self.pages} ページ、全 {len(self.items)} 件）\n"
+            "フォームの欄に入りきらなかった、このレッスンで言わせた表現です。レッスンで聞いた順に並んでいます。"
+            "言えなかったものを選んで、ページを移っても選んだものは残ります。最後に「追加」を押してください。\n"
+            f"選んでいる表現: {len(self.chosen)} 件"
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.form.interaction_check(interaction)
+
+    @answers_on_failure(CHOOSE_FAILED)
+    async def _chose(self, interaction: discord.Interaction) -> None:
+        on_page = {i["id"] for i, _ in self._page_items()}
+        self.chosen = [i for i in self.chosen if i not in on_page] + list(self.select.values)
+        self._layout()  # the options' defaults follow the choice when the page is shown again
+        await interaction.response.edit_message(content=self.text(), view=self)
+
+    def _turn(self, step: int) -> Callable[[discord.Interaction], Awaitable[None]]:
+        @answers_on_failure(CHOOSE_FAILED)
+        async def turn(interaction: discord.Interaction) -> None:
+            self.page = min(max(self.page + step, 0), self.pages - 1)
+            self._layout()
+            await interaction.response.edit_message(content=self.text(), view=self)
+
+        return turn
+
+    @answers_on_failure(CHOOSE_FAILED)
+    async def _add(self, interaction: discord.Interaction) -> None:
+        self.form.add_more(self.chosen)
+        self.stop()
+        done = f"{len(self.chosen)} 件をフォームに加えました。" if self.chosen else "追加した表現はありません。"
+        await interaction.response.edit_message(content=done + "フォームに戻って「送信」を押してください（選び直すときはもう一度「他の表現を追加」）。", view=None)
+
+
 class FeedbackView(discord.ui.View):
     """練習が足りなかった新出・今日の量と難しさ・当てはまることと気になった点・メモ・送信.
     compact (短いレッスン) なら、当てはまること・気になった点とメモは出さない."""
@@ -869,6 +971,11 @@ class FeedbackView(discord.ui.View):
         self.answers = Answers()
         new = record.new_items()[:25]
         reviewed = record.reviewed_choices(25 - len(new))
+        # language-learning-audio #585: the items the lesson asked that the select cannot hold (Discord: 25 options), chosen in
+        # «他の表現を追加» (``MoreSoonerView``). ``answers.sooner`` is always the select's choices and these together
+        self.picked: list[str] = []  # the select's own choices
+        self.more: list[str] = []  # the ones added from «他の表現を追加»
+        self.more_items = record.asked_more({i["id"] for i in new + reviewed})
         if new or reviewed:
             # 「ほとんど見かけなかった」の欄は外した (一度も使われず、問いの意図が伝わらなかった, #81). 残るのは否定側
             # だけ: 聞いた直後の「覚えた」はあてにならない (次の日の振り返りが確かめる) が、「思い出せない」は当てになる.
@@ -917,6 +1024,10 @@ class FeedbackView(discord.ui.View):
             label="送信", style=discord.ButtonStyle.primary, row=4
         )
         send.callback = self._send  # type: ignore[method-assign]
+        if self.more_items:
+            more: discord.ui.Button = discord.ui.Button(label=f"他の表現を追加（{len(self.more_items)}件）", row=4)
+            more.callback = self._more  # type: ignore[method-assign]
+            self.add_item(more)
         if request_support is not None and (new or reviewed):
             # #179: help on an expression, asked for apart from «練習が足りなかった»: no extra practice, no load
             helpme: discord.ui.Button = discord.ui.Button(label="解説を頼む", row=4)
@@ -962,6 +1073,9 @@ class FeedbackView(discord.ui.View):
             value: Any = list(select.values)
             if attr == "load":
                 value = value[0] if value else None
+            if attr == "sooner":
+                self.picked = value
+                value = self._sooner()
             setattr(self.answers, attr, value)
             await interaction.response.defer()
 
@@ -975,6 +1089,19 @@ class FeedbackView(discord.ui.View):
             )
             return False
         return True
+
+    def _sooner(self) -> list[str]:
+        return list(dict.fromkeys(self.picked + self.more))
+
+    def add_more(self, ids: list[str]) -> None:
+        """«他の表現を追加» chose ``ids`` (all its pages): they replace the earlier additions, and the select's own choices stay."""
+        self.more = list(ids)
+        self.answers.sooner = self._sooner()
+
+    @answers_on_failure(CHOOSE_FAILED)
+    async def _more(self, interaction: discord.Interaction) -> None:
+        view = MoreSoonerView(self)
+        await interaction.response.send_message(view.text(), view=view, ephemeral=True)
 
     @answers_on_failure(NOTE_FAILED)
     async def _note(self, interaction: discord.Interaction) -> None:
