@@ -98,6 +98,38 @@ class MoreSoonerTests(unittest.TestCase):
 
             asyncio.run(run())
 
+    def test_a_picker_left_open_adds_nothing_once_the_form_is_sent(self):
+        """Review of #240: open «他の表現を追加», go back and press «送信», then «追加» in the picker. The event was recorded without the additions;
+        the picker must not say they were added, nor change the sent answers."""
+        with tempfile.TemporaryDirectory() as td:
+            record = record_of(Path(td), plan(60))
+            submitted = []
+
+            async def submit(answers):
+                submitted.append(list(answers.sooner))
+
+            async def run():
+                view = FeedbackView(record, 1, submit)
+                buttons = {c.label: c for c in view.children if hasattr(c, "label") and c.label}
+                log = []
+                await buttons["他の表現を追加（37件）"].callback(interaction(log))
+                picker = log[-1][2]["view"]
+                picker.select._values = ["r23"]
+                await picker.select.callback(interaction(log))
+                view.answers.load = "right"
+                await buttons["送信"].callback(interaction(log))
+                self.assertEqual(submitted, [[]], "sent before «追加»: nothing added")
+                add = {c.label: c for c in picker.children if hasattr(c, "label") and c.label}["追加"]
+                self.assertFalse(await picker.interaction_check(interaction(log)), "the picker refuses once the form is sent")
+                self.assertEqual(log[-1][0], "edit")
+                self.assertIn("もう送信されたため", log[-1][1])
+                self.assertIsNone(log[-1][2]["view"], "the picker closes")
+                self.assertNotIn("フォームに加えました", " ".join(str(t) for _, t, _ in log))
+                self.assertEqual(view.answers.sooner, [], "the sent answers are unchanged")
+                self.assertTrue(add)
+
+            asyncio.run(run())
+
     def test_no_button_when_the_select_holds_every_asked_item(self):
         with tempfile.TemporaryDirectory() as td:
             record = record_of(Path(td), plan(20))

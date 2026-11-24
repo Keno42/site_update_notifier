@@ -859,6 +859,12 @@ def lesson_minutes(record: "Record") -> float:
     return float(minutes or usersettings.BASE_MINUTES)
 
 
+PICKER_AFTER_SEND = (
+    "このフィードバックはもう送信されたため、ここで選んだ表現は記録に加えられません。"
+    "言えなかった表現があれば、次のレッスンのフィードバックで選んでください。"
+)
+
+
 def _clock(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 60}:{s % 60:02d}"
@@ -921,7 +927,15 @@ class MoreSoonerView(discord.ui.View):
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return await self.form.interaction_check(interaction)
+        if not await self.form.interaction_check(interaction):
+            return False
+        if self.form.submitted or self.form.sending:
+            # review of #240: the form was sent while this picker stayed open. What is chosen here would change only the closed form, not the
+            # recorded event: say so, and close the picker, rather than report an addition that was never recorded
+            self.stop()
+            await interaction.response.edit_message(content=PICKER_AFTER_SEND, view=None)
+            return False
+        return True
 
     @answers_on_failure(CHOOSE_FAILED)
     async def _chose(self, interaction: discord.Interaction) -> None:
@@ -968,6 +982,7 @@ class FeedbackView(discord.ui.View):
         self.compact = compact
         self.notify = notify  # 操作が切れて画面に何も出せないとき、記録したことをチャンネルで知らせる
         self.sending = False  # 「送信」の記録の途中: 押し直しは記録しない
+        self.submitted = False  # 記録が済んだ: 開いたままの「他の表現を追加」は、もう加えない (review of #240)
         self.answers = Answers()
         new = record.new_items()[:25]
         reviewed = record.reviewed_choices(25 - len(new))
@@ -1144,6 +1159,7 @@ class FeedbackView(discord.ui.View):
                 raise
         finally:
             self.sending = False
+        self.submitted = True
         self.stop()
         # ここから先は画面だけ: 失敗しても記録は済んでいる
         done = f"{self.record.title} のフィードバックを記録しました。ありがとうございます。"
