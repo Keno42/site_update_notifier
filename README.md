@@ -108,9 +108,10 @@ language-learning-audio の auto モード（`generate --auto`）で動き、報
   レッスンを 10 回終えた人に、`/lesson` の開始時に一度だけ二択で聞く（答えるまで毎回）。答えるまでは `generate --instructions pending`:
   まだ一つも習っていなければ置き換えず、習い始めていれば続ける。
 - **自己紹介の名前と年齢**（language-learning-audio #428）: 教材の人物（«Ég heiti Yuki.»、20 歳）の代わりに、自分の名前と年齢で
-  自己紹介の文を練習する（`generate --own-name`, `--own-age`）。名前は 1 語（「-」で教材の名前に戻す）、年齢は教材にある年齢
+  自己紹介の文を練習する（`generate --own-name`, `--own-age`）。名前はラテン文字の 1 語（「-」で教材の名前に戻す）、年齢は教材にある年齢
   （13〜20、25、30、40 … 90）のときだけ使われる（0 で戻す）。相手の名前やほかの数の練習は変わらない。個人の値なので、
-  フィードバックの同期（`FEEDBACK_SYNC_REPO`）では教材の人物の値に戻してから送る（`src/own.py`）。
+  フィードバックの同期（`FEEDBACK_SYNC_REPO`）では、その記録を作ったときの値（記録の `generate_args`）を教材の人物の値に
+  戻してから送る（`src/own.py`）。設定をあとで変えたり消したりしても、前の記録はその記録の値で消される。
 
 設定ができる前からの人（`learner.json` がある）は、設定ファイルを作るまで今までどおり
 （`LESSON_MINUTES`・フィードバックの後に一覧・混ぜる）。新しい人の既定は `LESSON_DEFAULT_MINUTES` など（下）。

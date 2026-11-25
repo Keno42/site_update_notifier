@@ -75,6 +75,53 @@ class OwnTests(unittest.TestCase):
             self.assertNotIn("tuttugu og fimm", everything)
             self.assertIn("Ég heiti Yuki.", everything)
 
+    def sync_files(self, root: Path, gh=None) -> tuple[FakeGitHub, str]:
+        gh = gh or FakeGitHub()
+        cfg = feedback_sync.SyncConfig(repo="o/r", root=root, users=["owner"], full={"owner"})
+        asyncio.run(feedback_sync.FeedbackSync(cfg, gh, delay=0).run())
+        return gh, "\n".join(gh.files.values())
+
+    def test_a_record_is_scrubbed_with_its_own_values_whatever_the_settings_are_now(self):
+        """Review of #245: the sync read the learner's current settings, so a lesson made with «Kenji» was scrubbed with the new value (or none)
+        once the setting changed or was cleared, and the changed digest pushed it again with the name in it."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            record = write_record(root / "owner", 70, ["generate", "--own-name", "Kenji", "--own-age", "25"])
+            d = root / "owner" / feedback.MANIFESTS / record
+            (d / "lesson-070.transcript.md").write_text("**You:** Ég heiti Kenji. Ég er tuttugu og fimm ára.\n**Instructor:** Say you're 25.", "utf-8")
+            usersettings.save(root / "owner", usersettings.UserSettings(30, "before", "spread", own_name="Kenji", own_age=25))
+            gh, everything = self.sync_files(root)
+            for settings in (usersettings.UserSettings(30, "before", "spread", own_name="Taro", own_age=30), usersettings.UserSettings(30, "before", "spread")):
+                usersettings.save(root / "owner", settings)
+                gh, everything = self.sync_files(root, gh)
+                for personal in ("Kenji", "tuttugu og fimm", "you're 25", '"25"'):
+                    self.assertNotIn(personal, everything, (settings.own_name, personal))
+                self.assertIn("Ég heiti Yuki.", everything)
+            later = write_record(root / "owner", 71, ["generate", "--own-name", "Taro"])
+            (root / "owner" / feedback.MANIFESTS / later / "lesson-071.transcript.md").write_text("**You:** Ég heiti Taro.", "utf-8")
+            _, everything = self.sync_files(root, gh)
+            self.assertNotIn("Taro", everything, "each record with its own value")
+
+    def test_a_name_beside_japanese_text_is_scrubbed(self):
+        """Review of #245: «Kenjiの名前で、と言ってください»: a Japanese letter is a letter to ``\\w``, so the name's edge was never found."""
+        self.assertEqual(own.scrub("Kenjiの名前で、と言ってください。私はケンジ。", "Kenji", None), "Yukiの名前で、と言ってください。私はケンジ。")
+        self.assertEqual(own.scrub("Kenjiro, Kenji-san, Kenji.", "Kenji", None), "Kenjiro, Yuki-san, Yuki.")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            record = write_record(root / "owner", 72, ["generate", "--own-name", "Kenji", "--known", "ja"])
+            (root / "owner" / feedback.MANIFESTS / record / "lesson-072.plan.json").write_text(
+                json.dumps({"cue": "Kenjiの名前で、と言ってください。", "answer": "Á nafninu Kenji."}, ensure_ascii=False), "utf-8")
+            _, everything = self.sync_files(root)
+            self.assertNotIn("Kenji", everything)
+            self.assertIn("Yukiの名前で", everything)
+
+    def test_a_name_is_in_latin_letters(self):
+        self.assertTrue(own.valid_name("Kenji") and own.valid_name("Ástríður") and own.valid_name("Mary-Ann"))
+        for bad in ("健二", "Ken 2", "K3n", "-"):
+            self.assertFalse(own.valid_name(bad), bad)
+        self.assertEqual(own.values_of_args(["generate", "--own-name", "Kenji", "--own-age", "25"]), ("Kenji", 25))
+        self.assertEqual(own.values_of_args(["generate"]), (None, None))
+
     def test_the_ages_are_those_the_course_can_teach(self):
         """``own.AGE_WORDS`` is the bot's copy of the course's age fillers (language-learning-audio's items tagged «age»)."""
         found = {}

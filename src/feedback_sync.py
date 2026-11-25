@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from . import feedback, own, usersettings
+from . import feedback, own
 
 API = "https://api.github.com"
 STATE_FILE = ".feedback_sync.json"  # under LESSON_ROOT, outside git
@@ -138,13 +138,14 @@ def scrub(data: bytes, root: Path, names: dict[str, str] | None = None, own_valu
     return text.encode("utf-8")
 
 
-def _own_of(path: Path, root: Path) -> tuple[str | None, int | None]:
-    """The own name and age (#428) of the learner whose directory under ``root`` holds ``path``; (None, None) outside one."""
+def _own_of(record_dir: Path) -> tuple[str | None, int | None]:
+    """The own name and age (#428) the record in ``record_dir`` was generated with, from its manifest's ``generate_args``; (None, None) without
+    them. Never the learner's current settings: a value changed or cleared since would leave an older record's unscrubbed (review of #245)."""
     try:
-        user = Path(path).resolve().relative_to(Path(root).resolve()).parts[0]
-    except (ValueError, IndexError):
+        manifest = json.loads((Path(record_dir) / "manifest.json").read_text("utf-8"))
+    except (OSError, ValueError):
         return None, None
-    return usersettings.own_values(Path(root) / user)
+    return own.values_of_args(manifest.get("generate_args") if isinstance(manifest, dict) else None)
 
 
 def _unique(lines: list[dict]) -> list[dict]:
@@ -184,7 +185,6 @@ def plan(cfg: SyncConfig, salt: bytes) -> dict[str, tuple[dict[str, bytes], list
         if full:
             records |= set(dirs)
         who = pseudonym(name, salt)
-        mine = usersettings.own_values(cfg.root / name)
         for record in sorted(records):
             if feedback.MANIFEST_RE.match(record) is None:
                 continue  # only a record's own id names a folder
@@ -194,6 +194,7 @@ def plan(cfg: SyncConfig, salt: bytes) -> dict[str, tuple[dict[str, bytes], list
             if record in support:
                 notes["support_requests.jsonl"] = _jsonl(support[record])
             paths = sorted(p for p in dirs[record].iterdir() if p.is_file() and p.name not in NOTES_FILES) if full and record in dirs else []
+            mine = _own_of(dirs[record]) if record in dirs else (None, None)
             out[f"{who}/{record}"] = ({k: scrub(v, cfg.root, names, mine) for k, v in notes.items()}, paths)
     return out
 
@@ -207,7 +208,7 @@ def folders(cfg: SyncConfig, salt: bytes, only: set[str] | None = None) -> dict[
             continue
         files = dict(notes)
         for p in paths:
-            files[p.name] = scrub(p.read_bytes(), cfg.root, names, _own_of(p, cfg.root))
+            files[p.name] = scrub(p.read_bytes(), cfg.root, names, _own_of(p.parent))
         out[folder] = files
     return out
 
@@ -222,8 +223,8 @@ class Digests:
 
     def _file(self, path: Path, root: Path, names: dict[str, str]) -> bytes:
         st = path.stat()
-        mine = _own_of(path, root)
-        sig = (st.st_size, st.st_mtime_ns, mine)  # a changed own name or age scrubs the file differently (#428)
+        mine = _own_of(path.parent)  # the record's own values (#428), fixed when it was generated
+        sig = (st.st_size, st.st_mtime_ns, mine)
         had = self._files.get(str(path))
         if had is not None and had[0] == sig:
             return had[1]

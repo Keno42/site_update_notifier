@@ -750,7 +750,7 @@ class Lessons:
             )
             return
         if own_name is not None and own_name.strip() != "-" and not own.valid_name(own_name.strip()):
-            await interaction.response.send_message("名前は1語の文字で入れてください（例: Kenji）。「-」で教材の名前に戻ります。", ephemeral=True)
+            await interaction.response.send_message("名前はラテン文字の1語で入れてください（例: Kenji）。「-」で教材の名前に戻ります。", ephemeral=True)
             return
         if own_age is not None and own_age != 0 and not usersettings.OWN_AGE_RANGE[0] <= own_age <= usersettings.OWN_AGE_RANGE[1]:
             await interaction.response.send_message("年齢は 1〜120 で入れてください。0 で教材の年齢に戻ります。", ephemeral=True)

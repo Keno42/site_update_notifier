@@ -100,18 +100,6 @@ def load(user_dir: Path, default: UserSettings, legacy: UserSettings) -> UserSet
     )
 
 
-def own_values(user_dir: Path) -> tuple[str | None, int | None]:
-    """The learner's own name and age as saved (#428), read without the defaults: (None, None) when unset or unreadable."""
-    try:
-        raw = json.loads((user_dir / SETTINGS_FILE).read_text("utf-8"))
-    except (OSError, ValueError):
-        return None, None
-    if not isinstance(raw, dict):
-        return None, None
-    name = raw.get("own_name") if isinstance(raw.get("own_name"), str) and own.valid_name(raw["own_name"]) else None
-    age = raw.get("own_age") if isinstance(raw.get("own_age"), int) else None
-    return name, age
-
 
 def save(user_dir: Path, settings: UserSettings) -> None:
     user_dir.mkdir(parents=True, exist_ok=True)
