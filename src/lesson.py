@@ -49,7 +49,7 @@ from .cards import CardQueue
 from .interaction import answers_on_failure
 from .review import VIEW_TIMEOUT, ReviewSession, ReviewView, backlog_detail, log_review, read_review_log, review_note
 from .review_queue import REFINE_VERSION, ReviewQueue
-from . import feedback_sync, secrets_box
+from . import feedback_sync, own, secrets_box
 
 LLA_DIR = (
     Path(__file__).resolve().parent.parent / "external" / "language-learning-audio"
@@ -227,6 +227,7 @@ class LessonConfig:
         minutes: float | None = None,
         order: str | None = None,
         instructions: str | None = None,
+        own_args: list[str] | None = None,
     ) -> list[str]:
         """instructions: audiolesson の --instructions (UserSettings.instructions_arg). None なら渡さない.
         trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める).
@@ -257,6 +258,7 @@ class LessonConfig:
             *extra,
             *(["--order", order] if order and order != "spread" else []),
             *(["--instructions", instructions] if instructions else []),
+            *(own_args or []),  # language-learning-audio #428: the learner's own name and age (src/own.py), only when set
         ]
 
     def report_args(
@@ -737,13 +739,21 @@ class Lessons:
         order: str | None = None,
         explain: str | None = None,
         instructions: str | None = None,
+        own_name: str | None = None,
+        own_age: int | None = None,
     ) -> None:
-        """/lesson-configure: 指定した項目だけ変えて保存し、今の設定を本人にだけ見せる."""
+        """/lesson-configure: 指定した項目だけ変えて保存し、今の設定を本人にだけ見せる. own_name「-」と own_age 0 は教材の人物に戻す (#428)."""
         name = self.cfg.users.get(interaction.user.id)
         if name is None:
             await interaction.response.send_message(
                 "このコマンドは登録されたユーザーだけが使えます。", ephemeral=True
             )
+            return
+        if own_name is not None and own_name.strip() != "-" and not own.valid_name(own_name.strip()):
+            await interaction.response.send_message("名前はラテン文字の1語で入れてください（例: Kenji）。「-」で教材の名前に戻ります。", ephemeral=True)
+            return
+        if own_age is not None and own_age != 0 and not usersettings.OWN_AGE_RANGE[0] <= own_age <= usersettings.OWN_AGE_RANGE[1]:
+            await interaction.response.send_message("年齢は 1〜120 で入れてください。0 で教材の年齢に戻ります。", ephemeral=True)
             return
         settings = self.cfg.user_settings(name)
         changed = {
@@ -751,6 +761,10 @@ class Lessons:
             for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order), ("explain", explain), ("instructions", instructions))
             if v is not None
         }
+        if own_name is not None:
+            changed["own_name"] = None if own_name.strip() == "-" else own_name.strip()
+        if own_age is not None:
+            changed["own_age"] = None if own_age == 0 else own_age
         for k, v in changed.items():
             setattr(settings, k, v)
         if changed:
@@ -1237,6 +1251,7 @@ class Lessons:
             minutes=minutes or settings.minutes,
             order=settings.order,
             instructions=settings.instructions_arg(),
+            own_args=own.generate_args(settings.own_name, settings.own_age),
         )
         if source is not None and str(source.path) not in args:
             source = None  # LESSON_EXTRA_ARGS の --trip が優先された
@@ -1387,7 +1402,8 @@ class Lessons:
             lever_args, _ = levers.from_topic(channel)
             # the CLI runs inside the with: a trip set in the channel topic is a temporary file that the with removes
             with trip.resolve(self.cfg.trip_path(name), channel) as (source, _warning):
-                args = self.cfg.generate_args(name, False, source.path if source else None, lever_args, minutes=minutes, order=settings.order, instructions=settings.instructions_arg())
+                args = self.cfg.generate_args(name, False, source.path if source else None, lever_args, minutes=minutes, order=settings.order, instructions=settings.instructions_arg(),
+                                              own_args=own.generate_args(settings.own_name, settings.own_age))
                 args = [*args, "--dry-run", "--no-audio"]
                 if "--out" in args:
                     args[args.index("--out") + 1] = str(tmp)
@@ -1635,6 +1651,8 @@ def setup(
         order="新出と既出の並び順",
         explain="フィードバックで「練習が足りなかった」表現を選んだあと、理由に合わせた解説を出すか",
         instructions="レッスンの指示（「繰り返してください」など）をアイスランド語に置き換えるか",
+        own_name="自己紹介で言う自分の名前（1語、例: Kenji。「-」で教材の名前に戻す）",
+        own_age="自己紹介で言う自分の年齢（教材にある年齢のときだけ使われます。0 で教材の年齢に戻す）",
     )
     @app_commands.choices(
         minutes=minute_choices,
@@ -1658,6 +1676,8 @@ def setup(
         order: app_commands.Choice[str] | None = None,
         explain: app_commands.Choice[str] | None = None,
         instructions: app_commands.Choice[str] | None = None,
+        own_name: str | None = None,
+        own_age: app_commands.Range[int, 0, 120] | None = None,
     ) -> None:
         await lessons.configure(
             interaction,
@@ -1666,6 +1686,8 @@ def setup(
             order.value if order else None,
             explain.value if explain else None,
             instructions.value if instructions else None,
+            own_name,
+            own_age,
         )
 
     async def lesson_auto(interaction: discord.Interaction) -> None:

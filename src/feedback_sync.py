@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from . import feedback
+from . import feedback, own
 
 API = "https://api.github.com"
 STATE_FILE = ".feedback_sync.json"  # under LESSON_ROOT, outside git
@@ -115,7 +115,7 @@ def _path_pattern(path: str) -> re.Pattern:
     return re.compile(_PATH_START + re.escape(path) + end, re.M)
 
 
-def scrub(data: bytes, root: Path, names: dict[str, str] | None = None) -> bytes:
+def scrub(data: bytes, root: Path, names: dict[str, str] | None = None, own_values: tuple[str | None, int | None] = (None, None)) -> bytes:
     """Server paths out: LESSON_ROOT (and the bot's own directory) become ``<root>`` / ``<bot>``, and a learner's directory under it takes the
     learner's pseudonym (``names``: name → pseudonym), so ``<root>/<name>/learner.json`` in a record's arguments names no one. Only where a path
     begins: a relative root («out», «.») is not replaced inside words or numbers. With the root «.», a learner's directory is written without it
@@ -134,7 +134,18 @@ def scrub(data: bytes, root: Path, names: dict[str, str] | None = None) -> bytes
         text = re.sub(r"<root>/" + re.escape(name) + r"(?=[/\"\s]|$)", "<root>/" + who, text)
         if bare:
             text = re.sub(_PATH_START + re.escape(name) + r"(?=/)", "<root>/" + who, text)
+    text = own.scrub(text, *own_values)  # language-learning-audio #428: the learner's own name and age back to the persona's
     return text.encode("utf-8")
+
+
+def _own_of(record_dir: Path) -> tuple[str | None, int | None]:
+    """The own name and age (#428) the record in ``record_dir`` was generated with, from its manifest's ``generate_args``; (None, None) without
+    them. Never the learner's current settings: a value changed or cleared since would leave an older record's unscrubbed (review of #245)."""
+    try:
+        manifest = json.loads((Path(record_dir) / "manifest.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    return own.values_of_args(manifest.get("generate_args") if isinstance(manifest, dict) else None)
 
 
 def _unique(lines: list[dict]) -> list[dict]:
@@ -183,7 +194,8 @@ def plan(cfg: SyncConfig, salt: bytes) -> dict[str, tuple[dict[str, bytes], list
             if record in support:
                 notes["support_requests.jsonl"] = _jsonl(support[record])
             paths = sorted(p for p in dirs[record].iterdir() if p.is_file() and p.name not in NOTES_FILES) if full and record in dirs else []
-            out[f"{who}/{record}"] = ({k: scrub(v, cfg.root, names) for k, v in notes.items()}, paths)
+            mine = _own_of(dirs[record]) if record in dirs else (None, None)
+            out[f"{who}/{record}"] = ({k: scrub(v, cfg.root, names, mine) for k, v in notes.items()}, paths)
     return out
 
 
@@ -196,7 +208,7 @@ def folders(cfg: SyncConfig, salt: bytes, only: set[str] | None = None) -> dict[
             continue
         files = dict(notes)
         for p in paths:
-            files[p.name] = scrub(p.read_bytes(), cfg.root, names)
+            files[p.name] = scrub(p.read_bytes(), cfg.root, names, _own_of(p.parent))
         out[folder] = files
     return out
 
@@ -211,11 +223,12 @@ class Digests:
 
     def _file(self, path: Path, root: Path, names: dict[str, str]) -> bytes:
         st = path.stat()
-        sig = (st.st_size, st.st_mtime_ns)
+        mine = _own_of(path.parent)  # the record's own values (#428), fixed when it was generated
+        sig = (st.st_size, st.st_mtime_ns, mine)
         had = self._files.get(str(path))
         if had is not None and had[0] == sig:
             return had[1]
-        d = hashlib.sha256(scrub(path.read_bytes(), root, names)).digest()
+        d = hashlib.sha256(scrub(path.read_bytes(), root, names, mine)).digest()
         self._files[str(path)] = (sig, d)
         return d
 

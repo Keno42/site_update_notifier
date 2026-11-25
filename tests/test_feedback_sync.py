@@ -135,9 +135,9 @@ class SyncTests(unittest.TestCase):
         read: list[tuple[str, bool]] = []
         real = feedback_sync.scrub
 
-        def scrub(data, root, names=None):
+        def scrub(data, root, names=None, *own_values):
             read.append((data[:12].decode("utf-8", "replace"), threading.get_ident() == loop_thread))
-            return real(data, root, names)
+            return real(data, root, names, *own_values)
 
         with mock.patch.object(feedback_sync, "scrub", scrub):
             self.assertEqual(asyncio.run(sync.run()), 2)

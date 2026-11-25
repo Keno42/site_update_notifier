@@ -16,6 +16,8 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import own
+
 SETTINGS_FILE = "lesson_settings.json"
 BASE_MINUTES = 30
 MINUTES_CHOICES = (5, 10, 15, 30)
@@ -33,6 +35,7 @@ EXPLAIN = {
 INSTRUCTIONS = {"gradual": "段階的に進める", "off": "置き換えない"}
 INSTRUCTIONS_ASK_FROM = 10  # この数のレッスンを終えたら聞く (audiolesson の PlanConfig.commands_from と同じ: そこから1つ目を教える)
 # これより短いレッスンのフィードバックは「量・難しさ」「練習が足りなかった」と送信だけ
+OWN_AGE_RANGE = (1, 120)  # #428: /lesson-configure の年齢
 COMPACT_FEEDBACK_BELOW = 15
 # 必須にする未解決項目の確認の、BASE_MINUTES での目安 (短いレッスンだけに使う上限)
 OPEN_CHECKS_AT_BASE = 6
@@ -48,12 +51,17 @@ class UserSettings:
     explain: str = "off"
     # INSTRUCTIONS のキー. None はまだ聞いていない / 答えていない
     instructions: str | None = None
+    # language-learning-audio #428: 自己紹介で言う自分の名前と年齢 (src/own.py). None は教材の人物 (Yuki、20歳) のまま. 個人の値なので
+    # フィードバックの同期では教材の人物の値に戻す
+    own_name: str | None = None
+    own_age: int | None = None
 
     def describe(self) -> str:
         return (
             f"レッスンの長さ: {self.minutes:g}分 / 新出表現の一覧: {NEW_LIST[self.new_list]}"
             f" / 並び順: {ORDER[self.order]} / フィードバック後の解説: {EXPLAIN[self.explain]}"
             f" / アイスランド語の指示: {INSTRUCTIONS.get(self.instructions or '', '未回答')}"
+            f" / 自己紹介の名前: {self.own_name or '教材のまま'} / 年齢: {self.own_age if self.own_age is not None else '教材のまま'}"
         )
 
     def instructions_arg(self) -> str:
@@ -87,7 +95,10 @@ def load(user_dir: Path, default: UserSettings, legacy: UserSettings) -> UserSet
         order=raw["order"] if raw.get("order") in ORDER else default.order,
         explain=raw["explain"] if raw.get("explain") in EXPLAIN else default.explain,
         instructions=raw["instructions"] if raw.get("instructions") in INSTRUCTIONS else None,
+        own_name=raw["own_name"] if isinstance(raw.get("own_name"), str) and own.valid_name(raw["own_name"]) else None,
+        own_age=raw["own_age"] if isinstance(raw.get("own_age"), int) and OWN_AGE_RANGE[0] <= raw["own_age"] <= OWN_AGE_RANGE[1] else None,
     )
+
 
 
 def save(user_dir: Path, settings: UserSettings) -> None:
