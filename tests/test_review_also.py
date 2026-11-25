@@ -40,5 +40,26 @@ class ReviewAlsoTests(unittest.TestCase):
         self.assertEqual(queue.entries["eg_tharf_simkort"].also, [], "the refinement's answer list is the current one")
 
 
+    def test_a_rewritten_answer_never_keeps_the_old_answer_s_alternatives(self):
+        """Review of #246: a rewrite to a question without ``also`` kept the old list, so the old answer's other right line showed as right."""
+        def queue():
+            q = ReviewQueue()
+            q.entries["x"] = Entry(items=["x"], prompt="old", answer="Mig vantar símkort.", source_lesson=60, due=D.isoformat(), also=["Ég þarf símkort."])
+            return q
+        q = queue()
+        q.apply_refinement([{"items": ["x"], "prompt": "new", "answer": "Ég þarf hjálp."}], [], D, rewrite=True)
+        self.assertEqual((q.entries["x"].answer, q.entries["x"].also), ("Ég þarf hjálp.", []))
+        q = queue()
+        q.add_from_plan({"lesson_number": 71, "review": [{"items": ["x"], "prompt": "new", "answer": "Ég þarf hjálp."}]}, D)
+        self.assertEqual((q.entries["x"].answer, q.entries["x"].also), ("Ég þarf hjálp.", []))
+        q = queue()
+        q.entries["x"].prompt = "{stale}"
+        q.refresh_wording({"x": {"prompt": "new", "answer": "Ég þarf hjálp.", "cues": ["new"]}})
+        self.assertEqual((q.entries["x"].answer, q.entries["x"].also), ("Ég þarf hjálp.", []))
+        q = queue()
+        q.apply_refinement([{"items": ["x"], "prompt": "old", "answer": "Mig vantar símkort."}], [], D, rewrite=True)
+        self.assertEqual(q.entries["x"].also, ["Ég þarf símkort."], "the same answer from a source without the field keeps its list")
+
+
 if __name__ == "__main__":
     unittest.main()

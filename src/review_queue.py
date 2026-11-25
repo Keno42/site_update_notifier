@@ -472,9 +472,10 @@ class ReviewQueue:
             is_open = bool(open_ids & set(items))
             if key in self.entries:
                 entry = self.entries[key]
+                if q.get("answer"):
+                    entry.also = _also(q)  # the plan's answer and its other right answers go together (none from an older plan)
                 entry.prompt = q.get("prompt") or entry.prompt
                 entry.answer = q.get("answer") or entry.answer
-                entry.also = _also(q) if entry.answer == q.get("answer") else entry.also
                 continue
             is_new = bool(new_ids & set(items))
             if not is_new and not is_open and set(items) <= queued:
@@ -562,6 +563,8 @@ class ReviewQueue:
                     entry.due = r.due
                 entry.open = entry.open or r.open
             if rewrite and (entry.prompt, entry.answer) != (prompt, answer):
+                if entry.answer != answer:
+                    entry.also = _also(q)  # another answer: the old one's other right answers are not this one's (review of #246)
                 entry.prompt, entry.answer = prompt, answer
                 changed += 1
             if entry.answer == answer and "also" in q:
@@ -592,6 +595,8 @@ class ReviewQueue:
             if not (unaskable(e) or stale_bare):
                 continue
             if (e.prompt, e.answer) != (prompt, answer):
+                if e.answer != answer:
+                    e.also = _also(now)  # the answer and its other right answers change together (review of #246)
                 e.prompt, e.answer = prompt, answer
                 changed += 1
         return changed
