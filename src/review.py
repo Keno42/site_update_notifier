@@ -219,6 +219,7 @@ class ReviewSession:
                 )
                 + (f"\n{BONUS_NOTE}" if e.bonus else "")
                 + (f"\n答え: **{e.answer}**" if revealed else "")
+                + (f"\nほかにも正解: {' / '.join(f'**{x}**' for x in e.also)}" if revealed and e.also else "")
             )
         if not self.results:
             intro = REVIEW_INTRO.format(n=len(self.keys))
