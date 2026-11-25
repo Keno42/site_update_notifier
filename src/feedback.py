@@ -579,18 +579,22 @@ def case_frame_card(plan: dict, seen: set[str]) -> tuple[str, list[str]] | None:
     anchors = frames.get("anchors") or {}
     lines_by_frame = {f["frame"]: f["line"] for f in anchors.get("frames", [])}
     fresh: list[tuple[str, str, str]] = []
-    for item in (frames.get("items") or {}).values():
+    why: list[tuple[str, str, str]] = []  # a form its verb sets, which no frame explains: its own line (``why``), shown once per item
+    for item_id, item in (frames.get("items") or {}).items():
         for word, frame in (item.get("like") or {}).items():
             key = f"{word.lower()}:{frame}"
             if key not in seen and frame in lines_by_frame and key not in [k for k, _, _ in fresh]:
                 fresh.append((key, item.get("target") or "", f"«{word}» は «{lines_by_frame[frame]}» と同じ形"))
-    if not fresh:
+        if item.get("why") and f"why:{item_id}" not in seen:
+            why.append((f"why:{item_id}", item.get("target") or "", item["why"]))
+    if not fresh and not why:
         return None
     lines = ["**名詞の形の目安**", anchors.get("lead") or ""]
-    lines += [f"・{f['line']}（{f['meaning']}）" for f in anchors.get("frames", [])]
+    if fresh:
+        lines += [f"・{f['line']}（{f['meaning']}）" for f in anchors.get("frames", [])]
     lines.append("今日の表現:")
-    lines += [f"・{target} — {said}" for _, target, said in fresh]
-    return "\n".join(line for line in lines if line), [k for k, _, _ in fresh]
+    lines += [f"・{target} — {said}" for _, target, said in fresh + why]
+    return "\n".join(line for line in lines if line), [k for k, _, _ in fresh + why]
 
 
 def case_frames_context(plan: dict) -> str:

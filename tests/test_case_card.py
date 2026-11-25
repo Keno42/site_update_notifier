@@ -38,6 +38,17 @@ class CaseFrameCardTests(unittest.TestCase):
         self.assertIsNone(feedback.case_frame_card(PLAN, {"reikninginn:um", "hnetum:frá"}))
         self.assertIsNone(feedback.case_frame_card({"lesson_number": 1}, set()), "an older plan: no card")
 
+    def test_a_form_its_verb_sets_brings_its_own_line(self):
+        """#548: «Fluginu er seinkað.»: no frame explains a form its verb sets; its line («why») is shown once, without the frames."""
+        plan = {"lesson_number": 68, "case_frames": {"anchors": ANCHORS, "items": {
+            "flugid_er_seinkad": {"target": "Fluginu er seinkað.", "meaning": "The flight is delayed.", "like": {},
+                                  "why": "«seinka» puts what is delayed in this form: «flugið» becomes «fluginu»."}}}}
+        text, shown = feedback.case_frame_card(plan, set())
+        self.assertIn("・Fluginu er seinkað. — «seinka» puts what is delayed in this form", text)
+        self.assertNotIn("frá bankanum", text, "no frame to show: the frames stay out")
+        self.assertEqual(shown, ["why:flugid_er_seinkad"])
+        self.assertIsNone(feedback.case_frame_card(plan, set(shown)))
+
     def test_the_lesson_posts_it_once_per_form(self):
         with tempfile.TemporaryDirectory() as td:
             lessons = Lessons(LessonConfig(root=Path(td), users={1: "yuki"}, default_minutes=5, default_new_list="after", default_order="spread"))
