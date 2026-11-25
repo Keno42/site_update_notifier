@@ -556,12 +556,48 @@ def support_messages(record: "Record", request: dict, previous: str = "") -> lis
     lines = [f"表現: {head}", f"種類: {SUPPORT_KINDS.get(request['kind'], request['kind'])}"]
     if request["item_id"] != SUPPORT_OTHER and (sents := lesson_sentences(record, request["item_id"])):
         lines.append("レッスンで使った文: " + " / ".join(sents))
+    if request["kind"] == "grammar" and (frames := case_frames_context(record.plan)):
+        lines.append(frames)
     if request.get("question"):
         lines.append("学習者の質問: " + request["question"])
     if request.get("follow") in SUPPORT_FOLLOW and previous:
         lines.append("頼み: " + SUPPORT_FOLLOW[request["follow"]])
         lines.append("前の解説:\n" + previous)
     return [{"role": "system", "content": SUPPORT_SYSTEM}, {"role": "user", "content": "\n".join(lines)}]
+
+
+# language-learning-audio #548 step 2 (the owner, 2026-11-20: the «why» of a form in text, not in the audio): the anchor frames a native teacher gave,
+# one noun with the small word in front changed, and the day's forms beside them. Posted with the lesson when a form not shown before is among
+# its new items; the forms already shown are kept in the user's directory, so the card stays rare enough to read
+CASE_FRAMES_SEEN = "case_frames_seen.json"
+CASE_FRAMES_GUIDE = "名詞の形の説明には、格の名前ではなく、次の目安（前の小さな語で名詞の形が決まる）のどれと同じ形かを使ってください:"
+
+
+def case_frame_card(plan: dict, seen: set[str]) -> tuple[str, list[str]] | None:
+    """The card's text and the keys («word:frame») it shows for the first time, or None when the day has no form not shown before."""
+    frames = plan.get("case_frames") or {}
+    anchors = frames.get("anchors") or {}
+    lines_by_frame = {f["frame"]: f["line"] for f in anchors.get("frames", [])}
+    fresh: list[tuple[str, str, str]] = []
+    for item in (frames.get("items") or {}).values():
+        for word, frame in (item.get("like") or {}).items():
+            key = f"{word.lower()}:{frame}"
+            if key not in seen and frame in lines_by_frame and key not in [k for k, _, _ in fresh]:
+                fresh.append((key, item.get("target") or "", f"«{word}» は «{lines_by_frame[frame]}» と同じ形"))
+    if not fresh:
+        return None
+    lines = ["**名詞の形の目安**", anchors.get("lead") or ""]
+    lines += [f"・{f['line']}（{f['meaning']}）" for f in anchors.get("frames", [])]
+    lines.append("今日の表現:")
+    lines += [f"・{target} — {said}" for _, target, said in fresh]
+    return "\n".join(line for line in lines if line), [k for k, _, _ in fresh]
+
+
+def case_frames_context(plan: dict) -> str:
+    """#548: the anchor frames for a grammar explanation (解説を頼む), so its answer points to them rather than to case names; "" without them."""
+    anchors = (plan.get("case_frames") or {}).get("anchors") or {}
+    frames = [f"{f['line']}（{f['meaning']}）" for f in anchors.get("frames", [])]
+    return CASE_FRAMES_GUIDE + " " + " / ".join(frames) if frames else ""
 
 
 SUPPORT_INTRO = (
