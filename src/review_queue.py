@@ -51,6 +51,12 @@ def next_interval(result: str, streak: int) -> int:
     return seq[min(max(streak, 1), len(seq)) - 1]
 
 
+def _also(q: dict) -> list[str]:
+    """A question's other accepted answers (language-learning-audio's ``also``); [] from an older plan."""
+    also = q.get("also")
+    return [a for a in also if isinstance(a, str) and a] if isinstance(also, list) else []
+
+
 @dataclass
 class Entry:
     items: list[str]
@@ -69,6 +75,9 @@ class Entry:
     # 音声レッスン側で「試しに言ってもらっただけ」の文 (bonus). 言えたら加点、言えなくても何も起きない.
     # 一度だけ聞き、答えたら外す. 必ず答える問い (must_answer) にはしない
     bonus: bool = False
+    # language-learning-audio (2026-11-26): ほかにも正解になる答え (plan の review の also、questions の also). 答えと一緒に見せる.
+    # 別の正しい言い方をした人が「言えなかった」としないように
+    also: list[str] = field(default_factory=list)
 
     def tier(self, today: date) -> int:
         """小さいほど先に出す. 期限前は 5.
@@ -454,6 +463,7 @@ class ReviewQueue:
                         source_lesson=plan["lesson_number"],
                         due=(today + timedelta(days=1)).isoformat(),
                         bonus=True,
+                        also=_also(q),
                     )
                     bonus_added += 1
                     added += 1
@@ -462,6 +472,8 @@ class ReviewQueue:
             is_open = bool(open_ids & set(items))
             if key in self.entries:
                 entry = self.entries[key]
+                if q.get("answer"):
+                    entry.also = _also(q)  # the plan's answer and its other right answers go together (none from an older plan)
                 entry.prompt = q.get("prompt") or entry.prompt
                 entry.answer = q.get("answer") or entry.answer
                 continue
@@ -476,6 +488,7 @@ class ReviewQueue:
                 source_lesson=plan["lesson_number"],
                 new=is_new,
                 due=due,
+                also=_also(q),
             )
             queued.update(items)
             added += 1
@@ -541,6 +554,7 @@ class ReviewQueue:
                     answer=answer,
                     source_lesson=max(r.source_lesson for r in mine),
                     due=min(r.due for r in mine) or today.isoformat(),
+                    also=_also(q),
                 )
                 self.entries[key] = entry
                 changed += 1
@@ -549,8 +563,12 @@ class ReviewQueue:
                     entry.due = r.due
                 entry.open = entry.open or r.open
             if rewrite and (entry.prompt, entry.answer) != (prompt, answer):
+                if entry.answer != answer:
+                    entry.also = _also(q)  # another answer: the old one's other right answers are not this one's (review of #246)
                 entry.prompt, entry.answer = prompt, answer
                 changed += 1
+            if entry.answer == answer and "also" in q:
+                entry.also = _also(q)
         return changed
 
     def refresh_wording(self, fresh: dict[str, dict]) -> int:
@@ -567,6 +585,8 @@ class ReviewQueue:
             prompt, answer = now.get("prompt"), now.get("answer")
             if not (isinstance(prompt, str) and isinstance(answer, str) and prompt and answer):
                 continue
+            if e.answer == answer and "also" in now:
+                e.also = _also(now)  # the other right answers reach a question queued before they existed (2026-11-26)
             cues = now.get("cues")
             cues = [c for c in cues if isinstance(c, str)] if isinstance(cues, list) else []
             # 聞けない問いは文の答えでも言い直す (そのままでは出せない. 普通は次の plan の B3 が先に直す).
@@ -575,6 +595,8 @@ class ReviewQueue:
             if not (unaskable(e) or stale_bare):
                 continue
             if (e.prompt, e.answer) != (prompt, answer):
+                if e.answer != answer:
+                    e.also = _also(now)  # the answer and its other right answers change together (review of #246)
                 e.prompt, e.answer = prompt, answer
                 changed += 1
         return changed
