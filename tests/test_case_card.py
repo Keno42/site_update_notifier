@@ -49,6 +49,34 @@ class CaseFrameCardTests(unittest.TestCase):
             seen = json.loads((Path(td) / "yuki" / feedback.CASE_FRAMES_SEEN).read_text("utf-8"))
             self.assertEqual(sorted(seen), ["hnetum:frá", "reikninginn:um"])
 
+    def test_a_record_that_cannot_be_written_does_not_raise(self):
+        """Review of #242: the lesson is posted when the card comes; a failure to write the forms shown must not reach the caller, which still
+        has to clear «generating»."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            lessons = Lessons(LessonConfig(root=Path(td), users={1: "yuki"}, default_minutes=5, default_new_list="after", default_order="spread"))
+            channel = FakeChannel()
+            with mock.patch.object(Path, "write_text", side_effect=OSError("read-only")), self.assertLogs(level="ERROR"):
+                asyncio.run(lessons.post_case_frames(channel, "yuki", PLAN))
+            self.assertEqual(len([t for t, _ in channel.sent if t and t.startswith("**名詞の形の目安**")]), 1, "the card was posted")
+
+    def test_the_lesson_is_cleared_even_when_the_card_fails(self):
+        """Review of #242: the lesson is generated and posted, then the card fails; «generating» is cleared all the same, so the next /lesson
+        does not take the posted lesson for a failed one."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            from tests.test_lesson import EndToEndTests
+
+            cfg = EndToEndTests.config(EndToEndTests(), td)  # the real CLI, stub voices
+            lessons = Lessons(cfg)
+            channel = FakeChannel()
+            with mock.patch.object(Lessons, "post_case_frames", side_effect=RuntimeError("card")), self.assertLogs(level="ERROR"):
+                asyncio.run(lessons.generate_and_post(channel, "yuki"))
+            self.assertFalse(cfg.generating_path("yuki").exists())
+            self.assertTrue(any(t and "フィードバック" in t for t, _ in channel.sent), "the lesson was posted")
+
     def test_a_grammar_explanation_is_told_to_use_the_frames(self):
         record = SimpleNamespace(plan=PLAN, items=lambda: {"get_eg_fengid_reikninginn": {"id": "get_eg_fengid_reikninginn", "target": "Get ég fengið reikninginn?"}},
                                  segments=lambda: [])

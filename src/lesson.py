@@ -1304,7 +1304,10 @@ class Lessons:
             )
             if fallback:
                 await channel.send(voice_fallback_message(fallback))
-            await self.post_case_frames(channel, name, plan)
+            try:
+                await self.post_case_frames(channel, name, plan)
+            except Exception:  # review of #242: the lesson is posted; nothing the card does may keep it «generating»
+                logging.exception("名詞の形の目安を出せませんでした")
             self.clear_generating(name)  # 投稿できた
         finally:
             cleanup(work)
@@ -1327,8 +1330,13 @@ class Lessons:
         except Exception:
             logging.exception("名詞の形の目安を投稿できませんでした")
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(sorted(seen | set(shown)), ensure_ascii=False), "utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(sorted(seen | set(shown)), ensure_ascii=False), "utf-8")
+        except OSError:
+            # review of #242: the lesson is posted; a card's record that cannot be written must not keep it «generating». The card may come
+            # again next time, which is better than a learner locked out
+            logging.exception("名詞の形の目安の記録を書けませんでした")
 
     async def regenerate(self, channel: discord.abc.Messageable, name: str, minutes: float) -> None:
         """失敗した生成のやり直し (#110): 振り返りも「できた前提」も使わず、報告が残っていれば先に送って、同じ長さで生成する."""
