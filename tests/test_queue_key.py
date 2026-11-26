@@ -41,12 +41,19 @@ class QueueKeyTests(unittest.TestCase):
             self.assertEqual(q.entries["erud_thid_med+mjolk"].items, ["mjolk", "erud_thid_med"], "its items as they were")
 
     def test_two_answered_entries_keep_the_latest_result_in_either_order(self):
-        """Review of #252: both old keys answered, the more recent answer is the learner's progress, whichever was saved first."""
+        """Review of #252: both old keys answered, the more recent answer is the learner's progress, whichever was saved first; on the same day,
+        the weaker one."""
         older = Entry(items=["mjolk", "erud_thid_med"], prompt="p", answer="A.", source_lesson=1, state="ok", reviews=2, streak=2,
                       last_reviewed="2026-09-20", due="2026-10-01")
         later = Entry(items=PAIR, prompt="p", answer="A.", source_lesson=2, state="failed", reviews=1, last_reviewed="2026-09-25", due=D.isoformat())
-        same_day = Entry(items=PAIR, prompt="p", answer="A.", source_lesson=2, state="shaky", reviews=3, last_reviewed="2026-09-20", due=D.isoformat())
-        for first, second, kept in ((older, later, later), (later, older, later), (older, same_day, same_day), (same_day, older, same_day)):
+        # the same day: which came last is unknown (a date, no time; each entry counts its own reviews), so the weaker result is kept, never a
+        # failure lost: an «ok» answered eight times against a «failed» answered once, and an «ok» against a «shaky»
+        many_ok = Entry(items=["mjolk", "erud_thid_med"], prompt="p", answer="A.", source_lesson=1, state="ok", reviews=8, streak=8,
+                        last_reviewed="2026-09-25", due="2026-10-20")
+        once_failed = Entry(items=PAIR, prompt="p", answer="A.", source_lesson=2, state="failed", reviews=1, last_reviewed="2026-09-25", due=D.isoformat())
+        same_day = Entry(items=PAIR, prompt="p", answer="A.", source_lesson=2, state="shaky", reviews=1, last_reviewed="2026-09-20", due=D.isoformat())
+        for first, second, kept in ((older, later, later), (later, older, later), (many_ok, once_failed, once_failed), (once_failed, many_ok, once_failed),
+                                    (older, same_day, same_day), (same_day, older, same_day)):
             with self.subTest(first=first.state, second=second.state), tempfile.TemporaryDirectory() as td:
                 path = Path(td) / "queue.json"
                 raw = {"format": FORMAT, "items": {"+".join(first.items): first.__dict__, "+".join(second.items): second.__dict__}}

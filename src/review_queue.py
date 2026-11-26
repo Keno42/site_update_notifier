@@ -114,11 +114,14 @@ def key_for(items: list[str]) -> str:
 
 def _rekeyed(entries: dict[str, Entry]) -> dict[str, Entry]:
     """並びに依っていた古いキー («erud_thid_med+mjolk») を ``key_for`` のキーに付け替える (bonus の «bonus:<n>:…» も). 同じキーに
-    なる問いが二つあれば、新しい結果のある方を残す: 答えたことのある方、最後に答えた日 (``last_reviewed``) が新しい方、同じ日なら
-    答えた回数の多い方. それも同じなら先にあった方."""
+    なる問いが二つあれば、新しい結果のある方を残す: 答えたことのある方、最後に答えた日 (``last_reviewed``) が新しい方. 同じ日は
+    どちらが後か分からない (日付だけで時刻がなく、答えた回数は問いごとに別々に数えている) ので、弱い方の結果 (言えなかった、迷った、
+    言えたの順) を残す: 言えなかったを黙って消さない. それも同じなら先にあった方."""
+
+    weakness = {"failed": 2, "shaky": 1, "ok": 0}
 
     def recency(e: Entry) -> tuple:
-        return (e.state != "unseen", e.last_reviewed or "", e.reviews)
+        return (e.state != "unseen", e.last_reviewed or "", weakness.get(e.state, 0))
 
     out: dict[str, Entry] = {}
     for k, e in entries.items():
