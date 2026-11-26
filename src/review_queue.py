@@ -106,7 +106,31 @@ def unaskable(entry: Entry) -> bool:
 
 
 def key_for(items: list[str]) -> str:
-    return "+".join(items)
+    """問いのキー. 項目の並びには依らない: 同じ項目の問いを plan が別の並びで出しても (パターンの練習は «erud_thid_med, mjolk»、
+    語の練習は «mjolk, erud_thid_med») 一つの問いのまま. 並びで別のキーにすると、答えた結果のある問いが新しい問いにまとめられて
+    消えていた (language-learning-audio #626 で見つかった)."""
+    return "+".join(sorted(items))
+
+
+def _rekeyed(entries: dict[str, Entry]) -> dict[str, Entry]:
+    """並びに依っていた古いキー («erud_thid_med+mjolk») を ``key_for`` のキーに付け替える (bonus の «bonus:<n>:…» も). 同じキーに
+    なる問いが二つあれば、新しい結果のある方を残す: 答えたことのある方、最後に答えた日 (``last_reviewed``) が新しい方. 同じ日は
+    どちらが後か分からない (日付だけで時刻がなく、答えた回数は問いごとに別々に数えている) ので、弱い方の結果 (言えなかった、迷った、
+    言えたの順) を残す: 言えなかったを黙って消さない. それも同じなら先にあった方."""
+
+    weakness = {"failed": 2, "shaky": 1, "ok": 0}
+
+    def recency(e: Entry) -> tuple:
+        return (e.state != "unseen", e.last_reviewed or "", weakness.get(e.state, 0))
+
+    out: dict[str, Entry] = {}
+    for k, e in entries.items():
+        old = "+".join(e.items)
+        new = k[: -len(old)] + key_for(e.items) if e.items and k.endswith(old) else k
+        kept = out.get(new)
+        if kept is None or recency(e) > recency(kept):
+            out[new] = e
+    return out
 
 
 # 1 回の振り返りの問いのうち、期限の来た古い問い (答えたことのある問い) に必ず回す割合の分母 (3: 3 分の 1). 新出の確認と
@@ -660,7 +684,7 @@ class ReviewQueue:
                 if kept:
                     gaps[int(n)] = kept
             return cls(
-                {k: Entry(**v) for k, v in raw.get("items", {}).items()},
+                _rekeyed({k: Entry(**v) for k, v in raw.get("items", {}).items()}),
                 reports,
                 int(raw.get("refined", 0)),
                 gaps,
