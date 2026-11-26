@@ -34,6 +34,9 @@ EXPLAIN = {
 # (``Lessons.ask_instructions``). 未回答 (None) は audiolesson の --instructions pending: まだ一つも習っていなければ置き換えず、習い始めていれば続ける
 INSTRUCTIONS = {"gradual": "段階的に進める", "off": "置き換えない"}
 INSTRUCTIONS_ASK_FROM = 10  # この数のレッスンを終えたら聞く (audiolesson の PlanConfig.commands_from と同じ: そこから1つ目を教える)
+# language-learning-audio #625: 豆知識が前提にする学習者の背景 (audiolesson の --background). 「日本」は日本との比較や日本語の言葉を
+# 入れた豆知識をそのまま、「なし」はその比較を除いた版にする. この bot の画面は日本語なので、未設定 (None) は日本
+BACKGROUND = {"ja": "日本（日本との比較を入れる）", "none": "なし（日本との比較を入れない）"}
 # これより短いレッスンのフィードバックは「量・難しさ」「練習が足りなかった」と送信だけ
 OWN_AGE_RANGE = (1, 120)  # #428: /lesson-configure の年齢
 COMPACT_FEEDBACK_BELOW = 15
@@ -55,6 +58,8 @@ class UserSettings:
     # フィードバックの同期では教材の人物の値に戻す
     own_name: str | None = None
     own_age: int | None = None
+    # BACKGROUND のキー. None は日本 (今までどおり)
+    background: str | None = None
 
     def describe(self) -> str:
         return (
@@ -62,7 +67,12 @@ class UserSettings:
             f" / 並び順: {ORDER[self.order]} / フィードバック後の解説: {EXPLAIN[self.explain]}"
             f" / アイスランド語の指示: {INSTRUCTIONS.get(self.instructions or '', '未回答')}"
             f" / 自己紹介の名前: {self.own_name or '教材のまま'} / 年齢: {self.own_age if self.own_age is not None else '教材のまま'}"
+            f" / 豆知識の背景: {BACKGROUND[self.background or 'ja']}"
         )
+
+    def background_arg(self) -> str | None:
+        """audiolesson generate の --background: 日本 (未設定も) なら ja、「なし」なら渡さない."""
+        return None if self.background == "none" else "ja"
 
     def instructions_arg(self) -> str:
         """audiolesson generate の --instructions: 答えたらそれ、未回答なら pending."""
@@ -97,6 +107,7 @@ def load(user_dir: Path, default: UserSettings, legacy: UserSettings) -> UserSet
         instructions=raw["instructions"] if raw.get("instructions") in INSTRUCTIONS else None,
         own_name=raw["own_name"] if isinstance(raw.get("own_name"), str) and own.valid_name(raw["own_name"]) else None,
         own_age=raw["own_age"] if isinstance(raw.get("own_age"), int) and OWN_AGE_RANGE[0] <= raw["own_age"] <= OWN_AGE_RANGE[1] else None,
+        background=raw["background"] if raw.get("background") in BACKGROUND else None,
     )
 
 
