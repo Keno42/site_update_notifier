@@ -57,6 +57,7 @@ LLA_DIR = (
 FEEDBACK_GUIDE = "聞き終えたら「フィードバック」ボタン（または /lesson-feedback）で手応えを記録してください（30秒ほど）。"
 
 
+
 @dataclass
 class LessonConfig:
     root: Path
@@ -228,8 +229,10 @@ class LessonConfig:
         order: str | None = None,
         instructions: str | None = None,
         own_args: list[str] | None = None,
+        background: str | None = None,
     ) -> list[str]:
         """instructions: audiolesson の --instructions (UserSettings.instructions_arg). None なら渡さない.
+        background: audiolesson の --background (UserSettings.background_arg). None なら渡さない.
         trip: 旅程のプロフィール (Lessons.generate_and_post が trip.resolve で決める).
         lever_args: チャンネルのトピックのレバー (src/levers.py). None なら extra_args のまま.
         minutes: レッスンの長さ (None なら config の LESSON_MINUTES). order: 並び順 (usersettings.ORDER).
@@ -259,6 +262,7 @@ class LessonConfig:
             *(["--order", order] if order and order != "spread" else []),
             *(["--instructions", instructions] if instructions else []),
             *(own_args or []),  # language-learning-audio #428: the learner's own name and age (src/own.py), only when set
+            *(["--background", background] if background else []),  # language-learning-audio #625: the asides' background
         ]
 
     def report_args(
@@ -741,6 +745,7 @@ class Lessons:
         instructions: str | None = None,
         own_name: str | None = None,
         own_age: int | None = None,
+        background: str | None = None,
     ) -> None:
         """/lesson-configure: 指定した項目だけ変えて保存し、今の設定を本人にだけ見せる. own_name「-」と own_age 0 は教材の人物に戻す (#428)."""
         name = self.cfg.users.get(interaction.user.id)
@@ -758,7 +763,8 @@ class Lessons:
         settings = self.cfg.user_settings(name)
         changed = {
             k: v
-            for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order), ("explain", explain), ("instructions", instructions))
+            for k, v in (("minutes", minutes), ("new_list", new_list), ("order", order), ("explain", explain), ("instructions", instructions),
+                         ("background", background))
             if v is not None
         }
         if own_name is not None:
@@ -1252,6 +1258,7 @@ class Lessons:
             order=settings.order,
             instructions=settings.instructions_arg(),
             own_args=own.generate_args(settings.own_name, settings.own_age),
+            background=settings.background_arg(),
         )
         if source is not None and str(source.path) not in args:
             source = None  # LESSON_EXTRA_ARGS の --trip が優先された
@@ -1403,7 +1410,7 @@ class Lessons:
             # the CLI runs inside the with: a trip set in the channel topic is a temporary file that the with removes
             with trip.resolve(self.cfg.trip_path(name), channel) as (source, _warning):
                 args = self.cfg.generate_args(name, False, source.path if source else None, lever_args, minutes=minutes, order=settings.order, instructions=settings.instructions_arg(),
-                                              own_args=own.generate_args(settings.own_name, settings.own_age))
+                                              own_args=own.generate_args(settings.own_name, settings.own_age), background=settings.background_arg())
                 args = [*args, "--dry-run", "--no-audio"]
                 if "--out" in args:
                     args[args.index("--out") + 1] = str(tmp)
@@ -1653,6 +1660,7 @@ def setup(
         instructions="レッスンの指示（「繰り返してください」など）をアイスランド語に置き換えるか",
         own_name="自己紹介で言う自分の名前（1語、例: Kenji。「-」で教材の名前に戻す）",
         own_age="自己紹介で言う自分の年齢（教材にある年齢のときだけ使われます。0 で教材の年齢に戻す）",
+        background="豆知識に日本との比較（銭湯、お土産など）を入れるか",
     )
     @app_commands.choices(
         minutes=minute_choices,
@@ -1668,6 +1676,9 @@ def setup(
         instructions=[
             app_commands.Choice(name=v, value=k) for k, v in usersettings.INSTRUCTIONS.items()
         ],
+        background=[
+            app_commands.Choice(name=v, value=k) for k, v in usersettings.BACKGROUND.items()
+        ],
     )
     async def lesson_configure(
         interaction: discord.Interaction,
@@ -1678,6 +1689,7 @@ def setup(
         instructions: app_commands.Choice[str] | None = None,
         own_name: str | None = None,
         own_age: app_commands.Range[int, 0, 120] | None = None,
+        background: app_commands.Choice[str] | None = None,
     ) -> None:
         await lessons.configure(
             interaction,
@@ -1688,6 +1700,7 @@ def setup(
             instructions.value if instructions else None,
             own_name,
             own_age,
+            background.value if background else None,
         )
 
     async def lesson_auto(interaction: discord.Interaction) -> None:
