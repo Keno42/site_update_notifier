@@ -114,13 +114,18 @@ def key_for(items: list[str]) -> str:
 
 def _rekeyed(entries: dict[str, Entry]) -> dict[str, Entry]:
     """並びに依っていた古いキー («erud_thid_med+mjolk») を ``key_for`` のキーに付け替える (bonus の «bonus:<n>:…» も). 同じキーに
-    なる問いが二つあれば、答えたことのある方 (state が unseen でない方)、どちらも同じなら先にあった方を残す."""
+    なる問いが二つあれば、新しい結果のある方を残す: 答えたことのある方、最後に答えた日 (``last_reviewed``) が新しい方、同じ日なら
+    答えた回数の多い方. それも同じなら先にあった方."""
+
+    def recency(e: Entry) -> tuple:
+        return (e.state != "unseen", e.last_reviewed or "", e.reviews)
+
     out: dict[str, Entry] = {}
     for k, e in entries.items():
         old = "+".join(e.items)
         new = k[: -len(old)] + key_for(e.items) if e.items and k.endswith(old) else k
         kept = out.get(new)
-        if kept is None or (kept.state == "unseen" and e.state != "unseen"):
+        if kept is None or recency(e) > recency(kept):
             out[new] = e
     return out
 
