@@ -1,5 +1,9 @@
 """language-learning-audio #627: a question whose answer's own words differ from its meaning carries them (``literal``: «Ég hef það gott.» is
 "I have it good." for "I'm doing well."). The revealed answer shows them; the question does not, since before the answer they would give it away."""
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import date
@@ -52,6 +56,31 @@ class ReviewLiteralTests(unittest.TestCase):
         q.entries["x"].literal = "I have it good."
         q.refresh_wording({"x": {"prompt": "p", "answer": "Ég hef það gott.", "cues": ["p"], "literal": ""}})
         self.assertEqual(q.entries["x"].literal, "")
+
+
+
+LLA = Path(os.environ.get("LLA_ROOT") or Path(__file__).resolve().parent.parent / "external" / "language-learning-audio")
+
+
+class QuestionsOutputTests(unittest.TestCase):
+    """Review of #255: the refresh reads ``audiolesson questions``'s own output, so an item whose literal was removed (or never had one) must
+    clear a stored literal through it, not only through a hand-written ``"literal": ""``."""
+
+    def test_the_current_questions_output_clears_a_stale_literal(self):
+        if not (LLA / "audiolesson" / "literal.py").is_file():
+            self.skipTest("no language-learning-audio with #640's literal here (external/ or LLA_ROOT)")
+        run = subprocess.run([sys.executable, "-m", "audiolesson.cli", "questions", "curricula/is-en", "--known", "en", "--ids", "eg_hef_thad_gott"],
+                             cwd=LLA, capture_output=True, text=True, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        fresh = json.loads(run.stdout)
+        self.assertIn("literal", fresh["eg_hef_thad_gott"], "every item carries it, \"\" when it has none: an omitted field cannot clear")
+        q = ReviewQueue()
+        now = fresh["eg_hef_thad_gott"]
+        q.entries["eg_hef_thad_gott"] = Entry(items=["eg_hef_thad_gott"], prompt=now["prompt"], answer=now["answer"], source_lesson=60,
+                                              due=D.isoformat(), literal="stale words")
+        q.refresh_wording(fresh)
+        self.assertEqual(q.entries["eg_hef_thad_gott"].literal, now["literal"], "the stored literal follows the current course's")
+        self.assertNotEqual(q.entries["eg_hef_thad_gott"].literal, "stale words")
 
 
 if __name__ == "__main__":
