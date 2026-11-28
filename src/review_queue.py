@@ -57,6 +57,13 @@ def _also(q: dict) -> list[str]:
     return [a for a in also if isinstance(a, str) and a] if isinstance(also, list) else []
 
 
+def _literal(q: dict) -> str:
+    """language-learning-audio #627: the answer's own words where they differ from its meaning («Ég hef það gott.»: "I have it good."); "" when the
+    question has none (an older plan, or an item with no literal authored)."""
+    literal = q.get("literal")
+    return literal.strip() if isinstance(literal, str) else ""
+
+
 @dataclass
 class Entry:
     items: list[str]
@@ -78,6 +85,8 @@ class Entry:
     # language-learning-audio (2026-11-26): ほかにも正解になる答え (plan の review の also、questions の also). 答えと一緒に見せる.
     # 別の正しい言い方をした人が「言えなかった」としないように
     also: list[str] = field(default_factory=list)
+    # language-learning-audio #627: 答えの直訳 (意味と言葉が違う項目だけ). 答えと一緒に見せ、問いには載せない (先に見せると答えがわかってしまう)
+    literal: str = ""
 
     def tier(self, today: date) -> int:
         """小さいほど先に出す. 期限前は 5.
@@ -488,6 +497,7 @@ class ReviewQueue:
                         due=(today + timedelta(days=1)).isoformat(),
                         bonus=True,
                         also=_also(q),
+                        literal=_literal(q),
                     )
                     bonus_added += 1
                     added += 1
@@ -498,6 +508,7 @@ class ReviewQueue:
                 entry = self.entries[key]
                 if q.get("answer"):
                     entry.also = _also(q)  # the plan's answer and its other right answers go together (none from an older plan)
+                    entry.literal = _literal(q)
                 entry.prompt = q.get("prompt") or entry.prompt
                 entry.answer = q.get("answer") or entry.answer
                 continue
@@ -513,6 +524,7 @@ class ReviewQueue:
                 new=is_new,
                 due=due,
                 also=_also(q),
+                literal=_literal(q),
             )
             queued.update(items)
             added += 1
@@ -579,6 +591,7 @@ class ReviewQueue:
                     source_lesson=max(r.source_lesson for r in mine),
                     due=min(r.due for r in mine) or today.isoformat(),
                     also=_also(q),
+                    literal=_literal(q),
                 )
                 self.entries[key] = entry
                 changed += 1
@@ -589,8 +602,11 @@ class ReviewQueue:
             if rewrite and (entry.prompt, entry.answer) != (prompt, answer):
                 if entry.answer != answer:
                     entry.also = _also(q)  # another answer: the old one's other right answers are not this one's (review of #246)
+                    entry.literal = _literal(q)  # and its own words are not this one's (#627)
                 entry.prompt, entry.answer = prompt, answer
                 changed += 1
+            if entry.answer == answer and "literal" in q:
+                entry.literal = _literal(q)  # #627: the answer's own words reach a question queued before they were authored
             if entry.answer == answer and "also" in q:
                 entry.also = _also(q)
         return changed
@@ -609,6 +625,8 @@ class ReviewQueue:
             prompt, answer = now.get("prompt"), now.get("answer")
             if not (isinstance(prompt, str) and isinstance(answer, str) and prompt and answer):
                 continue
+            if e.answer == answer and "literal" in now:
+                e.literal = _literal(now)  # #627: an answer's own words reach a question queued before they were authored
             if e.answer == answer and "also" in now:
                 e.also = _also(now)  # the other right answers reach a question queued before they existed (2026-11-26)
             cues = now.get("cues")
@@ -621,6 +639,7 @@ class ReviewQueue:
             if (e.prompt, e.answer) != (prompt, answer):
                 if e.answer != answer:
                     e.also = _also(now)  # the answer and its other right answers change together (review of #246)
+                    e.literal = _literal(now)
                 e.prompt, e.answer = prompt, answer
                 changed += 1
         return changed
