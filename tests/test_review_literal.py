@@ -43,5 +43,16 @@ class ReviewLiteralTests(unittest.TestCase):
         self.assertEqual((q.entries["x"].answer, q.entries["x"].literal), ("Allt gott.", ""))
 
 
+    def test_an_empty_literal_drops_the_stored_one(self):
+        """Review of language-learning-audio#640: every question now carries ``literal``; "" (a longer answer, or the literal removed) clears it."""
+        q = ReviewQueue()
+        q.entries["x"] = Entry(items=["x"], prompt="p", answer="Ég hef það gott.", source_lesson=60, due=D.isoformat(), literal="I have it good.")
+        q.apply_refinement([{"items": ["x"], "prompt": "p", "answer": "Ég hef það gott.", "literal": ""}], [], D)
+        self.assertEqual(q.entries["x"].literal, "")
+        q.entries["x"].literal = "I have it good."
+        q.refresh_wording({"x": {"prompt": "p", "answer": "Ég hef það gott.", "cues": ["p"], "literal": ""}})
+        self.assertEqual(q.entries["x"].literal, "")
+
+
 if __name__ == "__main__":
     unittest.main()
